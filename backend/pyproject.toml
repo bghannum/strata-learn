@@ -1,0 +1,59 @@
+[project]
+name = "strata-learn-backend"
+version = "0.1.0"
+description = "Strata Learn — repo study guide & quiz generator (backend)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlmodel>=0.0.22",
+    "alembic>=1.14",
+    "asyncpg>=0.30",
+    "psycopg2-binary>=2.9",
+    "greenlet>=3.1",  # required by SQLAlchemy's async ORM session, not pulled in automatically
+    "arq>=0.26",
+    "redis>=5.2",
+    "pydantic-settings>=2.6",
+    "gitpython>=3.1",
+    # Pinned to the same ABI-14 grammar generation as tree-sitter-typescript,
+    # whose latest release (0.23.2) has never shipped an ABI-15 build. Newer
+    # tree-sitter core + newer tree-sitter-python/-javascript (ABI 15) alongside
+    # this ABI-14 typescript grammar segfaults (external-scanner ABI mismatch) —
+    # reproduced and diagnosed in Phase 1. Bump all four together, only once
+    # tree-sitter-typescript ships an ABI-15 release.
+    "tree-sitter==0.23.2",
+    "tree-sitter-python==0.23.6",
+    "tree-sitter-javascript==0.23.1",
+    "tree-sitter-typescript==0.23.2",
+    "anthropic>=0.40",
+    "openai>=1.57",
+    "bcrypt>=4.2",
+    "python-multipart>=0.0.17",
+    "pathspec>=0.12",
+    "rapidfuzz>=3.10",
+    "httpx>=0.28",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection pattern requires calling Depends()/Form()/File()
+# etc. directly in argument defaults — that's how FastAPI recognizes them, not a
+# mutable-default-argument bug (B008's usual target).
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Form", "fastapi.File", "fastapi.Query", "fastapi.Body"]
