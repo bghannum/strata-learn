@@ -13,6 +13,8 @@ Pull an item off this list into the relevant phase task when it becomes relevant
 
 ## Open
 
+- [ ] Frontend has no test runner configured (found while working on: CI pipeline setup, 2026-08-11)
+      `frontend/package.json` only has `lint` (oxlint) and `build` (tsc + vite) scripts — no `test` script, so `.github/workflows/ci.yml`'s `frontend-build` job only lints and builds. Add `vitest` (fits the existing Vite setup) once frontend logic exists that's worth unit-testing.
 - [ ] `entry_points.py` heuristics regex-match raw file bytes, not parsed AST (found while working on: Phase 1 `analysis/entry_points.py`, 2026-08-10)
       Means a file that merely *mentions* `FastAPI(`, `WorkerSettings`, etc. in a comment/string/docstring gets flagged as an entry point, not just files that actually call/define them — confirmed by dogfooding: `entry_points.py` flags itself, since its own reason strings contain the literal pattern text. Low priority — real target repos (Flask/FastAPI apps) are very unlikely to hit this; would need AST-aware call-expression detection (reusing parser.py's tree-sitter trees) to fix properly.
 
