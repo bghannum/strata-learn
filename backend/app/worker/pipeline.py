@@ -11,6 +11,14 @@ git_url jobs clone independently in this process — no dependency on anything t
 API process touched. zip_upload jobs read the uploaded bytes back out of Redis
 (stored by the API under `zip_redis_key`, see api/repos.py) since the worker runs
 in a separate container/process with no shared filesystem with the API.
+
+Deliberately never explicitly deletes `zip_redis_key` here, on any path — arq
+is at-least-once, not exactly-once, and a worker crash between finishing
+successfully and arq recording that success can redeliver the job; an eager
+delete anywhere in this function risks a retry finding no source data left.
+The TTL set on the key when it's written (api/repos.py) is the sole cleanup
+mechanism, on purpose: simpler than tracking "is this outcome truly final"
+per exit path, and correct under redelivery either way.
 """
 
 import asyncio
@@ -88,26 +96,13 @@ async def index_repo(
         async with async_session_factory() as session:
             await fail_snapshot(session, snapshot_id)
         await publish(SnapshotStatus.failed, error=str(exc))
-        if zip_redis_key:
-            # The source itself is bad — a retry would hit the identical
-            # error, so there's no reason to keep the upload around for one.
-            await redis.delete(zip_redis_key)
         return
     except Exception:
         # Anything beyond a validated bad-source error (a parse crash, an
         # unexpected DB failure, ...) still needs to reach a terminal state —
         # otherwise the snapshot sits at "parsing" forever and every WS
         # client watching it hangs indefinitely. Mark failed, notify, then
-        # re-raise so arq still sees/logs it — and, for asyncio.CancelledError
-        # specifically (job timeout / worker shutdown — a BaseException, so
-        # it isn't even caught here, it just passes through to this same
-        # finally on its way out), arq's own retry_jobs logic can actually
-        # redeliver this job. Deliberately NOT deleting zip_redis_key on this
-        # path: a redelivered zip_upload job needs its source data intact,
-        # or it fails immediately with "no longer available" instead of
-        # getting the retry it was supposed to get. The TTL set when the key
-        # was written (api/repos.py) is the eventual backstop if nothing
-        # ever consumes it.
+        # re-raise so arq still sees/logs it.
         async with async_session_factory() as session:
             await fail_snapshot(session, snapshot_id)
         await publish(SnapshotStatus.failed, error="Indexing failed unexpectedly")
@@ -115,8 +110,6 @@ async def index_repo(
     finally:
         cleanup_workspace(job_id)
 
-    if zip_redis_key:
-        await redis.delete(zip_redis_key)
     if snapshot is None:
         return  # target vanished mid-job (see complete_snapshot) — no one left to notify
     await publish(SnapshotStatus.ready)

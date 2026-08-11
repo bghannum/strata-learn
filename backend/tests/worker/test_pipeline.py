@@ -96,7 +96,11 @@ async def test_index_repo_zip_upload_success(redis_pool: ArqRedis, pending_repo_
     snapshot = await _get_snapshot(snapshot_id)
     assert snapshot.status == SnapshotStatus.ready
     assert snapshot.file_count == 1
-    assert await redis_pool.get(zip_redis_key) is None  # consumed + deleted, not left lingering
+    # Deliberately NOT deleted on success either — a worker crash between
+    # this commit and arq recording the success can redeliver the job, and a
+    # retry needs the source data too. Cleanup is the TTL set in api/repos.py
+    # alone, on purpose (see worker/pipeline.py's module docstring).
+    assert await redis_pool.get(zip_redis_key) == buf.getvalue()
 
 
 async def test_index_repo_bad_git_url_marks_failed(redis_pool: ArqRedis, pending_repo_factory) -> None:
