@@ -13,6 +13,8 @@ Pull an item off this list into the relevant phase task when it becomes relevant
 
 ## Open
 
+- [ ] `main` has no branch protection (found while working on: CI pipeline setup, 2026-08-11)
+      GitHub's branch protection and rulesets APIs both refuse private repos on the free tier (`403: Upgrade to GitHub Pro or make this repository public`) — confirmed by trying both. The PR-before-merge habit is documented in `CLAUDE.md` but not technically enforced; nothing stops a direct push to `main`. Revisit if the repo goes public or gets a Pro upgrade.
 - [ ] Frontend has no test runner configured (found while working on: CI pipeline setup, 2026-08-11)
       `frontend/package.json` only has `lint` (oxlint) and `build` (tsc + vite) scripts — no `test` script, so `.github/workflows/ci.yml`'s `frontend-build` job only lints and builds. Add `vitest` (fits the existing Vite setup) once frontend logic exists that's worth unit-testing.
 - [ ] `entry_points.py` heuristics regex-match raw file bytes, not parsed AST (found while working on: Phase 1 `analysis/entry_points.py`, 2026-08-10)
