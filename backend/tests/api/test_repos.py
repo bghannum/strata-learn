@@ -13,6 +13,12 @@ from app.main import app
 
 
 def test_create_repo_from_git_url(git_fixture_repo: Path) -> None:
+    # Phase 1.5: POST /repos returns as soon as the job is enqueued, not once
+    # indexing finishes — status is "pending" here, not "ready". The full
+    # pending -> parsing -> ready path is exercised by
+    # tests/api/test_repo_progress_ws.py and tests/worker/test_pipeline.py,
+    # which actually drive the worker (nothing does here — no arq worker
+    # process runs during the test suite).
     with TestClient(app) as client:
         response = client.post(
             "/repos",
@@ -25,10 +31,7 @@ def test_create_repo_from_git_url(git_fixture_repo: Path) -> None:
 
         snapshot = client.get(f"/repos/{body['id']}/snapshot")
         assert snapshot.status_code == 200
-        snap_body = snapshot.json()
-        assert snap_body["status"] == "ready"
-        assert snap_body["file_count"] == 1
-        assert snap_body["language_summary"] == {"python": 1}
+        assert snapshot.json()["status"] == "pending"
 
 
 def test_create_repo_from_zip_upload(tmp_path: Path) -> None:
@@ -94,9 +97,10 @@ def test_get_repo_not_found_returns_404() -> None:
 
 
 def test_get_snapshot_for_repo_without_one_is_unreachable() -> None:
-    # every repo created via POST /repos gets a snapshot synchronously (D13) —
-    # there's no code path that creates a repo without one, so 404 is only
-    # reachable via a nonexistent repo id
+    # every repo created via POST /repos gets a pending snapshot synchronously
+    # (only the indexing itself is async as of Phase 1.5, D13) — there's no
+    # code path that creates a repo without one, so 404 is only reachable via
+    # a nonexistent repo id
     with TestClient(app) as client:
         response = client.get("/repos/00000000-0000-0000-0000-000000000000/snapshot")
     assert response.status_code == 404

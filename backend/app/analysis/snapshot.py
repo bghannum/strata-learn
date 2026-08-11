@@ -62,20 +62,48 @@ def analyze_source(source_dir: Path) -> StructuralAnalysis:
     )
 
 
-async def persist_snapshot(
-    session: AsyncSession, repo_id: UUID, commit_hash: str | None, analysis: StructuralAnalysis
-) -> AnalysisSnapshot:
-    snapshot = AnalysisSnapshot(
-        repo_id=repo_id,
-        commit_hash=commit_hash,
-        status=SnapshotStatus.ready,
-        file_count=analysis.file_count,
-        language_summary=analysis.language_summary,
-        dependency_graph=analysis.dependency_graph,
-        entry_points=analysis.entry_points,
-    )
+async def create_pending_snapshot(session: AsyncSession, repo_id: UUID) -> AnalysisSnapshot:
+    """Phase 1.5: the API creates this synchronously, before enqueueing the
+    indexing job, so `POST /repos` has a snapshot id to return immediately.
+    `complete_snapshot`/`fail_snapshot` fill in the rest once the worker runs."""
+    snapshot = AnalysisSnapshot(repo_id=repo_id, status=SnapshotStatus.pending)
     session.add(snapshot)
-    await session.flush()  # assigns snapshot.id, needed for CodeUnit.snapshot_id below
+    await session.commit()
+    await session.refresh(snapshot)
+    return snapshot
+
+
+async def set_snapshot_status(session: AsyncSession, snapshot_id: UUID, status: SnapshotStatus) -> None:
+    snapshot = await session.get(AnalysisSnapshot, snapshot_id)
+    if snapshot is None:
+        return  # repo/snapshot deleted out from under an in-flight job — nothing to update
+    snapshot.status = status
+    session.add(snapshot)
+    await session.commit()
+
+
+async def complete_snapshot(
+    session: AsyncSession, snapshot_id: UUID, commit_hash: str | None, analysis: StructuralAnalysis
+) -> AnalysisSnapshot | None:
+    """Fills in a pending snapshot with analysis results and marks it ready.
+    Run by the worker (worker/pipeline.py) after analyze_source succeeds.
+
+    Returns None if the snapshot is gone by the time the job finishes (repo
+    deleted mid-index, or — in dev/test — an orphaned job outliving whatever
+    created its target row). Matches set_snapshot_status's tolerance above:
+    a vanished target is "nothing to do", not a crash-worthy error."""
+    snapshot = await session.get(AnalysisSnapshot, snapshot_id)
+    if snapshot is None:
+        return None
+
+    snapshot.commit_hash = commit_hash
+    snapshot.status = SnapshotStatus.ready
+    snapshot.file_count = analysis.file_count
+    snapshot.language_summary = analysis.language_summary
+    snapshot.dependency_graph = analysis.dependency_graph
+    snapshot.entry_points = analysis.entry_points
+    session.add(snapshot)
+    await session.flush()  # snapshot.id already exists (pending row) — flush just applies the field updates
 
     for pf in analysis.parsed_files:
         for unit in pf.units:
@@ -95,3 +123,12 @@ async def persist_snapshot(
     await session.commit()
     await session.refresh(snapshot)
     return snapshot
+
+
+async def fail_snapshot(session: AsyncSession, snapshot_id: UUID) -> None:
+    """Run by the worker when the pipeline can't complete (bad source, parse
+    crash, etc.). No persisted error detail yet — AnalysisSnapshot has no
+    failure-reason column; the WS progress message carries it transiently
+    instead (see worker/pipeline.py). Revisit if failures need to be
+    diagnosable after the fact, not just at the moment they happen."""
+    await set_snapshot_status(session, snapshot_id, SnapshotStatus.failed)

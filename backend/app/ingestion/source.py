@@ -38,6 +38,17 @@ def cleanup_workspace(job_id: uuid.UUID) -> None:
     shutil.rmtree(JOBS_ROOT / str(job_id), ignore_errors=True)
 
 
+def check_git_url_reachable(url: str) -> None:
+    """Cheap synchronous pre-check before enqueueing a clone job — `git ls-remote`
+    talks to the remote without fetching any objects, so an unreachable host or
+    nonexistent repo fails fast (422) at request time instead of only surfacing
+    as an async `status=failed` after the worker picks up the job."""
+    try:
+        git.cmd.Git().ls_remote(url)
+    except git.GitCommandError as exc:
+        raise SourcePreparationError(f"Could not reach repository: {exc}") from exc
+
+
 def clone_git_repo(url: str, job_id: uuid.UUID) -> tuple[Path, str | None]:
     """Shallow-clone `url` into a scoped job workspace. Returns (source_dir, commit_hash)."""
     source_dir = job_workspace(job_id) / "source"
@@ -54,17 +65,24 @@ def clone_git_repo(url: str, job_id: uuid.UUID) -> tuple[Path, str | None]:
     return source_dir, commit_hash
 
 
-def extract_zip_upload(zip_file: BinaryIO, job_id: uuid.UUID) -> Path:
-    """Validate then extract a zip upload into a scoped job workspace. Returns source_dir.
+def validate_zip_upload(zip_file: BinaryIO, resolved_dest: Path | None = None) -> None:
+    """Guards against a resource-exhaustion upload (too many files / too much
+    uncompressed data — a "zip bomb") and zip-slip path traversal, without
+    extracting anything — only reads the central directory, so this is cheap
+    enough to run synchronously at request time (before enqueueing the actual
+    extraction job) as well as again in the worker before extracting.
 
-    Guards against both a resource-exhaustion upload (too many files / too much
-    uncompressed data — a "zip bomb") and zip-slip path traversal, before extracting
-    anything, rather than letting tree-sitter parsing silently run for minutes on an
-    oversized upload (§8 zip upload guard).
+    `resolved_dest` is only needed to validate member paths against a real
+    extraction target; omit it for a pre-check that doesn't have one yet (zip-slip
+    membership is still checked against a throwaway root, so traversal is still
+    caught, just not tied to the eventual real destination).
     """
-    source_dir = job_workspace(job_id) / "source"
-    source_dir.mkdir(parents=True, exist_ok=True)
-    resolved_dest = source_dir.resolve()
+    # .resolve() unconditionally, even when the caller already passed a
+    # resolved path — the fallback specifically needs it: tempfile.gettempdir()
+    # returns an unresolved path (/tmp on macOS is a symlink to /private/tmp),
+    # so comparing it as-is against a member path that .resolve() has already
+    # expanded made every valid entry look like it "escaped" the directory.
+    dest = (resolved_dest or Path(tempfile.gettempdir())).resolve()
 
     with zipfile.ZipFile(zip_file) as zf:
         infolist = zf.infolist()
@@ -76,13 +94,27 @@ def extract_zip_upload(zip_file: BinaryIO, job_id: uuid.UUID) -> Path:
 
         total_uncompressed = 0
         for info in infolist:
-            _validate_zip_member_path(info.filename, resolved_dest)
+            _validate_zip_member_path(info.filename, dest)
             total_uncompressed += info.file_size
             if total_uncompressed > settings.zip_upload_max_bytes:
                 raise SourcePreparationError(
                     f"Zip contents exceed the {settings.zip_upload_max_bytes}-byte limit"
                 )
 
+
+def extract_zip_upload(zip_file: BinaryIO, job_id: uuid.UUID) -> Path:
+    """Validate then extract a zip upload into a scoped job workspace. Returns source_dir.
+
+    Re-validates even if the caller already called `validate_zip_upload` — cheap,
+    and this function needs to be safe to call on its own (the worker's only
+    guard against a corrupted/tampered Redis-stored upload)."""
+    source_dir = job_workspace(job_id) / "source"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    resolved_dest = source_dir.resolve()
+
+    validate_zip_upload(zip_file, resolved_dest)
+    zip_file.seek(0)
+    with zipfile.ZipFile(zip_file) as zf:
         zf.extractall(source_dir)
 
     return source_dir
