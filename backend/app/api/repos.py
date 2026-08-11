@@ -42,10 +42,15 @@ from app.worker.pipeline import progress_channel
 
 router = APIRouter(prefix="/repos", tags=["repos"])
 
-# Safety net only — worker/pipeline.py deletes the key itself once the job
-# consumes it (success or failure). This just bounds how long an upload can
-# linger in Redis if a job is enqueued but never runs (e.g. worker crash).
-ZIP_UPLOAD_TTL_SECONDS = 3600
+# Sole cleanup mechanism for zip uploads (worker/pipeline.py deliberately
+# never deletes this key itself — see its module docstring). Wide on purpose:
+# the job needs the key to still exist whenever it actually runs, including
+# after a redelivery, and a worker that's down or badly backlogged for longer
+# than a short TTL would otherwise deterministically fail an otherwise-valid
+# upload through no fault of its own. 24h comfortably covers a worker outage
+# on a solo local setup without the key lingering indefinitely if a job is
+# enqueued but genuinely never runs.
+ZIP_UPLOAD_TTL_SECONDS = 24 * 60 * 60
 
 
 @router.post("", response_model=Repo, status_code=201)
