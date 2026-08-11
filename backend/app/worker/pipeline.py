@@ -63,14 +63,19 @@ async def index_repo(
             payload["error"] = error
         await redis.publish(channel, json.dumps(payload))
 
-    async with async_session_factory() as session:
-        await set_snapshot_status(session, snapshot_id, SnapshotStatus.parsing)
-    await publish(SnapshotStatus.parsing)
-
     # job_id scopes the temp workspace (ingestion/source.py) — snapshot_id is
     # already a unique per-job identifier, no need to mint a separate one.
     job_id = snapshot_id
     try:
+        # Inside the try, not before it: if this specific publish is what
+        # fails (Redis hiccup right here), the snapshot's already committed
+        # "parsing" — leaving it unguarded would strand it there forever with
+        # no failure ever recorded, same class of bug as an uncaught
+        # exception later in the pipeline.
+        async with async_session_factory() as session:
+            await set_snapshot_status(session, snapshot_id, SnapshotStatus.parsing)
+        await publish(SnapshotStatus.parsing)
+
         # arq runs concurrent jobs on one event loop, same as the API process
         # — clone_git_repo/extract_zip_upload/analyze_source are all blocking
         # (subprocess + disk I/O + CPU-bound parsing). Run them in a thread so
