@@ -68,6 +68,16 @@ npm install
 npm run dev
 ```
 
+## Git hooks
+
+One-time per clone, to enable the local pre-push Codex review (see `CLAUDE.md` "Git workflow"):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Requires the [Codex CLI](https://developers.openai.com/codex) installed and logged in (`codex login`, ChatGPT subscription auth — not an API key). Advisory only: a missing CLI or a failed review just skips, never blocks the push.
+
 ## Database migrations
 
 Migrations are managed with Alembic, run from `backend/` with the venv active:
