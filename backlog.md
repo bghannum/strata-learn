@@ -13,6 +13,8 @@ Pull an item off this list into the relevant phase task when it becomes relevant
 
 ## Open
 
+- [ ] CI's `backend-test` job has no Redis service container (found while working on: CI pipeline setup, 2026-08-11)
+      `.github/workflows/ci.yml` only provisions Postgres. Phase 1.5 (`PROJECT_PLAN.md` §12) adds `arq` + Redis — any test exercising that path will pass locally (Redis already running via `docker compose`) and fail in CI until a Redis service container + healthcheck is added to the job, mirroring the Postgres setup. Add this at the start of Phase 1.5, not after CI breaks on it.
 - [ ] `main` has no branch protection (found while working on: CI pipeline setup, 2026-08-11)
       GitHub's branch protection and rulesets APIs both refuse private repos on the free tier (`403: Upgrade to GitHub Pro or make this repository public`) — confirmed by trying both. The PR-before-merge habit is documented in `CLAUDE.md` but not technically enforced; nothing stops a direct push to `main`. Revisit if the repo goes public or gets a Pro upgrade.
 - [ ] Frontend has no test runner configured (found while working on: CI pipeline setup, 2026-08-11)
