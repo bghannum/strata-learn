@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Advisory local Codex review, run automatically before every push.
+#
+# Never blocks the push — Codex review is advisory-only by project convention
+# (see CLAUDE.md "Git workflow"). A missing `codex` CLI or a failed review just
+# skips instead of failing the push. Requires `codex login` once, via ChatGPT
+# subscription auth (not an API key) — see developers.openai.com/codex.
+set -uo pipefail
+
+current_branch=$(git rev-parse --abbrev-ref HEAD)
+repo_root=$(git rev-parse --show-toplevel)
+output_file="$repo_root/CODEX_CODE_REVIEW.md"
+
+[ "$current_branch" = "main" ] && exit 0
+
+if ! command -v codex >/dev/null 2>&1; then
+  echo "pre-push: codex CLI not found, skipping local review (see developers.openai.com/codex)" >&2
+  exit 0
+fi
+
+echo "pre-push: running local Codex review against main..." >&2
+if codex exec review --base main --title "$current_branch" --output-last-message "$output_file"; then
+  echo "pre-push: review written to CODEX_CODE_REVIEW.md — read it before opening/updating the PR." >&2
+else
+  echo "pre-push: Codex review failed to run, skipping (push continues)" >&2
+fi
+
+exit 0
