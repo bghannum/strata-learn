@@ -88,24 +88,35 @@ async def index_repo(
         async with async_session_factory() as session:
             await fail_snapshot(session, snapshot_id)
         await publish(SnapshotStatus.failed, error=str(exc))
+        if zip_redis_key:
+            # The source itself is bad — a retry would hit the identical
+            # error, so there's no reason to keep the upload around for one.
+            await redis.delete(zip_redis_key)
         return
     except Exception:
         # Anything beyond a validated bad-source error (a parse crash, an
         # unexpected DB failure, ...) still needs to reach a terminal state —
         # otherwise the snapshot sits at "parsing" forever and every WS
         # client watching it hangs indefinitely. Mark failed, notify, then
-        # re-raise so arq still sees/logs/retries the underlying failure —
-        # this doesn't replace that, it just stops it from being silent to
-        # everyone downstream of the job itself.
+        # re-raise so arq still sees/logs it — and, for asyncio.CancelledError
+        # specifically (job timeout / worker shutdown — a BaseException, so
+        # it isn't even caught here, it just passes through to this same
+        # finally on its way out), arq's own retry_jobs logic can actually
+        # redeliver this job. Deliberately NOT deleting zip_redis_key on this
+        # path: a redelivered zip_upload job needs its source data intact,
+        # or it fails immediately with "no longer available" instead of
+        # getting the retry it was supposed to get. The TTL set when the key
+        # was written (api/repos.py) is the eventual backstop if nothing
+        # ever consumes it.
         async with async_session_factory() as session:
             await fail_snapshot(session, snapshot_id)
         await publish(SnapshotStatus.failed, error="Indexing failed unexpectedly")
         raise
     finally:
         cleanup_workspace(job_id)
-        if zip_redis_key:
-            await redis.delete(zip_redis_key)
 
+    if zip_redis_key:
+        await redis.delete(zip_redis_key)
     if snapshot is None:
         return  # target vanished mid-job (see complete_snapshot) — no one left to notify
     await publish(SnapshotStatus.ready)

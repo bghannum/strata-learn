@@ -153,6 +153,40 @@ async def test_index_repo_unexpected_exception_marks_failed_and_reraises(
     assert snapshot.status == SnapshotStatus.failed
 
 
+async def test_index_repo_zip_upload_unexpected_exception_preserves_zip_key(
+    redis_pool: ArqRedis, pending_repo_factory, monkeypatch
+) -> None:
+    # Complements the test above: for zip uploads specifically, the source
+    # data only ever lives in Redis (no re-fetchable URL like git_url has),
+    # so deleting it on a path arq might redeliver (a job timeout/cancellation
+    # reaches this same finally as a BaseException, and arq's own retry_jobs
+    # logic can redeliver that) would make that redelivery unrecoverable.
+    def _boom(source_dir):
+        raise RuntimeError("simulated parser crash")
+
+    monkeypatch.setattr(pipeline_module, "analyze_source", _boom)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("hello.py", "def hello():\n    return 'hi'\n")
+    zip_bytes = buf.getvalue()
+
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.zip_upload, "upload.zip")
+    zip_redis_key = f"zip-upload:{snapshot_id}"
+    await redis_pool.set(zip_redis_key, zip_bytes)
+
+    with pytest.raises(RuntimeError, match="simulated parser crash"):
+        await index_repo(
+            {"redis": redis_pool},
+            snapshot_id=snapshot_id,
+            repo_id=repo_id,
+            source_type=SourceType.zip_upload.value,
+            zip_redis_key=zip_redis_key,
+        )
+
+    assert await redis_pool.get(zip_redis_key) == zip_bytes  # preserved for a possible redelivery
+
+
 async def test_index_repo_tolerates_snapshot_deleted_mid_job(
     redis_pool: ArqRedis, git_fixture_repo: Path, pending_repo_factory
 ) -> None:
