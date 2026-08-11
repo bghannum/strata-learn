@@ -12,8 +12,10 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from uuid import UUID
 
+import pytest
 from arq.connections import ArqRedis
 
+import app.worker.pipeline as pipeline_module
 from app.db.models import AnalysisSnapshot, Repo, SnapshotStatus, SourceType
 from app.db.session import async_session_factory
 from app.worker.pipeline import index_repo, progress_channel
@@ -113,6 +115,39 @@ async def test_index_repo_bad_git_url_marks_failed(redis_pool: ArqRedis, pending
     messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)
     assert [m["status"] for m in messages] == [SnapshotStatus.parsing.value, SnapshotStatus.failed.value]
     assert "error" in messages[-1]
+
+    snapshot = await _get_snapshot(snapshot_id)
+    assert snapshot.status == SnapshotStatus.failed
+
+
+async def test_index_repo_unexpected_exception_marks_failed_and_reraises(
+    redis_pool: ArqRedis, git_fixture_repo: Path, pending_repo_factory, monkeypatch
+) -> None:
+    # Before the fix, only SourcePreparationError was caught — a crash from
+    # anywhere else (parser bug, unexpected DB failure, ...) propagated with
+    # no fail_snapshot/publish ever happening, leaving the snapshot at
+    # "parsing" forever and every WS client watching it hanging indefinitely.
+    def _boom(source_dir):
+        raise RuntimeError("simulated parser crash")
+
+    monkeypatch.setattr(pipeline_module, "analyze_source", _boom)
+
+    git_url = git_fixture_repo.as_uri()
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError, match="simulated parser crash"):
+            await index_repo(
+                {"redis": redis_pool},
+                snapshot_id=snapshot_id,
+                repo_id=repo_id,
+                source_type=SourceType.git_url.value,
+                git_url=git_url,
+            )
+
+    messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)
+    assert [m["status"] for m in messages] == [SnapshotStatus.parsing.value, SnapshotStatus.failed.value]
+    assert messages[-1]["error"] == "Indexing failed unexpectedly"
 
     snapshot = await _get_snapshot(snapshot_id)
     assert snapshot.status == SnapshotStatus.failed

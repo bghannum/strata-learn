@@ -9,6 +9,7 @@ synchronously via a cheap pre-check (git ls-remote / zip central-directory read)
 mid-extract still surface async, as `status=failed` over WS /repos/{id}/progress.
 """
 
+import asyncio
 import io
 import json
 from uuid import UUID
@@ -27,7 +28,8 @@ from fastapi import (
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.analysis.snapshot import create_pending_snapshot
+from app.analysis.snapshot import create_pending_snapshot, fail_snapshot
+from app.config import settings
 from app.db.models import AnalysisSnapshot, Repo, SnapshotStatus, SourceType
 from app.db.session import get_session
 from app.ingestion.source import (
@@ -62,14 +64,27 @@ async def create_repo(
             raise HTTPException(422, "git_url is required when source_type is git_url")
         source_uri = git_url
         try:
-            check_git_url_reachable(git_url)
+            # git ls-remote shells out and blocks on network I/O — run it off
+            # the event loop so one slow/unresponsive remote can't stall every
+            # other concurrent request (including other clients' progress
+            # websockets) for its duration. Bounded with a timeout for the
+            # same reason: don't let it hang indefinitely either.
+            await asyncio.wait_for(asyncio.to_thread(check_git_url_reachable, git_url), timeout=10)
+        except TimeoutError as exc:
+            raise HTTPException(422, "Timed out reaching repository") from exc
         except SourcePreparationError as exc:
             raise HTTPException(422, str(exc)) from exc
     else:
         if file is None or not file.filename:
             raise HTTPException(422, "file is required when source_type is zip_upload")
         source_uri = file.filename
-        zip_bytes = await file.read()
+        # Bounded read, not file.read() — an unbounded read buffers the whole
+        # upload into memory before validate_zip_upload's size check ever
+        # runs. Reading max_bytes+1 caps worst-case memory to that regardless
+        # of how large the actual upload is.
+        zip_bytes = await file.read(settings.zip_upload_max_bytes + 1)
+        if len(zip_bytes) > settings.zip_upload_max_bytes:
+            raise HTTPException(422, f"Upload exceeds the {settings.zip_upload_max_bytes}-byte limit")
         try:
             validate_zip_upload(io.BytesIO(zip_bytes))
         except SourcePreparationError as exc:
@@ -90,18 +105,26 @@ async def create_repo(
     await session.refresh(repo)
 
     zip_redis_key: str | None = None
-    if zip_bytes is not None:
-        zip_redis_key = f"zip-upload:{snapshot.id}"
-        await redis.set(zip_redis_key, zip_bytes, ex=ZIP_UPLOAD_TTL_SECONDS)
+    try:
+        if zip_bytes is not None:
+            zip_redis_key = f"zip-upload:{snapshot.id}"
+            await redis.set(zip_redis_key, zip_bytes, ex=ZIP_UPLOAD_TTL_SECONDS)
 
-    await redis.enqueue_job(
-        "index_repo",
-        snapshot_id=snapshot.id,
-        repo_id=repo.id,
-        source_type=source_type.value,
-        git_url=git_url,
-        zip_redis_key=zip_redis_key,
-    )
+        await redis.enqueue_job(
+            "index_repo",
+            snapshot_id=snapshot.id,
+            repo_id=repo.id,
+            source_type=source_type.value,
+            git_url=git_url,
+            zip_redis_key=zip_redis_key,
+        )
+    except Exception as exc:
+        # repo + pending snapshot are already committed above — left alone, a
+        # Redis failure here would strand them at "pending" forever (no job
+        # ever gets enqueued to move them forward) while the client sees a
+        # bare 500 suggesting nothing was created at all.
+        await fail_snapshot(session, snapshot.id)
+        raise HTTPException(503, "Could not queue indexing job — try again shortly") from exc
 
     return repo
 

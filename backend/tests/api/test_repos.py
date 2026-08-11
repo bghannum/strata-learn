@@ -5,11 +5,14 @@ global asyncpg-backed async engine (created once at import time) then raises
 the context manager pins one loop for the whole block.
 """
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from app.config import settings
 from app.main import app
+from app.redis_pool import get_redis_pool
 
 
 def test_create_repo_from_git_url(git_fixture_repo: Path) -> None:
@@ -52,6 +55,58 @@ def test_create_repo_from_zip_upload(tmp_path: Path) -> None:
     assert body["source_type"] == "zip_upload"
     assert body["source_uri"] == "upload.zip"
     assert body["display_name"] == "zip test"
+
+
+def test_create_repo_zip_upload_over_size_limit_returns_422(tmp_path: Path, monkeypatch) -> None:
+    # Guards the bounded-read fix: file.read(max_bytes + 1) + a length check,
+    # instead of file.read() unconditionally buffering the whole upload
+    # before any size check ran.
+    monkeypatch.setattr(settings, "zip_upload_max_bytes", 10)
+    import zipfile
+
+    zip_path = tmp_path / "upload.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("hello.py", "def hello():\n    return 'hi'\n")
+
+    with TestClient(app) as client, open(zip_path, "rb") as f:
+        response = client.post(
+            "/repos",
+            data={"source_type": "zip_upload"},
+            files={"file": ("upload.zip", f, "application/zip")},
+        )
+    assert response.status_code == 422
+
+
+def test_create_repo_enqueue_failure_marks_snapshot_failed(git_fixture_repo: Path) -> None:
+    # Simulates Redis going away between the repo/snapshot commit and the
+    # enqueue call — a real gap: those rows are already durably committed by
+    # that point. Without the fix, they'd be stranded at "pending" forever
+    # while the client sees a bare, unexplained 500.
+    async def broken_redis_pool() -> AsyncIterator[object]:
+        class _BrokenRedis:
+            async def set(self, *args, **kwargs):
+                raise ConnectionError("simulated redis outage")
+
+            async def enqueue_job(self, *args, **kwargs):
+                raise ConnectionError("simulated redis outage")
+
+        yield _BrokenRedis()
+
+    app.dependency_overrides[get_redis_pool] = broken_redis_pool
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/repos",
+                data={"source_type": "git_url", "git_url": git_fixture_repo.as_uri()},
+            )
+            assert response.status_code == 503
+
+            listed = client.get("/repos").json()
+            assert len(listed) == 1  # committed despite the 503 — exactly what's being guarded against
+            snapshot = client.get(f"/repos/{listed[0]['id']}/snapshot").json()
+            assert snapshot["status"] == "failed"
+    finally:
+        app.dependency_overrides.pop(get_redis_pool, None)
 
 
 def test_create_repo_bad_git_url_returns_422() -> None:

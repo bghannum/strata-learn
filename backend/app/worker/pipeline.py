@@ -72,18 +72,31 @@ async def index_repo(
             commit_hash = None
 
         analysis = analyze_source(source_dir)
+
+        async with async_session_factory() as session:
+            snapshot = await complete_snapshot(session, snapshot_id, commit_hash, analysis)
     except SourcePreparationError as exc:
         async with async_session_factory() as session:
             await fail_snapshot(session, snapshot_id)
         await publish(SnapshotStatus.failed, error=str(exc))
         return
+    except Exception:
+        # Anything beyond a validated bad-source error (a parse crash, an
+        # unexpected DB failure, ...) still needs to reach a terminal state —
+        # otherwise the snapshot sits at "parsing" forever and every WS
+        # client watching it hangs indefinitely. Mark failed, notify, then
+        # re-raise so arq still sees/logs/retries the underlying failure —
+        # this doesn't replace that, it just stops it from being silent to
+        # everyone downstream of the job itself.
+        async with async_session_factory() as session:
+            await fail_snapshot(session, snapshot_id)
+        await publish(SnapshotStatus.failed, error="Indexing failed unexpectedly")
+        raise
     finally:
         cleanup_workspace(job_id)
         if zip_redis_key:
             await redis.delete(zip_redis_key)
 
-    async with async_session_factory() as session:
-        snapshot = await complete_snapshot(session, snapshot_id, commit_hash, analysis)
     if snapshot is None:
         return  # target vanished mid-job (see complete_snapshot) — no one left to notify
     await publish(SnapshotStatus.ready)
