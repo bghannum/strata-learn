@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from app.analysis.snapshot import analyze_source
+from sqlmodel import select
+
+from app.analysis.snapshot import analyze_source, complete_snapshot
+from app.db.models import CodeUnit, SourceType
+from app.db.session import async_session_factory
 
 
 def _write(root: Path, relative_path: str, content: str) -> None:
@@ -49,3 +53,28 @@ def test_analyze_source_handles_empty_repo(tmp_path: Path) -> None:
     assert result.language_summary == {}
     assert result.dependency_graph == {"nodes": [], "edges": []}
     assert result.entry_points == []
+
+
+async def test_complete_snapshot_is_idempotent_under_redelivery(tmp_path: Path, pending_repo_factory) -> None:
+    # arq is at-least-once, not exactly-once — a worker crash/restart between
+    # complete_snapshot's commit and arq's own ack bookkeeping can redeliver
+    # the same job. A second call for the same snapshot must not duplicate
+    # CodeUnit rows on top of what the first call already wrote.
+    _write(tmp_path, "app.py", "def hello():\n    return 'hi'\n")
+    analysis = analyze_source(tmp_path)
+
+    _, snapshot_id = await pending_repo_factory(SourceType.git_url, "irrelevant-for-this-test")
+
+    async with async_session_factory() as session:
+        await complete_snapshot(session, snapshot_id, "abc123", analysis)
+    async with async_session_factory() as session:
+        await complete_snapshot(session, snapshot_id, "abc123", analysis)  # simulated redelivery
+
+    async with async_session_factory() as session:
+        result = await session.exec(select(CodeUnit).where(CodeUnit.snapshot_id == snapshot_id))
+        units = result.all()
+
+    # One module-level unit + one function-level unit ("hello") per parsed
+    # file — confirmed empirically, not assumed. The real assertion here is
+    # that it's still 2 after the second (simulated-redelivery) call, not 4.
+    assert len(units) == 2

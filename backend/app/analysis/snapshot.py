@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
 
+from sqlmodel import delete
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.analysis.dependency_graph import FileInfo, build_dependency_graph
@@ -104,6 +105,13 @@ async def complete_snapshot(
     snapshot.entry_points = analysis.entry_points
     session.add(snapshot)
     await session.flush()  # snapshot.id already exists (pending row) — flush just applies the field updates
+
+    # arq is at-least-once, not exactly-once — a redelivered job (worker
+    # crash/restart between this commit and arq's own ack bookkeeping) would
+    # otherwise re-insert every CodeUnit on top of what a prior attempt
+    # already wrote. Clearing first makes this idempotent: redelivery
+    # produces the same end state, not duplicates.
+    await session.exec(delete(CodeUnit).where(CodeUnit.snapshot_id == snapshot.id))
 
     for pf in analysis.parsed_files:
         for unit in pf.units:

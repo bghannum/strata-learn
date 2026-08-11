@@ -13,6 +13,7 @@ API process touched. zip_upload jobs read the uploaded bytes back out of Redis
 in a separate container/process with no shared filesystem with the API.
 """
 
+import asyncio
 import io
 import json
 from uuid import UUID
@@ -62,16 +63,24 @@ async def index_repo(
     # already a unique per-job identifier, no need to mint a separate one.
     job_id = snapshot_id
     try:
+        # arq runs concurrent jobs on one event loop, same as the API process
+        # — clone_git_repo/extract_zip_upload/analyze_source are all blocking
+        # (subprocess + disk I/O + CPU-bound parsing). Run them in a thread so
+        # a slow clone or a big repo's parse can't stall every other queued
+        # job, progress publishing, and this worker's own liveness along with
+        # it. (The API's own pre-check bounds obviously-bad URLs before
+        # enqueueing, but a remote can still turn slow *after* that passes —
+        # this is a separate, later window it doesn't cover.)
         if source_type == SourceType.git_url.value:
-            source_dir, commit_hash = clone_git_repo(git_url, job_id)  # type: ignore[arg-type]
+            source_dir, commit_hash = await asyncio.to_thread(clone_git_repo, git_url, job_id)  # type: ignore[arg-type]
         else:
             zip_bytes = await redis.get(zip_redis_key)
             if zip_bytes is None:
                 raise SourcePreparationError("Uploaded zip is no longer available (expired or already consumed)")
-            source_dir = extract_zip_upload(io.BytesIO(zip_bytes), job_id)
+            source_dir = await asyncio.to_thread(extract_zip_upload, io.BytesIO(zip_bytes), job_id)
             commit_hash = None
 
-        analysis = analyze_source(source_dir)
+        analysis = await asyncio.to_thread(analyze_source, source_dir)
 
         async with async_session_factory() as session:
             snapshot = await complete_snapshot(session, snapshot_id, commit_hash, analysis)
