@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.config import settings
 from app.main import app
@@ -105,6 +106,29 @@ def test_create_repo_enqueue_failure_marks_snapshot_failed(git_fixture_repo: Pat
             assert len(listed) == 1  # committed despite the 503 — exactly what's being guarded against
             snapshot = client.get(f"/repos/{listed[0]['id']}/snapshot").json()
             assert snapshot["status"] == "failed"
+    finally:
+        app.dependency_overrides.pop(get_redis_pool, None)
+
+
+def test_create_repo_redis_unreachable_at_dependency_time_returns_503(git_fixture_repo: Path) -> None:
+    # Distinct from the enqueue-failure case above: here Redis fails while
+    # get_redis_pool's own create_pool() call is resolving, before
+    # create_repo's body runs at all — so nothing's committed to clean up,
+    # and api/repos.py's own try/except never even gets a chance to fire.
+    # This is main.py's app-level RedisError handler's job specifically.
+    async def failing_redis_pool() -> AsyncIterator[object]:
+        raise RedisConnectionError("simulated: redis completely unreachable")
+        yield  # pragma: no cover - unreachable; keeps this a generator so it matches get_redis_pool's shape
+
+    app.dependency_overrides[get_redis_pool] = failing_redis_pool
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/repos",
+                data={"source_type": "git_url", "git_url": git_fixture_repo.as_uri()},
+            )
+            assert response.status_code == 503
+            assert client.get("/repos").json() == []  # nothing committed — dependency failed first
     finally:
         app.dependency_overrides.pop(get_redis_pool, None)
 

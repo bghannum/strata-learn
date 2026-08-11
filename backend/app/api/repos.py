@@ -67,11 +67,11 @@ async def create_repo(
             # git ls-remote shells out and blocks on network I/O — run it off
             # the event loop so one slow/unresponsive remote can't stall every
             # other concurrent request (including other clients' progress
-            # websockets) for its duration. Bounded with a timeout for the
-            # same reason: don't let it hang indefinitely either.
-            await asyncio.wait_for(asyncio.to_thread(check_git_url_reachable, git_url), timeout=10)
-        except TimeoutError as exc:
-            raise HTTPException(422, "Timed out reaching repository") from exc
+            # websockets) for its duration. The timeout itself is enforced
+            # inside check_git_url_reachable via kill_after_timeout, which
+            # actually kills the git subprocess — an asyncio-level timeout
+            # here alone couldn't do that, only stop waiting on it.
+            await asyncio.to_thread(check_git_url_reachable, git_url)
         except SourcePreparationError as exc:
             raise HTTPException(422, str(exc)) from exc
     else:

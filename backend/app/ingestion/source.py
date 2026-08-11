@@ -38,13 +38,20 @@ def cleanup_workspace(job_id: uuid.UUID) -> None:
     shutil.rmtree(JOBS_ROOT / str(job_id), ignore_errors=True)
 
 
-def check_git_url_reachable(url: str) -> None:
+def check_git_url_reachable(url: str, timeout_seconds: float = 10) -> None:
     """Cheap synchronous pre-check before enqueueing a clone job — `git ls-remote`
     talks to the remote without fetching any objects, so an unreachable host or
     nonexistent repo fails fast (422) at request time instead of only surfacing
-    as an async `status=failed` after the worker picks up the job."""
+    as an async `status=failed` after the worker picks up the job.
+
+    kill_after_timeout bounds the actual subprocess, not just the coroutine
+    awaiting it — an outer asyncio-level timeout alone (e.g. asyncio.wait_for
+    around asyncio.to_thread) can't stop a hung `git` process; it only stops
+    the caller from waiting on it, leaving the process and its thread running
+    indefinitely. Confirmed empirically: a hung remote gets SIGKILLed within
+    ~timeout_seconds and raises GitCommandError, not a bare hang."""
     try:
-        git.cmd.Git().ls_remote(url)
+        git.cmd.Git().ls_remote(url, kill_after_timeout=timeout_seconds)
     except git.GitCommandError as exc:
         raise SourcePreparationError(f"Could not reach repository: {exc}") from exc
 
