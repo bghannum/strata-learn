@@ -174,14 +174,22 @@ async def extract_tradeoffs(
         output = response.parsed
         assert isinstance(output, TradeoffCardOutput)
 
+        validated_refs = [ref.model_dump() for ref in output.evidence_refs if _valid_ref(ref, module_units_by_path)]
+        if not validated_refs:
+            # The seed citation only explains *why* this file was flagged as a
+            # decision point (the deterministic heuristic) — it doesn't
+            # substantiate the LLM's actual decision/reasoning/cost claims.
+            # Persisting the card with only the seed would look grounded
+            # without actually being grounded (found via Codex's Phase 2
+            # pre-push review). Drop the card rather than fake it.
+            continue
+
         seed_citation = {
             "file_path": candidate.file_path,
             "line_start": candidate.line_start,
             "line_end": candidate.line_end,
         }
-        evidence_refs = [seed_citation, *(
-            ref.model_dump() for ref in output.evidence_refs if _valid_ref(ref, module_units_by_path)
-        )]
+        evidence_refs = [seed_citation, *validated_refs]
 
         results.append(
             TradeoffCardResult(

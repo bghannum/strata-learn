@@ -111,6 +111,53 @@ async def test_extract_tradeoffs_seeds_citation_and_validates_refs(tmp_path: Pat
     assert "import arq" in llm.calls[0].messages[0].content
 
 
+async def test_extract_tradeoffs_drops_card_with_no_validated_refs(tmp_path: Path) -> None:
+    # Found via Codex's Phase 2 pre-push review: the seed citation (from the
+    # deterministic decision-point heuristic) only explains why this file was
+    # flagged — it doesn't substantiate the LLM's actual decision/reasoning
+    # claims. A card with zero LLM-validated refs must be dropped, not
+    # persisted with only the seed making it look grounded.
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "app.py").write_text("import arq\n\n\ndef main():\n    pass\n")
+
+    code_units = [_module_unit("app.py", 5)]
+    candidates = identify_decision_points(
+        {
+            "nodes": [{"id": "app.py", "kind": "file", "language": "python"}],
+            "edges": [{"source": "app.py", "target": "external:arq", "kind": "imports_external"}],
+        },
+        code_units,
+        entry_points=[],
+    )
+
+    llm = FakeLLMProvider(
+        [
+            LLMResponse(
+                text="",
+                parsed=TradeoffCardOutput(
+                    decision="use arq",
+                    alternatives_considered=["celery"],
+                    likely_reasoning="lighter weight",
+                    tradeoff_cost="another moving part",
+                    confidence="medium",
+                    evidence_refs=[
+                        EvidenceRef(file_path="app.py", line_start=1, line_end=999),  # out of range
+                        EvidenceRef(file_path="does_not_exist.py", line_start=1, line_end=1),  # unknown file
+                    ],
+                ),
+                model="fake-model",
+                stop_reason="end_turn",
+                usage={},
+            )
+        ]
+    )
+
+    results = await extract_tradeoffs(llm, candidates, source_dir, {"edges": []}, code_units)
+
+    assert results == []
+
+
 def test_read_snippet_tolerates_non_utf8_bytes(tmp_path: Path) -> None:
     # Found via Codex's Phase 2 pre-push review: parser.py parses on raw bytes
     # and never raises on non-UTF-8 source, so a Latin-1-encoded file that

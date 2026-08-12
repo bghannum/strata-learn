@@ -25,7 +25,14 @@ dependencies = [
     "tree-sitter-python==0.23.6",
     "tree-sitter-javascript==0.23.1",
     "tree-sitter-typescript==0.23.2",
-    "anthropic>=0.40",
+    # >=0.40 was never actually enough: AnthropicProvider (Phase 2) calls
+    # client.messages.parse()/reads response.parsed_output, which the SDK
+    # only introduced in 0.77.0 ("add support for Structured Outputs in the
+    # Messages API") — an environment satisfying only the old floor gets an
+    # AttributeError on the very first Layer B call. Confirmed via the SDK's
+    # own CHANGELOG.md and source history: absent at v0.76.0, present at
+    # v0.77.0. Found via Codex's Phase 2 pre-push review.
+    "anthropic>=0.77",
     "openai>=1.57",
     "bcrypt>=4.2",
     "python-multipart>=0.0.17",

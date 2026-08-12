@@ -5,8 +5,8 @@ from app.db.session import async_session_factory
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 from app.semantics.module_summarizer import ModuleSummaryOutput
 from app.semantics.orchestrator import run_layer_b
-from app.semantics.pattern_detector import PatternClaimOutput
-from app.semantics.tradeoff_extractor import TradeoffCardOutput
+from app.semantics.pattern_detector import PatternClaimOutput, PatternEvidenceItem
+from app.semantics.tradeoff_extractor import EvidenceRef, TradeoffCardOutput
 
 _FILES = {"app/worker.py": "import arq\n\n\ndef main():\n    pass\n"}
 
@@ -23,7 +23,12 @@ def _seeded_llm() -> FakeLLMProvider:
             ),
             LLMResponse(
                 text="",
-                parsed=PatternClaimOutput(primary_pattern="modular monolith", confidence="medium", evidence=[], caveats=None),
+                parsed=PatternClaimOutput(
+                    primary_pattern="modular monolith",
+                    confidence="medium",
+                    evidence=[PatternEvidenceItem(claim="single-file repo", supporting_paths=["app/worker.py"])],
+                    caveats=None,
+                ),
                 model="fake",
                 stop_reason="end_turn",
                 usage={},
@@ -36,7 +41,7 @@ def _seeded_llm() -> FakeLLMProvider:
                     likely_reasoning="lighter weight",
                     tradeoff_cost="another moving part",
                     confidence="medium",
-                    evidence_refs=[],
+                    evidence_refs=[EvidenceRef(file_path="app/worker.py", line_start=1, line_end=5)],
                 ),
                 model="fake",
                 stop_reason="end_turn",

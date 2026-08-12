@@ -38,8 +38,8 @@ from app.db.session import async_session_factory
 from app.ingestion.source import JOBS_ROOT
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse, Message
 from app.semantics.module_summarizer import ModuleSummaryOutput
-from app.semantics.pattern_detector import PatternClaimOutput
-from app.semantics.tradeoff_extractor import TradeoffCardOutput
+from app.semantics.pattern_detector import PatternClaimOutput, PatternEvidenceItem
+from app.semantics.tradeoff_extractor import EvidenceRef, TradeoffCardOutput
 from app.worker.pipeline import index_repo, progress_channel
 
 
@@ -53,17 +53,26 @@ def _module_summary_response() -> LLMResponse:
     )
 
 
-def _pattern_claim_response() -> LLMResponse:
+def _pattern_claim_response(file_path: str = "app.py") -> LLMResponse:
+    # A non-empty, resolvable evidence item — detect_pattern now drops the
+    # whole claim if every evidence item is uncited (see pattern_detector.py).
     return LLMResponse(
         text="",
-        parsed=PatternClaimOutput(primary_pattern="modular monolith", confidence="medium", evidence=[], caveats=None),
+        parsed=PatternClaimOutput(
+            primary_pattern="modular monolith",
+            confidence="medium",
+            evidence=[PatternEvidenceItem(claim="single-file repo", supporting_paths=[file_path])],
+            caveats=None,
+        ),
         model="fake-model",
         stop_reason="end_turn",
         usage={"input_tokens": 1, "output_tokens": 1},
     )
 
 
-def _tradeoff_card_response() -> LLMResponse:
+def _tradeoff_card_response(file_path: str = "worker.py", line_end: int = 5) -> LLMResponse:
+    # At least one validated (non-seed) evidence_ref — extract_tradeoffs now
+    # drops the whole card if the LLM provided none (see tradeoff_extractor.py).
     return LLMResponse(
         text="",
         parsed=TradeoffCardOutput(
@@ -72,7 +81,7 @@ def _tradeoff_card_response() -> LLMResponse:
             likely_reasoning="lighter weight, async-native",
             tradeoff_cost="extra infra (redis) to operate",
             confidence="medium",
-            evidence_refs=[],
+            evidence_refs=[EvidenceRef(file_path=file_path, line_start=1, line_end=line_end)],
         ),
         model="fake-model",
         stop_reason="end_turn",
@@ -80,12 +89,12 @@ def _tradeoff_card_response() -> LLMResponse:
     )
 
 
-def _no_decision_point_llm() -> FakeLLMProvider:
+def _no_decision_point_llm(file_path: str = "app.py") -> FakeLLMProvider:
     """For a single-file fixture repo with no imports: module_summarizer and
     pattern_detector each make one call; identify_decision_points finds
     nothing (no fan-in/out, no infra imports), so extract_tradeoffs never
     calls the LLM at all."""
-    return FakeLLMProvider([_module_summary_response(), _pattern_claim_response()])
+    return FakeLLMProvider([_module_summary_response(), _pattern_claim_response(file_path)])
 
 
 class _BoomLLMProvider:
@@ -192,7 +201,7 @@ async def test_index_repo_zip_upload_success(redis_pool: ArqRedis, pending_repo_
             repo_id=repo_id,
             source_type=SourceType.zip_upload.value,
             zip_redis_key=zip_redis_key,
-            llm=_no_decision_point_llm(),
+            llm=_no_decision_point_llm("hello.py"),
         )
 
     messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)
@@ -227,7 +236,9 @@ async def test_index_repo_runs_layer_b_and_persists_all_three_tables(
     zip_redis_key = f"zip-upload:{snapshot_id}"
     await redis_pool.set(zip_redis_key, buf.getvalue())
 
-    llm = FakeLLMProvider([_module_summary_response(), _pattern_claim_response(), _tradeoff_card_response()])
+    llm = FakeLLMProvider(
+        [_module_summary_response(), _pattern_claim_response("worker.py"), _tradeoff_card_response("worker.py")]
+    )
 
     await index_repo(
         {"redis": redis_pool},
@@ -283,14 +294,16 @@ async def test_index_repo_layer_b_failure_marks_failed(
     assert not (JOBS_ROOT / str(snapshot_id)).exists()
 
 
-async def test_index_repo_cancelled_during_layer_b_marks_failed(
+async def test_index_repo_cancelled_on_final_attempt_marks_failed(
     redis_pool: ArqRedis, git_fixture_repo: Path, pending_repo_factory
 ) -> None:
     # Found via the Phase 2 manual checkpoint: arq cancels a running job via
     # asyncio.CancelledError (job_timeout, worker shutdown) — a BaseException,
     # not an Exception, so `except Exception` alone left the snapshot stuck at
-    # "analyzing" forever with no failure ever recorded. Regression test for
-    # the fix, mirroring test_index_repo_layer_b_failure_marks_failed above.
+    # "analyzing" forever with no failure ever recorded. ctx here has no
+    # job_try/max_tries (same shape every other test in this file uses) —
+    # the handler's conservative default when it can't tell whether arq will
+    # retry is to treat it as final, matching this test's name.
     git_url = git_fixture_repo.as_uri()
     repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
 
@@ -315,6 +328,39 @@ async def test_index_repo_cancelled_during_layer_b_marks_failed(
 
     snapshot = await _get_snapshot(snapshot_id)
     assert snapshot.status == SnapshotStatus.failed
+    assert not (JOBS_ROOT / str(snapshot_id)).exists()
+
+
+async def test_index_repo_cancelled_with_retries_remaining_does_not_mark_failed(
+    redis_pool: ArqRedis, git_fixture_repo: Path, pending_repo_factory
+) -> None:
+    # Found via Codex's Phase 2 pre-push review, confirmed against arq's own
+    # run_job source: with retry_jobs=True (the default), arq silently
+    # retries a CancelledError job whenever job_try < max_tries — it never
+    # calls finish_failed_job for that attempt. Marking the snapshot "failed"
+    # here would be premature and would make a connected WS client disconnect
+    # thinking the job is done, even though arq is about to run it again.
+    git_url = git_fixture_repo.as_uri()
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
+
+    async def run() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await index_repo(
+                {"redis": redis_pool, "job_try": 1, "max_tries": 5},
+                snapshot_id=snapshot_id,
+                repo_id=repo_id,
+                source_type=SourceType.git_url.value,
+                git_url=git_url,
+                llm=_CancelledLLMProvider(),
+            )
+
+    messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)
+    # No terminal "failed" published — just the real transitions so far.
+    assert [m["status"] for m in messages] == [SnapshotStatus.parsing.value, SnapshotStatus.analyzing.value]
+
+    snapshot = await _get_snapshot(snapshot_id)
+    assert snapshot.status == SnapshotStatus.analyzing  # left as-is for the retried attempt to pick back up
+    # cleanup_workspace still runs regardless — the *next* attempt re-clones/re-extracts fresh
     assert not (JOBS_ROOT / str(snapshot_id)).exists()
 
 

@@ -142,15 +142,26 @@ async def index_repo(
         # Found via the Phase 2 manual checkpoint: a job timeout (arq's
         # WorkerSettings.job_timeout) or worker shutdown cancels the running
         # task via asyncio.CancelledError, a BaseException — `except Exception`
-        # below never catches it. Without this, the snapshot got stuck at
-        # "analyzing" forever with every WS client hanging, the exact failure
-        # mode the Exception handler below already guards against for every
-        # other kind of crash. Re-raise so arq's own cancellation/redelivery
-        # handling still runs — complete_snapshot/run_layer_b are both
-        # idempotent under redelivery already.
-        async with async_session_factory() as session:
-            await fail_snapshot(session, snapshot_id)
-        await publish(SnapshotStatus.failed, error="Indexing was cancelled (timed out or worker shutdown)")
+        # below never catches it. Without any handling here, the snapshot got
+        # stuck at "analyzing" forever with every WS client hanging, the exact
+        # failure mode the Exception handler below already guards against for
+        # every other kind of crash.
+        #
+        # But marking the snapshot terminally "failed" unconditionally is
+        # itself wrong (found via Codex's Phase 2 pre-push review, confirmed
+        # against arq's own run_job source): with retry_jobs=True (arq's
+        # default, unchanged here), arq silently retries a CancelledError job
+        # — it never calls finish_failed_job for that attempt at all — as
+        # long as job_try hasn't reached max_tries yet. Only mark it failed
+        # when this genuinely was the last attempt; otherwise stay quiet and
+        # re-raise, letting the retried attempt's own "parsing" transition
+        # pick the snapshot back up idempotently.
+        job_try = ctx.get("job_try", 1)
+        max_tries = ctx.get("max_tries")
+        if max_tries is None or job_try >= max_tries:
+            async with async_session_factory() as session:
+                await fail_snapshot(session, snapshot_id)
+            await publish(SnapshotStatus.failed, error="Indexing was cancelled (timed out or worker shutdown)")
         raise
     except Exception:
         # Anything beyond a validated bad-source error (a parse crash, an

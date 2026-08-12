@@ -60,17 +60,21 @@ async def run_layer_b(session: AsyncSession, llm: LLMProvider, snapshot: Analysi
             )
         )
 
-    session.add(
-        PatternClaim(
-            snapshot_id=snapshot.id,
-            primary_pattern=pattern.primary_pattern,
-            confidence=Confidence(pattern.confidence),
-            evidence=pattern.evidence,
-            caveats=pattern.caveats,
-            prompt_version=pattern.prompt_version,
-            model=pattern.model,
+    if pattern is not None:
+        # None means every evidence item lost its citations — see
+        # pattern_detector.py. No claim persisted this run is better than an
+        # uncited one (found via Codex's Phase 2 pre-push review).
+        session.add(
+            PatternClaim(
+                snapshot_id=snapshot.id,
+                primary_pattern=pattern.primary_pattern,
+                confidence=Confidence(pattern.confidence),
+                evidence=pattern.evidence,
+                caveats=pattern.caveats,
+                prompt_version=pattern.prompt_version,
+                model=pattern.model,
+            )
         )
-    )
 
     for card in tradeoffs:
         session.add(

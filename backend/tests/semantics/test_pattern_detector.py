@@ -143,4 +143,34 @@ async def test_detect_pattern_drops_evidence_item_with_no_resolvable_citations()
 
     result = await detect_pattern(llm, dependency_graph, code_units, entry_points=[])
 
+    assert result is not None
     assert [e["claim"] for e in result.evidence] == ["grounded claim"]
+
+
+async def test_detect_pattern_returns_none_when_no_evidence_resolves() -> None:
+    # Found via Codex's Phase 2 pre-push review: if *every* evidence item
+    # loses its citations, persisting primary_pattern anyway leaves the whole
+    # architectural claim uncited, not just one item of it. No claim is
+    # better than an ungrounded one.
+    code_units = [_module_unit("app/real.py", 10)]
+    dependency_graph = {"nodes": [{"id": "app/real.py", "kind": "file", "language": "python"}], "edges": []}
+    llm = FakeLLMProvider(
+        [
+            LLMResponse(
+                text="",
+                parsed=PatternClaimOutput(
+                    primary_pattern="layered",
+                    confidence="low",
+                    evidence=[PatternEvidenceItem(claim="ungrounded claim", supporting_paths=["app/imaginary.py"])],
+                    caveats=None,
+                ),
+                model="fake-model",
+                stop_reason="end_turn",
+                usage={},
+            )
+        ]
+    )
+
+    result = await detect_pattern(llm, dependency_graph, code_units, entry_points=[])
+
+    assert result is None

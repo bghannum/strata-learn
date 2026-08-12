@@ -71,7 +71,7 @@ def _render_directory_tree(file_paths: list[str]) -> str:
 
 async def detect_pattern(
     llm: LLMProvider, dependency_graph: dict, code_units: list[CodeUnit], entry_points: list[dict]
-) -> PatternClaimResult:
+) -> PatternClaimResult | None:
     file_paths = [node["id"] for node in dependency_graph.get("nodes", []) if node.get("kind") == "file"]
     module_units_by_path = {u.file_path: u for u in code_units if u.unit_type == UnitType.module}
 
@@ -114,6 +114,14 @@ async def detect_pattern(
             # item rather than keep it with an empty citations list.
             continue
         evidence.append({"claim": item.claim, "supporting_paths": item.supporting_paths, "citations": citations})
+
+    if not evidence:
+        # Every evidence item lost its citations — persisting primary_pattern
+        # anyway would leave the whole architectural claim uncited, not just
+        # one item of it (found via Codex's Phase 2 pre-push review). No
+        # claim is better than an ungrounded one; orchestrator.py skips
+        # persisting a PatternClaim row when this is None.
+        return None
 
     return PatternClaimResult(
         primary_pattern=output.primary_pattern,

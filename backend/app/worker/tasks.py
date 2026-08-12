@@ -5,6 +5,11 @@ from arq.connections import RedisSettings
 from app.config import settings
 from app.worker.pipeline import index_repo
 
+# arq's own default, made explicit here (not just implicit in Worker.__init__)
+# so index_repo can tell, from inside a job, whether *this* cancelled attempt
+# is one arq will silently retry or the truly final one. See WorkerSettings.ctx.
+MAX_JOB_TRIES = 5
+
 
 async def health_check(ctx: dict) -> str:
     return "ok"
@@ -21,3 +26,9 @@ class WorkerSettings:
     # forever (index_repo's CancelledError handler still fails the snapshot
     # cleanly if this is ever exceeded).
     job_timeout = 1800
+    max_tries = MAX_JOB_TRIES
+    # Merged into every job's own ctx dict — index_repo reads ctx["max_tries"]
+    # to tell a retryable CancelledError from the truly final attempt (see
+    # pipeline.py's CancelledError handler; found via Codex's Phase 2
+    # pre-push review).
+    ctx: ClassVar = {"max_tries": MAX_JOB_TRIES}
