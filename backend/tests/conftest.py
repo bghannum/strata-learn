@@ -8,7 +8,11 @@ from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
 from sqlalchemy import text
 
-from app.analysis.snapshot import create_pending_snapshot
+from app.analysis.snapshot import (
+    analyze_source,
+    complete_snapshot,
+    create_pending_snapshot,
+)
 from app.config import settings
 from app.db.models import Repo, SourceType
 from app.db.session import async_session_factory
@@ -18,6 +22,9 @@ async def _clean_db() -> None:
     async with async_session_factory() as session:
         await session.exec(text("UPDATE repo SET latest_snapshot_id = NULL"))
         await session.exec(text("DELETE FROM codeunit"))
+        await session.exec(text("DELETE FROM tradeoffcard"))
+        await session.exec(text("DELETE FROM patternclaim"))
+        await session.exec(text("DELETE FROM modulesummary"))
         await session.exec(text("DELETE FROM analysissnapshot"))
         await session.exec(text("DELETE FROM repo"))
         await session.exec(text('DELETE FROM "user"'))
@@ -64,6 +71,45 @@ def pending_repo_factory() -> Callable[[SourceType, str], Awaitable[tuple[UUID, 
             session.add(repo)
             await session.commit()
             return repo.id, snapshot.id
+
+    return _make
+
+
+@pytest.fixture
+def layer_a_ready_factory(
+    tmp_path: Path,
+) -> Callable[[dict[str, str]], Awaitable[tuple[UUID, UUID, Path]]]:
+    """Builds a real Repo + ready AnalysisSnapshot + persisted CodeUnit rows by
+    running Layer A for real (analyze_source/complete_snapshot, no LLM
+    involved) against caller-supplied file contents — a starting point for
+    Layer B tests, which need real CodeUnit rows to chunk/summarize/extract
+    trade-offs against. Kept separate from pending_repo_factory rather than
+    extending it, since existing callers of that fixture want a bare pending
+    snapshot and shouldn't have to opt out of running Layer A."""
+
+    async def _make(files: dict[str, str]) -> tuple[UUID, UUID, Path]:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        for relative_path, content in files.items():
+            path = source_dir / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+
+        analysis = analyze_source(source_dir)
+
+        async with async_session_factory() as session:
+            repo = Repo(source_type=SourceType.git_url, source_uri="layer-a-ready-fixture", display_name="fixture")
+            session.add(repo)
+            await session.flush()
+            snapshot = await create_pending_snapshot(session, repo.id)
+            repo.latest_snapshot_id = snapshot.id
+            session.add(repo)
+            await session.commit()
+
+        async with async_session_factory() as session:
+            await complete_snapshot(session, snapshot.id, None, analysis)
+
+        return repo.id, snapshot.id, source_dir
 
     return _make
 

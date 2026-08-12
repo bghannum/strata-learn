@@ -3,9 +3,11 @@ Phase 1 synchronous logic (clone/extract -> analyze -> persist) into the worker
 process, publishing AnalysisSnapshot.status transitions over Redis pub/sub as it
 goes so `WS /repos/{repo_id}/progress` can relay them live.
 
-Only pending -> parsing -> ready|failed are real this phase — analyzing/generating
-stay defined-but-unused until Layer B (Phase 2) and generation (Phase 3) land real
-work on top of this.
+Phase 2 (Layer B — semantic analysis) added the `analyzing` transition: after
+Layer A (analyze_source/complete_snapshot) finishes, run_layer_b runs the
+LLM-backed module summarizer, pattern detector, and trade-off extractor, then
+the snapshot moves to `ready`. `generating` (Phase 3, study guide assembly)
+stays defined-but-unused until that phase lands.
 
 git_url jobs clone independently in this process — no dependency on anything the
 API process touched. zip_upload jobs read the uploaded bytes back out of Redis
@@ -32,6 +34,7 @@ from app.analysis.snapshot import (
     fail_snapshot,
     set_snapshot_status,
 )
+from app.config import settings
 from app.db.models import SnapshotStatus, SourceType
 from app.db.session import async_session_factory
 from app.ingestion.source import (
@@ -40,6 +43,8 @@ from app.ingestion.source import (
     clone_git_repo,
     extract_zip_upload,
 )
+from app.semantics.llm_provider import AnthropicProvider, LLMProvider
+from app.semantics.orchestrator import run_layer_b
 
 
 def progress_channel(snapshot_id: UUID) -> str:
@@ -53,6 +58,7 @@ async def index_repo(
     source_type: str,
     git_url: str | None = None,
     zip_redis_key: str | None = None,
+    llm: LLMProvider | None = None,
 ) -> None:
     redis = ctx["redis"]  # arq provides this per-job, same pool the worker itself uses
     channel = progress_channel(snapshot_id)
@@ -67,6 +73,13 @@ async def index_repo(
     # already a unique per-job identifier, no need to mint a separate one.
     job_id = snapshot_id
     try:
+        # Constructed inside the try, not before it, for the same reason as the
+        # comment below: a missing/invalid ANTHROPIC_API_KEY (AnthropicProvider
+        # raises ValueError on a falsy one) needs to reach the same fail_snapshot
+        # + publish(failed) terminal-state guarantee as every other failure here,
+        # not crash the job before "parsing" is even recorded.
+        llm = llm or AnthropicProvider(api_key=settings.anthropic_api_key)  # type: ignore[arg-type]
+
         # Inside the try, not before it: if this specific publish is what
         # fails (Redis hiccup right here), the snapshot's already committed
         # "parsing" — leaving it unguarded would strand it there forever with
@@ -97,11 +110,42 @@ async def index_repo(
 
         async with async_session_factory() as session:
             snapshot = await complete_snapshot(session, snapshot_id, commit_hash, analysis)
+
+        # LAYER B — Phase 2. Still inside the try: source_dir must still exist
+        # (the trade-off extractor reads real code bodies from it, since
+        # CodeUnit only stores signatures), so cleanup_workspace in the
+        # finally below must not run until this finishes either way. A
+        # vanished snapshot (see complete_snapshot's own None-return case)
+        # skips Layer B entirely — nothing left to attach it to.
+        if snapshot is not None:
+            async with async_session_factory() as session:
+                await set_snapshot_status(session, snapshot_id, SnapshotStatus.analyzing)
+            await publish(SnapshotStatus.analyzing)
+
+            async with async_session_factory() as session:
+                await run_layer_b(session, llm, snapshot, source_dir)
+
+            async with async_session_factory() as session:
+                await set_snapshot_status(session, snapshot_id, SnapshotStatus.ready)
     except SourcePreparationError as exc:
         async with async_session_factory() as session:
             await fail_snapshot(session, snapshot_id)
         await publish(SnapshotStatus.failed, error=str(exc))
         return
+    except asyncio.CancelledError:
+        # Found via the Phase 2 manual checkpoint: a job timeout (arq's
+        # WorkerSettings.job_timeout) or worker shutdown cancels the running
+        # task via asyncio.CancelledError, a BaseException — `except Exception`
+        # below never catches it. Without this, the snapshot got stuck at
+        # "analyzing" forever with every WS client hanging, the exact failure
+        # mode the Exception handler below already guards against for every
+        # other kind of crash. Re-raise so arq's own cancellation/redelivery
+        # handling still runs — complete_snapshot/run_layer_b are both
+        # idempotent under redelivery already.
+        async with async_session_factory() as session:
+            await fail_snapshot(session, snapshot_id)
+        await publish(SnapshotStatus.failed, error="Indexing was cancelled (timed out or worker shutdown)")
+        raise
     except Exception:
         # Anything beyond a validated bad-source error (a parse crash, an
         # unexpected DB failure, ...) still needs to reach a terminal state —

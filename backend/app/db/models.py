@@ -44,6 +44,12 @@ class UnitType(str, Enum):
     function = "function"
 
 
+class Confidence(str, Enum):
+    high = "high"
+    medium = "medium"
+    low = "low"
+
+
 def _by_value(enum_cls: type[Enum]) -> SAEnum:
     # SQLAlchemy's Enum type persists a Python Enum's *name* by default. UnitType.class_'s
     # name ("class_") isn't the string we want stored — values_callable makes it persist
@@ -113,3 +119,46 @@ class CodeUnit(SQLModel, table=True):
     line_end: int
     signature: str | None = None
     docstring: str | None = None
+
+
+# --- LAYER B — LLM-inferred, always grounded in Layer A facts (ADR-006) ---
+
+
+class ModuleSummary(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    snapshot_id: uuid.UUID = Field(foreign_key="analysissnapshot.id", index=True)
+    file_path: str
+    purpose: str
+    role_in_system: str
+    key_concepts: list = Field(default_factory=list, sa_column=Column(JSON))
+    line_start: int
+    line_end: int
+    prompt_version: str
+    model: str
+    created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
+
+
+class PatternClaim(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    snapshot_id: uuid.UUID = Field(foreign_key="analysissnapshot.id", index=True)
+    primary_pattern: str
+    confidence: Confidence = Field(sa_column=Column(_by_value(Confidence), nullable=False))
+    evidence: list = Field(default_factory=list, sa_column=Column(JSON))
+    caveats: str | None = None
+    prompt_version: str
+    model: str
+    created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
+
+
+class TradeoffCard(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    snapshot_id: uuid.UUID = Field(foreign_key="analysissnapshot.id", index=True)
+    decision: str
+    alternatives_considered: list = Field(default_factory=list, sa_column=Column(JSON))
+    likely_reasoning: str
+    tradeoff_cost: str
+    confidence: Confidence = Field(sa_column=Column(_by_value(Confidence), nullable=False))
+    evidence_refs: list = Field(default_factory=list, sa_column=Column(JSON))
+    prompt_version: str
+    model: str
+    created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())

@@ -21,7 +21,37 @@ from fastapi.testclient import TestClient
 from app.config import settings
 from app.db.models import SourceType
 from app.main import app
+from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
+from app.semantics.module_summarizer import ModuleSummaryOutput
+from app.semantics.pattern_detector import PatternClaimOutput
 from app.worker.pipeline import index_repo
+
+
+def _fake_llm() -> FakeLLMProvider:
+    # git_fixture_repo (tests/conftest.py) is a single file with no imports —
+    # module_summarizer and pattern_detector each make one call;
+    # identify_decision_points finds nothing, so extract_tradeoffs never calls
+    # the LLM. A real ANTHROPIC_API_KEY isn't even loaded in this test process
+    # (no backend/.env), so an omitted `llm` would fail loudly, not silently
+    # bill — but a fake keeps this test decoupled from that either way.
+    return FakeLLMProvider(
+        [
+            LLMResponse(
+                text="",
+                parsed=ModuleSummaryOutput(purpose="p", role_in_system="r", key_concepts=["c"]),
+                model="fake-model",
+                stop_reason="end_turn",
+                usage={},
+            ),
+            LLMResponse(
+                text="",
+                parsed=PatternClaimOutput(primary_pattern="modular monolith", confidence="medium", evidence=[], caveats=None),
+                model="fake-model",
+                stop_reason="end_turn",
+                usage={},
+            ),
+        ]
+    )
 
 
 def _run_pipeline_in_background(*, snapshot_id: UUID, repo_id: UUID, git_url: str) -> threading.Thread:
@@ -35,6 +65,7 @@ def _run_pipeline_in_background(*, snapshot_id: UUID, repo_id: UUID, git_url: st
                     repo_id=repo_id,
                     source_type=SourceType.git_url.value,
                     git_url=git_url,
+                    llm=_fake_llm(),
                 )
             finally:
                 await pool.aclose()
@@ -76,4 +107,4 @@ def test_progress_ws_reports_pending_parsing_ready(git_fixture_repo: Path, pendi
         finally:
             thread.join(timeout=10)
 
-    assert statuses == ["pending", "parsing", "ready"]
+    assert statuses == ["pending", "parsing", "analyzing", "ready"]

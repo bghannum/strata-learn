@@ -1,3 +1,21 @@
+## Project status
+
+Live phase tracker — update this table the moment a phase starts or its checkpoint passes, so status is visible here without opening `PROJECT_PLAN.md`. Full task lists/checkpoints per phase: `PROJECT_PLAN.md` §12.
+
+| Phase | Status |
+|---|---|
+| 0 — Scoping & Setup | Done (2026-08-09) |
+| 1 — Ingestion + Layer A (structural analysis) | Done (2026-08-10) |
+| 1.5 — Job Queue Wiring | Done (2026-08-11) |
+| 2 — Layer B (Semantic Analysis) | Code complete, tests passing, one real-repo checkpoint run reviewed and judged good (2026-08-12, `feature/phase-2-layer-b-semantic-analysis`) — hands-on review of the output deferred by the user to Phase 4 (no frontend yet to look at it through) |
+| 3 — Study Guide Generation | Not started |
+| 4 — Frontend Shell | Not started |
+| 5 — Quiz Generation & Taking (MCQ/fill-blank) | Not started |
+| 6 — Drawing Questions | Not started |
+| 7 — Versioning, Diffing, Hosting, Polish | Not started |
+
+Claude Code: don't wait to be asked "what's next" — when the previous phase's status here reads "Done" and no other work is in flight, name the next phase as the natural next step instead of leaving it for the user to notice.
+
 ## Git workflow
 
 See `branch-pr-ci-workflow.md` at the repo root for the full reusable playbook (branch → PR → CI mechanics, why each piece of the review setup below is shaped the way it is, and every gotcha hit building it) — this section is just the strata-learn-specific summary.
@@ -13,7 +31,7 @@ See `branch-pr-ci-workflow.md` at the repo root for the full reusable playbook (
 
 ## Testing
 
-- Backend tests hit a real Postgres, no mocking — a deliberate project philosophy (see the docstring in `backend/tests/api/conftest.py`). Don't introduce mocks for DB-backed tests; if a test needs isolation, clean the tables, don't fake the DB layer.
+- Backend tests hit a real Postgres, no mocking — a deliberate project philosophy (see the `clean_db` docstring in `backend/tests/conftest.py`). Don't introduce mocks for DB-backed tests; if a test needs isolation, clean the tables, don't fake the DB layer. This does not extend to the LLM provider (Phase 2+): `AnthropicProvider` calls a paid, non-deterministic external API, so pytest uses `FakeLLMProvider` instead — real calls happen only in each phase's manual checkpoint.
 - Write real pytest coverage for each phase's new code as it's built, and run the full suite (`pytest -q` from `backend/`) at every phase checkpoint — not just for the files you just touched.
 - CI's `backend-test` job (`.github/workflows/ci.yml`) provisions both Postgres and Redis service containers — keep this in sync if a future phase adds another stateful dependency (a new external service, a new DB, etc.); the same "passes locally, fails on every PR" gap bites every time this is forgotten.
 
