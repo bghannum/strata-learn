@@ -36,18 +36,27 @@ jobs:
             --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
             --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","comment","request_changes"]},"summary":{"type":"string"},"findings":{"type":"string"}},"required":["verdict","summary","findings"]}'
 
+      # steps.claude.outputs.structured_output is empty whenever the action
+      # itself didn't run to completion — most commonly the workflow-file
+      # self-verification skip (a PR that edits this file can't be validated
+      # against main, see CLAUDE.md). That's an expected, documented case,
+      # not a failure — every step below is guarded so the job just finishes
+      # quietly instead of crashing trying to parse nothing.
       - name: Write review to file
+        if: steps.claude.outputs.structured_output != ''
         env:
           REVIEW_JSON: ${{ steps.claude.outputs.structured_output }}
         run: echo "$REVIEW_JSON" > claude_review.json
 
       - name: Upload review artifact
+        if: steps.claude.outputs.structured_output != ''
         uses: actions/upload-artifact@v7
         with:
           name: claude-review-pr-${{ github.event.pull_request.number }}
           path: claude_review.json
 
       - name: Post PR comment
+        if: steps.claude.outputs.structured_output != ''
         uses: actions/github-script@v9
         with:
           script: |
