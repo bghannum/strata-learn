@@ -146,18 +146,26 @@ jobs:
             --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
             --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","comment","request_changes"]},"summary":{"type":"string"},"findings":{"type":"string"}},"required":["verdict","summary","findings"]}'
 
+      # structured_output is empty whenever the action didn't run to
+      # completion — most commonly the workflow-file self-verification skip
+      # a few paragraphs down. Expected, not a failure: every step below is
+      # guarded so the job finishes quietly instead of crashing trying to
+      # parse nothing.
       - name: Write review to file
+        if: steps.claude.outputs.structured_output != ''
         env:
           REVIEW_JSON: ${{ steps.claude.outputs.structured_output }}
         run: echo "$REVIEW_JSON" > claude_review.json
 
       - name: Upload review artifact
+        if: steps.claude.outputs.structured_output != ''
         uses: actions/upload-artifact@v7
         with:
           name: claude-review-pr-${{ github.event.pull_request.number }}
           path: claude_review.json
 
       - name: Post PR comment
+        if: steps.claude.outputs.structured_output != ''
         uses: actions/github-script@v9
         with:
           script: |
@@ -321,11 +329,12 @@ This is the part that isn't a file, so copying files alone won't set it up:
 
 1. **Install the Claude GitHub App**, once, at `github.com/apps/claude` → choose "All repositories" instead of selecting them one at a time. Do this once and every future repo — including ones that don't exist yet — is already covered. (Skippable if you already did this when you first set up Claude review.)
 2. **Repo secrets** — `CLAUDE_CODE_OAUTH_TOKEN`, and `OPENAI_API_KEY` only if you're using the Codex Action instead of the local hook. Personal GitHub accounts (not organizations) can't share secrets across repos, so these need setting per repo. Scriptable with `gh secret set`, so it's one command, not a UI trip. Set secrets by running the command yourself (or piping from a local file) rather than pasting the raw value into a chat session — keeps it out of any transcript or shell history that isn't yours.
-3. **Merge settings + branch protection** — per-repo, not stored in a file. Scriptable with `gh api`/`gh repo edit`. **Run this immediately after `gh repo create`, not "eventually"** — see the note at the top of this doc about why deferring it means it silently doesn't happen.
+3. **Merge settings + branch protection** — per-repo, not stored in a file. Scriptable with `gh api`/`gh repo edit`. **These two run at different times, not both "immediately after `gh repo create`"** — secrets and merge settings don't depend on repo content and can run right away; branch protection targets `branches/main/protection`, and a freshly-created repo has no `main` branch yet (no commits = no branches at all) until your first push creates one. Running the whole script too early makes the branch-protection call 403 for a reason that has nothing to do with the GitHub-Pro/private-repo limitation below — split the run:
 
 ```bash
 #!/usr/bin/env bash
 # usage: ./bootstrap-repo.sh <owner>/<repo>
+# Run right after `gh repo create` — before any push exists.
 set -euo pipefail
 REPO="$1"
 
@@ -339,13 +348,22 @@ gh repo edit "$REPO" \
   --enable-merge-commit=false \
   --enable-rebase-merge=false \
   --delete-branch-on-merge
+```
+
+```bash
+#!/usr/bin/env bash
+# usage: ./bootstrap-branch-protection.sh <owner>/<repo>
+# Run after your first push to main — the branch has to exist first, or
+# this 403s for an entirely different reason than the GitHub-Pro one below.
+set -euo pipefail
+REPO="$1"
 
 # branch protection: require PR, CI must pass, no approval count.
 # 403s on a private repo without GitHub Pro — that's expected on the free
 # tier, not a bug in this script. Decide public-vs-Pro-vs-skip (see doc
 # above) before assuming this step should have worked.
 gh api "repos/$REPO/branches/main/protection" --method PUT --input - <<'JSON' || \
-  echo "Branch protection failed — expected on a free-tier private repo, see doc" >&2
+  echo "Branch protection failed — expected on a free-tier private repo (see doc), or main doesn't exist yet if you ran this too early" >&2
 {
   "required_status_checks": { "strict": true, "contexts": ["test"] },
   "enforce_admins": false,
