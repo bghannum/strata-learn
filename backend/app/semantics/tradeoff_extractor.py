@@ -119,7 +119,13 @@ class TradeoffCardResult:
 
 
 def _read_snippet(source_dir: Path, file_path: str, line_start: int, line_end: int) -> str:
-    lines = (source_dir / file_path).read_text().splitlines()
+    # errors="replace", matching parser.py's decoding policy exactly: Layer A
+    # parses on raw bytes and never raises on non-UTF-8 source, so a file that
+    # parsed successfully must not fail Layer B just because Path.read_text()'s
+    # strict-UTF-8 default raises UnicodeDecodeError (found via Codex's
+    # Phase 2 pre-push review).
+    text = (source_dir / file_path).read_bytes().decode("utf-8", errors="replace")
+    lines = text.splitlines()
     return "\n".join(lines[line_start - 1 : line_end])
 
 

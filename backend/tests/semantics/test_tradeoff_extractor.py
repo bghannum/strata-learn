@@ -6,6 +6,7 @@ from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 from app.semantics.tradeoff_extractor import (
     EvidenceRef,
     TradeoffCardOutput,
+    _read_snippet,
     extract_tradeoffs,
     identify_decision_points,
 )
@@ -108,3 +109,15 @@ async def test_extract_tradeoffs_seeds_citation_and_validates_refs(tmp_path: Pat
 
     # code_snippet passed to the LLM was actually read from disk
     assert "import arq" in llm.calls[0].messages[0].content
+
+
+def test_read_snippet_tolerates_non_utf8_bytes(tmp_path: Path) -> None:
+    # Found via Codex's Phase 2 pre-push review: parser.py parses on raw bytes
+    # and never raises on non-UTF-8 source, so a Latin-1-encoded file that
+    # Layer A parsed successfully must not fail Layer B's strict-UTF-8 read.
+    (tmp_path / "latin1.py").write_bytes("# café\nx = 1\n".encode("latin-1"))
+
+    snippet = _read_snippet(tmp_path, "latin1.py", 1, 2)
+
+    assert "x = 1" in snippet  # doesn't raise UnicodeDecodeError
+    assert "�" in snippet  # the non-UTF-8 byte decodes to a replacement char

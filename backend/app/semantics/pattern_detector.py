@@ -107,6 +107,12 @@ async def detect_pattern(
                 citations.append(
                     {"file_path": path, "line_start": module_unit.line_start, "line_end": module_unit.line_end}
                 )
+        if not citations:
+            # Every supporting_path was unresolvable — persisting this claim
+            # would leave an entirely uncited assertion, violating Ground
+            # Rule #3 (found via Codex's Phase 2 pre-push review). Drop the
+            # item rather than keep it with an empty citations list.
+            continue
         evidence.append({"claim": item.claim, "supporting_paths": item.supporting_paths, "citations": citations})
 
     return PatternClaimResult(

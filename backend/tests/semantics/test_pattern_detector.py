@@ -108,3 +108,39 @@ async def test_detect_pattern_resolves_relationship_style_evidence_paths() -> No
     assert {c["file_path"] for c in citations} == {"app/worker/pipeline.py", "app/analysis/snapshot.py"}
     # app/worker/pipeline.py appears on both arrow-notation entries but is only cited once
     assert len(citations) == 2
+
+
+async def test_detect_pattern_drops_evidence_item_with_no_resolvable_citations() -> None:
+    # Found via Codex's Phase 2 pre-push review: an evidence item whose every
+    # supporting_path is unresolvable must not be persisted with an empty
+    # citations list — that's an uncited claim, violating Ground Rule #3.
+    code_units = [_module_unit("app/real.py", 10)]
+    dependency_graph = {
+        "nodes": [{"id": "app/real.py", "kind": "file", "language": "python"}],
+        "edges": [],
+    }
+    llm = FakeLLMProvider(
+        [
+            LLMResponse(
+                text="",
+                parsed=PatternClaimOutput(
+                    primary_pattern="layered",
+                    confidence="low",
+                    evidence=[
+                        PatternEvidenceItem(claim="grounded claim", supporting_paths=["app/real.py"]),
+                        PatternEvidenceItem(
+                            claim="ungrounded claim", supporting_paths=["app/imaginary.py", "app/also_missing.py"]
+                        ),
+                    ],
+                    caveats=None,
+                ),
+                model="fake-model",
+                stop_reason="end_turn",
+                usage={},
+            )
+        ]
+    )
+
+    result = await detect_pattern(llm, dependency_graph, code_units, entry_points=[])
+
+    assert [e["claim"] for e in result.evidence] == ["grounded claim"]

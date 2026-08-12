@@ -108,8 +108,18 @@ async def index_repo(
 
         analysis = await asyncio.to_thread(analyze_source, source_dir)
 
+        # final_status=analyzing (not the default `ready`): Layer B runs next,
+        # so this must be the only commit — otherwise `ready` briefly becomes
+        # externally visible to a poller or a WS client connecting in the gap
+        # before the follow-up transition below, and such a client disconnects
+        # immediately on `ready`, never seeing Layer B run or fail (found via
+        # Codex's Phase 2 pre-push review; see complete_snapshot's docstring).
         async with async_session_factory() as session:
-            snapshot = await complete_snapshot(session, snapshot_id, commit_hash, analysis)
+            snapshot = await complete_snapshot(
+                session, snapshot_id, commit_hash, analysis, final_status=SnapshotStatus.analyzing
+            )
+        if snapshot is not None:
+            await publish(SnapshotStatus.analyzing)
 
         # LAYER B — Phase 2. Still inside the try: source_dir must still exist
         # (the trade-off extractor reads real code bodies from it, since
@@ -118,10 +128,6 @@ async def index_repo(
         # vanished snapshot (see complete_snapshot's own None-return case)
         # skips Layer B entirely — nothing left to attach it to.
         if snapshot is not None:
-            async with async_session_factory() as session:
-                await set_snapshot_status(session, snapshot_id, SnapshotStatus.analyzing)
-            await publish(SnapshotStatus.analyzing)
-
             async with async_session_factory() as session:
                 await run_layer_b(session, llm, snapshot, source_dir)
 
