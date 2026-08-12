@@ -1,5 +1,7 @@
 ## Git workflow
 
+See `branch-pr-ci-workflow.md` at the repo root for the full reusable playbook (branch → PR → CI mechanics, why each piece of the review setup below is shaped the way it is, and every gotcha hit building it) — this section is just the strata-learn-specific summary.
+
 - Never commit directly to `main`. Create a feature branch (`git checkout -b feature/x`) and open a PR.
 - Run `pytest -q` (from `backend/`, with `postgres` reachable) and `npm run build` (from `frontend/`) locally before pushing.
 - Pushing a non-`main` branch runs `.githooks/pre-push` automatically: a local, advisory-only Codex review (`codex exec review --base main`) written to `CODEX_CODE_REVIEW.md` at the repo root (gitignored — regenerated per push, never committed). Runs off Codex's ChatGPT subscription auth (`codex login`), not a metered API key, and never blocks the push — a missing `codex` CLI or a failed review just skips. One-time setup per clone: `git config core.hooksPath .githooks`.
@@ -12,7 +14,7 @@
 
 - Backend tests hit a real Postgres, no mocking — a deliberate project philosophy (see the docstring in `backend/tests/api/conftest.py`). Don't introduce mocks for DB-backed tests; if a test needs isolation, clean the tables, don't fake the DB layer.
 - Write real pytest coverage for each phase's new code as it's built, and run the full suite (`pytest -q` from `backend/`) at every phase checkpoint — not just for the files you just touched.
-- CI's `backend-test` job (`.github/workflows/ci.yml`) only provisions a Postgres service container today. Phase 1.5 (`PROJECT_PLAN.md` §12) adds `arq` + Redis — add a Redis service container to that job once tests start depending on it, or CI will pass locally-tested code that fails on any Redis-dependent path. Tracked in `backlog.md`.
+- CI's `backend-test` job (`.github/workflows/ci.yml`) provisions both Postgres and Redis service containers — keep this in sync if a future phase adds another stateful dependency (a new external service, a new DB, etc.); the same "passes locally, fails on every PR" gap bites every time this is forgotten.
 
 ## Dependency pinning — don't bump these casually
 

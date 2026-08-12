@@ -2,7 +2,7 @@
 
 A tool that ingests a repository (git URL or zip upload) and generates a study guide — architecture diagrams, plain-English explanations, trade-off analysis — plus quizzes (multiple choice, fill-in-blank, diagram-drawing) to verify you actually understand a codebase, not just that it runs.
 
-Full design context lives in [`PROJECT_PLAN.md`](./PROJECT_PLAN.md) (architecture, data model, build phases) and [`UI_SPEC.md`](./UI_SPEC.md) (frontend flows). Architecture decisions are recorded as individual ADRs in [`docs/adr/`](./docs/adr/); LLM prompt templates are versioned in [`docs/prompts/`](./docs/prompts/).
+Full design context lives in [`PROJECT_PLAN.md`](./PROJECT_PLAN.md) (architecture, data model, build phases) and [`UI_SPEC.md`](./UI_SPEC.md) (frontend flows). Architecture decisions are recorded as individual ADRs in [`docs/adr/`](./docs/adr/); LLM prompt templates are versioned in [`docs/prompts/`](./docs/prompts/). The branch/PR/CI setup itself — reusable across other projects, not specific to this one — is documented in [`branch-pr-ci-workflow.md`](./branch-pr-ci-workflow.md).
 
 ## Prerequisites
 
