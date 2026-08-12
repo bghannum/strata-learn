@@ -5,14 +5,24 @@ global asyncpg-backed async engine (created once at import time) then raises
 the context manager pins one loop for the whole block.
 """
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from redis.exceptions import ConnectionError as RedisConnectionError
 
+from app.config import settings
 from app.main import app
+from app.redis_pool import get_redis_pool
 
 
 def test_create_repo_from_git_url(git_fixture_repo: Path) -> None:
+    # Phase 1.5: POST /repos returns as soon as the job is enqueued, not once
+    # indexing finishes — status is "pending" here, not "ready". The full
+    # pending -> parsing -> ready path is exercised by
+    # tests/api/test_repo_progress_ws.py and tests/worker/test_pipeline.py,
+    # which actually drive the worker (nothing does here — no arq worker
+    # process runs during the test suite).
     with TestClient(app) as client:
         response = client.post(
             "/repos",
@@ -25,10 +35,7 @@ def test_create_repo_from_git_url(git_fixture_repo: Path) -> None:
 
         snapshot = client.get(f"/repos/{body['id']}/snapshot")
         assert snapshot.status_code == 200
-        snap_body = snapshot.json()
-        assert snap_body["status"] == "ready"
-        assert snap_body["file_count"] == 1
-        assert snap_body["language_summary"] == {"python": 1}
+        assert snapshot.json()["status"] == "pending"
 
 
 def test_create_repo_from_zip_upload(tmp_path: Path) -> None:
@@ -49,6 +56,81 @@ def test_create_repo_from_zip_upload(tmp_path: Path) -> None:
     assert body["source_type"] == "zip_upload"
     assert body["source_uri"] == "upload.zip"
     assert body["display_name"] == "zip test"
+
+
+def test_create_repo_zip_upload_over_size_limit_returns_422(tmp_path: Path, monkeypatch) -> None:
+    # Guards the bounded-read fix: file.read(max_bytes + 1) + a length check,
+    # instead of file.read() unconditionally buffering the whole upload
+    # before any size check ran.
+    monkeypatch.setattr(settings, "zip_upload_max_bytes", 10)
+    import zipfile
+
+    zip_path = tmp_path / "upload.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("hello.py", "def hello():\n    return 'hi'\n")
+
+    with TestClient(app) as client, open(zip_path, "rb") as f:
+        response = client.post(
+            "/repos",
+            data={"source_type": "zip_upload"},
+            files={"file": ("upload.zip", f, "application/zip")},
+        )
+    assert response.status_code == 422
+
+
+def test_create_repo_enqueue_failure_marks_snapshot_failed(git_fixture_repo: Path) -> None:
+    # Simulates Redis going away between the repo/snapshot commit and the
+    # enqueue call — a real gap: those rows are already durably committed by
+    # that point. Without the fix, they'd be stranded at "pending" forever
+    # while the client sees a bare, unexplained 500.
+    async def broken_redis_pool() -> AsyncIterator[object]:
+        class _BrokenRedis:
+            async def set(self, *args, **kwargs):
+                raise ConnectionError("simulated redis outage")
+
+            async def enqueue_job(self, *args, **kwargs):
+                raise ConnectionError("simulated redis outage")
+
+        yield _BrokenRedis()
+
+    app.dependency_overrides[get_redis_pool] = broken_redis_pool
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/repos",
+                data={"source_type": "git_url", "git_url": git_fixture_repo.as_uri()},
+            )
+            assert response.status_code == 503
+
+            listed = client.get("/repos").json()
+            assert len(listed) == 1  # committed despite the 503 — exactly what's being guarded against
+            snapshot = client.get(f"/repos/{listed[0]['id']}/snapshot").json()
+            assert snapshot["status"] == "failed"
+    finally:
+        app.dependency_overrides.pop(get_redis_pool, None)
+
+
+def test_create_repo_redis_unreachable_at_dependency_time_returns_503(git_fixture_repo: Path) -> None:
+    # Distinct from the enqueue-failure case above: here Redis fails while
+    # get_redis_pool's own create_pool() call is resolving, before
+    # create_repo's body runs at all — so nothing's committed to clean up,
+    # and api/repos.py's own try/except never even gets a chance to fire.
+    # This is main.py's app-level RedisError handler's job specifically.
+    async def failing_redis_pool() -> AsyncIterator[object]:
+        raise RedisConnectionError("simulated: redis completely unreachable")
+        yield  # pragma: no cover - unreachable; keeps this a generator so it matches get_redis_pool's shape
+
+    app.dependency_overrides[get_redis_pool] = failing_redis_pool
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/repos",
+                data={"source_type": "git_url", "git_url": git_fixture_repo.as_uri()},
+            )
+            assert response.status_code == 503
+            assert client.get("/repos").json() == []  # nothing committed — dependency failed first
+    finally:
+        app.dependency_overrides.pop(get_redis_pool, None)
 
 
 def test_create_repo_bad_git_url_returns_422() -> None:
@@ -94,9 +176,10 @@ def test_get_repo_not_found_returns_404() -> None:
 
 
 def test_get_snapshot_for_repo_without_one_is_unreachable() -> None:
-    # every repo created via POST /repos gets a snapshot synchronously (D13) —
-    # there's no code path that creates a repo without one, so 404 is only
-    # reachable via a nonexistent repo id
+    # every repo created via POST /repos gets a pending snapshot synchronously
+    # (only the indexing itself is async as of Phase 1.5, D13) — there's no
+    # code path that creates a repo without one, so 404 is only reachable via
+    # a nonexistent repo id
     with TestClient(app) as client:
         response = client.get("/repos/00000000-0000-0000-0000-000000000000/snapshot")
     assert response.status_code == 404
