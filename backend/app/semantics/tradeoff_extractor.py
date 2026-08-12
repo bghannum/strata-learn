@@ -142,7 +142,15 @@ def _context_snippet(file_path: str, dependency_graph: dict) -> str:
     return "\n".join(lines) if lines else "(no other repo files import or are imported by this file)"
 
 
-def _valid_ref(ref: EvidenceRef, module_units_by_path: dict[str, CodeUnit]) -> bool:
+def _valid_ref(ref: EvidenceRef, candidate_file_path: str, module_units_by_path: dict[str, CodeUnit]) -> bool:
+    if ref.file_path != candidate_file_path:
+        # The model only ever sees the *candidate's own* file content
+        # (code_snippet) — importer/imported files named in context_snippet
+        # never have their content shown, so a citation against one of them
+        # is an unverifiable guess, not a grounded reference, even if the
+        # line range happens to fall within that file's real bounds (found
+        # via Codex's Phase 2 pre-push review).
+        return False
     module_unit = module_units_by_path.get(ref.file_path)
     if module_unit is None:
         return False
@@ -174,7 +182,11 @@ async def extract_tradeoffs(
         output = response.parsed
         assert isinstance(output, TradeoffCardOutput)
 
-        validated_refs = [ref.model_dump() for ref in output.evidence_refs if _valid_ref(ref, module_units_by_path)]
+        validated_refs = [
+            ref.model_dump()
+            for ref in output.evidence_refs
+            if _valid_ref(ref, candidate.file_path, module_units_by_path)
+        ]
         if not validated_refs:
             # The seed citation only explains *why* this file was flagged as a
             # decision point (the deterministic heuristic) — it doesn't

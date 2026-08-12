@@ -111,6 +111,53 @@ async def test_extract_tradeoffs_seeds_citation_and_validates_refs(tmp_path: Pat
     assert "import arq" in llm.calls[0].messages[0].content
 
 
+async def test_extract_tradeoffs_rejects_ref_to_a_file_the_model_never_saw(tmp_path: Path) -> None:
+    # Found via Codex's Phase 2 pre-push review: the model only ever sees the
+    # candidate's own file content (code_snippet) — importer/imported files
+    # named in context_snippet never have their content shown. A citation
+    # against one of those real, known files with a plausible in-bounds line
+    # range must still be rejected — an in-bounds range against a file the
+    # model never read is an unverifiable guess, not a grounded reference.
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "app.py").write_text("import arq\n\n\ndef main():\n    pass\n")
+
+    code_units = [_module_unit("app.py", 5), _module_unit("db.py", 20)]  # db.py is real but never read
+    candidates = identify_decision_points(
+        {
+            "nodes": [{"id": "app.py", "kind": "file", "language": "python"}, {"id": "db.py", "kind": "file", "language": "python"}],
+            "edges": [{"source": "app.py", "target": "external:arq", "kind": "imports_external"}],
+        },
+        code_units,
+        entry_points=[],
+    )
+    assert candidates[0].file_path == "app.py"
+
+    llm = FakeLLMProvider(
+        [
+            LLMResponse(
+                text="",
+                parsed=TradeoffCardOutput(
+                    decision="use arq",
+                    alternatives_considered=["celery"],
+                    likely_reasoning="lighter weight",
+                    tradeoff_cost="another moving part",
+                    confidence="medium",
+                    # in-bounds for db.py, but db.py's content was never shown to the model
+                    evidence_refs=[EvidenceRef(file_path="db.py", line_start=1, line_end=10)],
+                ),
+                model="fake-model",
+                stop_reason="end_turn",
+                usage={},
+            )
+        ]
+    )
+
+    results = await extract_tradeoffs(llm, candidates, source_dir, {"edges": []}, code_units)
+
+    assert results == []  # no validated refs remain once the cross-file ref is rejected
+
+
 async def test_extract_tradeoffs_drops_card_with_no_validated_refs(tmp_path: Path) -> None:
     # Found via Codex's Phase 2 pre-push review: the seed citation (from the
     # deterministic decision-point heuristic) only explains why this file was
