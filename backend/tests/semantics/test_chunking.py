@@ -1,7 +1,11 @@
 import uuid
 
 from app.db.models import CodeUnit, UnitType
-from app.semantics.chunking import MAX_UNITS_PER_CHUNK, chunk_by_module
+from app.semantics.chunking import (
+    MAX_FILES_PER_SNAPSHOT,
+    MAX_UNITS_PER_CHUNK,
+    chunk_by_module,
+)
 
 
 def _unit(file_path: str, unit_type: UnitType, name: str, line_start: int, line_end: int) -> CodeUnit:
@@ -53,3 +57,21 @@ def test_chunk_by_module_splits_oversized_file() -> None:
     assert all(c.module_unit.name == "big.py" for c in chunks)
     assert len(chunks[0].units) == MAX_UNITS_PER_CHUNK
     assert len(chunks[1].units) == 10
+
+
+def test_chunk_by_module_caps_total_files_deterministically() -> None:
+    # Found via Codex's Phase 2 pre-push review: ingestion allows far more
+    # files than Layer B should ever summarize sequentially (billed LLM
+    # calls). The chosen subset must also be deterministic — the same files
+    # every time, not whatever order the caller happened to pass units in
+    # (which, in production, comes from an unordered SELECT).
+    file_count = MAX_FILES_PER_SNAPSHOT + 10
+    units = [_unit(f"file_{i:03d}.py", UnitType.module, f"file_{i:03d}.py", 1, 5) for i in range(file_count)]
+
+    chunks = chunk_by_module(units)
+
+    assert len(chunks) == MAX_FILES_PER_SNAPSHOT
+    selected = {c.file_path for c in chunks}
+    # deterministic: alphabetically-first MAX_FILES_PER_SNAPSHOT file names
+    expected = {f"file_{i:03d}.py" for i in range(MAX_FILES_PER_SNAPSHOT)}
+    assert selected == expected
