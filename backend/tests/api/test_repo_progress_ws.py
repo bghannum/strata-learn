@@ -1,4 +1,4 @@
-"""Exercises the Phase 1.5 checkpoint from PROJECT_PLAN.md §12 directly: add a
+"""Exercises the Phase 1.5 checkpoint from docs/design/original-project-plan.md §12 directly: add a
 repo, watch status transition pending -> parsing -> ready over the websocket.
 
 No arq worker process runs during the test suite, so the pipeline is driven in

@@ -1,32 +1,28 @@
-# React + TypeScript + Vite
+# Strata Learn frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+**Status:** Scaffold only. Functional frontend work begins in Phase 4.
 
-Currently, two official plugins are available:
+This package contains the React/Vite shell and placeholder routes for repository ingestion, progress, study guides, and quizzes. The component names establish the intended structure but do not imply that their flows are implemented.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+The planned experience is documented in the [UI/UX specification](../docs/design/ui-spec.md). Current backend capabilities are documented in [Current architecture](../docs/architecture.md).
 
-## React Compiler
+## Commands
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
+npm run dev      # Vite development server
+npm run lint     # Oxlint
+npm run build    # TypeScript check + production build
+npm run preview  # serve the production build locally
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+The development server expects the API at `VITE_API_URL`, which Docker Compose sets to `http://localhost:8000`.
+
+## Structure
+
+- `src/pages/` contains route-level placeholders.
+- `src/components/` contains planned reusable UI components.
+- `src/api/client.ts` is the frontend API boundary.
+- `src/App.tsx` defines current routing.
+
+When Phase 4 begins, update this file with real routing, authentication, state-management, and testing conventions as those decisions are implemented.

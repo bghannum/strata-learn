@@ -21,7 +21,7 @@ class SourcePreparationError(ValueError):
 
 
 # tempfile.gettempdir() resolves to /tmp on the containers this runs in, matching
-# PROJECT_PLAN.md §8's /tmp/strata-learn-jobs/{snapshot_id}/ layout.
+# docs/design/original-project-plan.md §8's /tmp/strata-learn-jobs/{snapshot_id}/ layout.
 JOBS_ROOT = Path(tempfile.gettempdir()) / "strata-learn-jobs"
 
 

@@ -1,7 +1,7 @@
 # mcq_generator — v1
 
 **Used by:** `backend/app/quizzing/mcq_generator.py`
-**Model tier:** Cheapest capable tier (see `PROJECT_PLAN.md` §9.0) — high-volume generation, optimize for cost.
+**Model tier:** Cheapest capable tier (see `docs/design/original-project-plan.md` §9.0) — high-volume generation, optimize for cost.
 
 ## System
 

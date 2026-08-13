@@ -1,7 +1,7 @@
 # fill_blank_generator — v1
 
 **Used by:** `backend/app/quizzing/fill_blank_generator.py`
-**Model tier:** Cheapest capable tier (see `PROJECT_PLAN.md` §9.0)
+**Model tier:** Cheapest capable tier (see `docs/design/original-project-plan.md` §9.0)
 
 ## System
 

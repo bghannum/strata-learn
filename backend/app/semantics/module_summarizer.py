@@ -1,4 +1,4 @@
-"""Implements docs/prompts/module_summarizer.v1.md (PROJECT_PLAN.md §9.1):
+"""Implements docs/prompts/module_summarizer.v1.md (docs/design/original-project-plan.md §9.1):
 one LLM call per module chunk, grounded in Layer A facts already persisted as
 CodeUnit rows — no source re-read needed. Citation for each summary is the
 module unit's own line range (Ground Rule #3: every LLM claim needs a citation).

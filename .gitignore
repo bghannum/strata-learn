@@ -17,7 +17,7 @@ frontend/.vite/
 # Docker
 docker-compose.override.yml
 
-# Local Codex review output (regenerated per push by .githooks/pre-push)
+# Local Codex review output (generated intentionally by scripts/codex-review)
 CODEX_CODE_REVIEW.md
 
 # OS

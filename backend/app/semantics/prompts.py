@@ -1,5 +1,5 @@
 """Loads versioned prompt templates from docs/prompts/*.v{version}.md
-(PROJECT_PLAN.md §9.0: prompts live as files, not inline strings, so they can
+(docs/design/original-project-plan.md §9.0: prompts live as files, not inline strings, so they can
 be iterated on independently of code)."""
 
 import re

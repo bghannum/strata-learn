@@ -1,66 +1,79 @@
 # Strata Learn
 
-A tool that ingests a repository (git URL or zip upload) and generates a study guide — architecture diagrams, plain-English explanations, trade-off analysis — plus quizzes (multiple choice, fill-in-blank, diagram-drawing) to verify you actually understand a codebase, not just that it runs.
+Strata Learn ingests a repository from a Git URL or zip upload, extracts its structure, and uses citation-grounded semantic analysis to help a developer understand the codebase. The eventual product adds generated study guides and quizzes; the current implementation covers ingestion plus structural and semantic analysis.
 
-Full design context lives in [`PROJECT_PLAN.md`](./PROJECT_PLAN.md) (architecture, data model, build phases) and [`UI_SPEC.md`](./UI_SPEC.md) (frontend flows). Architecture decisions are recorded as individual ADRs in [`docs/adr/`](./docs/adr/); LLM prompt templates are versioned in [`docs/prompts/`](./docs/prompts/). The branch/PR/CI setup itself — reusable across other projects, not specific to this one — is documented in [`branch-pr-ci-workflow.md`](./branch-pr-ci-workflow.md).
+## Current status
+
+Phases 0 through 2 are complete:
+
+- project scaffolding and local Docker environment;
+- repository ingestion and deterministic Layer A analysis;
+- Redis/arq background processing and WebSocket progress;
+- Anthropic-backed Layer B module summaries, architecture-pattern detection, and trade-off extraction.
+
+Phase 3, study-guide generation, is next. The frontend routes and later-phase backend modules are placeholders rather than functional product features. Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
+
+See the [documentation index](docs/README.md) for current architecture, development workflow, decisions, planned UX, and historical design material.
 
 ## Prerequisites
 
-Everything below was already present on this machine as of 2026-08-09 — the versions shown under "found" are what was detected. If you're setting this up somewhere new, install anything missing.
+For the recommended Docker workflow:
 
-| Tool | Needed for | Minimum version | Found here | Install |
-|---|---|---|---|---|
-| [Docker Desktop](https://www.docker.com/products/docker-desktop/) (includes Compose) | Running the full stack — postgres, redis, api, worker, web (§1, §13) | Docker 24+, Compose v2+ | Docker 29.6.2, Compose v5.3.1 | `brew install --cask docker` |
-| [Python](https://www.python.org/) | Backend (FastAPI, tree-sitter, etc.) if you run it outside Docker | 3.12 | 3.12.13 (as `python3.12` — the plain `python3` on this Mac is the older system 3.9.6, so scripts below call `python3.12` explicitly) | `brew install python@3.12` |
-| [Node.js](https://nodejs.org/) | Frontend (Vite + React) if you run it outside Docker | 20+ | v26.3.1 (npm 11.16.0) | `brew install node` |
-| [git](https://git-scm.com/) | Cloning repos to study, and this repo's own version control | any recent | 2.55.0 | `brew install git` |
-| [Homebrew](https://brew.sh/) | Installing the above on macOS | — | 6.0.15 | — |
+- Docker 24+ with Compose v2;
+- Git;
+- an Anthropic API key for Layer B indexing.
 
-Everything above is optional except Docker if you only ever run via `docker compose up` — Python and Node are only needed for running backend/frontend directly on the host (faster iteration loop, e.g. `pytest` without a container rebuild).
+For host-based development, also install Python 3.12 and Node.js 20 or newer.
 
-### API keys (needed from Phase 2 onward, not Phase 0/1)
+OpenAI support remains part of the provider-abstraction plan, but only the Anthropic production provider is currently implemented. `OPENAI_API_KEY` is therefore not required.
 
-The semantic-analysis layer (module summaries, pattern detection, trade-off extraction — see ADR-003, ADR-009) calls Anthropic and OpenAI. Get keys from:
-
-- Anthropic: https://console.anthropic.com/
-- OpenAI: https://platform.openai.com/
-
-Put them in `.env` (see below) — nothing in Phase 0/1 (ingestion + structural analysis) needs them.
-
-## Quickstart (Docker Compose — recommended)
+## Quickstart
 
 ```bash
-cp .env.example .env   # fill in ANTHROPIC_API_KEY / OPENAI_API_KEY when you reach Phase 2
+cp .env.example .env
+# Set ANTHROPIC_API_KEY in .env before indexing a repository.
 docker compose up --build
 ```
 
-This brings up 5 services: `postgres` (5432), `redis` (6379), `api` (8000), `worker` (arq, no exposed port), `web` (5173).
+Compose starts PostgreSQL, Redis, the FastAPI service, the arq worker, and the React/Vite development server.
 
-Verify:
+Verify the API and open the frontend:
 
 ```bash
-curl http://localhost:8000/health   # {"status": "ok"}
+curl http://localhost:8000/health   # {"status":"ok"}
 open http://localhost:5173
 ```
 
-Bring it down with `docker compose down` (add `-v` to also drop the postgres volume).
+The frontend is currently a scaffold, so API-driven ingestion is the meaningful Phase 2 workflow. Interactive API documentation is available at `http://localhost:8000/docs`.
 
-## Local dev (without Docker)
+Stop the stack with `docker compose down`. Add `-v` only when you intentionally want to delete the local PostgreSQL volume.
 
-**Backend:**
+## Local development without Docker
+
+Start PostgreSQL and Redis separately, for example:
+
+```bash
+docker compose up postgres redis
+```
+
+Then run the backend:
 
 ```bash
 cd backend
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+alembic upgrade head
 uvicorn app.main:app --reload
-pytest
 ```
 
-You'll still need `postgres` and `redis` reachable — either run just those two via `docker compose up postgres redis`, or point `DATABASE_URL`/`REDIS_URL` in `.env` at your own instances.
+In another terminal, run the worker from `backend/` with the same virtual environment active:
 
-**Frontend:**
+```bash
+arq app.worker.tasks.WorkerSettings
+```
+
+Run the frontend separately:
 
 ```bash
 cd frontend
@@ -68,38 +81,52 @@ npm install
 npm run dev
 ```
 
-## Git hooks
+The root `.env` is resolved regardless of whether backend commands run from the repository root or `backend/`.
 
-One-time per clone, to enable the local pre-push Codex review (see `CLAUDE.md` "Git workflow"):
+## Tests and review
+
+Backend tests use real PostgreSQL and Redis services rather than mocked database layers:
 
 ```bash
-git config core.hooksPath .githooks
+cd backend
+pytest -q
+
+cd ../frontend
+npm run lint
+npm run build
 ```
 
-Requires the [Codex CLI](https://developers.openai.com/codex) installed and logged in (`codex login`, ChatGPT subscription auth — not an API key). Advisory only: a missing CLI or a failed review just skips, never blocks the push.
+Deterministic checks run automatically on every pull-request update. AI review is intentional rather than push-triggered: once a change is complete, committed, and passing the full suite, run:
+
+```bash
+./scripts/codex-review
+```
+
+The report is written to the gitignored `CODEX_CODE_REVIEW.md`. The complete blocker/defer policy is in the [development workflow](docs/development/workflow.md).
 
 ## Database migrations
 
-Migrations are managed with Alembic, run from `backend/` with the venv active:
+Run Alembic commands from `backend/` with the virtual environment active:
 
 ```bash
-alembic upgrade head                          # apply migrations
-alembic revision --autogenerate -m "message"  # generate one from model changes
+alembic upgrade head
+alembic revision --autogenerate -m "message"
 ```
 
-## Repository structure
+## Repository map
 
-See `PROJECT_PLAN.md` §6 for the full annotated layout. At a glance:
-
-```
+```text
 strata-learn/
-├── docs/adr/        # architecture decision records
-├── docs/prompts/     # versioned LLM prompt templates
-├── backend/          # FastAPI app, tree-sitter analysis, arq worker
-├── frontend/          # React + TypeScript + Vite + Tailwind
-└── docker-compose.yml
+├── backend/             FastAPI, analysis pipeline, arq worker, and tests
+├── frontend/            React/Vite scaffold for the planned product UI
+├── docs/
+│   ├── adr/             Architecture decision records
+│   ├── design/          Planned and historical design documents
+│   ├── development/     Current contributor workflow
+│   ├── history/         Resolved issues and retired experiments
+│   └── prompts/         Versioned runtime LLM prompt templates
+├── scripts/             Explicit developer utilities
+└── docker-compose.yml   Local service topology
 ```
 
-## Status
-
-Phase 0 (scoping & setup) complete — see `PROJECT_PLAN.md` §12 for the full phase-by-phase build plan.
+For the implemented pipeline and API surface, read [Current architecture](docs/architecture.md).

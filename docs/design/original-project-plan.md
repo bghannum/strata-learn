@@ -1,19 +1,20 @@
-# Strata Learn — Repo Study Guide & Quiz Generator
-## Master Project Plan
+# Strata Learn — Original Project Plan
+
+> **Historical/aspirational document.** This preserves the project vision, architecture sketch, and proposed implementation sequence as they stood before development. It is not the current implementation inventory, phase tracker, or canonical source for operational behavior. See the [documentation index](../README.md), [current architecture](../architecture.md), and [GitHub Issues](https://github.com/bghannum/strata-learn/issues) instead.
+
+## Master project plan
 
 | | |
 |---|---|
-| **Status** | Planning complete — ready for Phase 0 |
+| **Status** | Historical design blueprint; Phases 0–2 have since been implemented |
 | **Version** | 2.1 |
 | **Last updated** | 2026-08-09 |
 | **Owner** | Solo builder (primary user + developer) |
 | **Intended reader** | Claude Code (as build context) + the builder |
 
-**Purpose of this document:** This is the single source of truth for building this project. It's written to be handed directly to Claude Code as the starting context for a new repository. It contains architecture decisions, phase-by-phase build tasks, data schemas, prompt templates, and file structure — enough to start scaffolding immediately without additional back-and-forth on the basics.
+**Original purpose:** This document was written as the starting context for scaffolding the repository. Its unchecked tasks, schemas, API surface, technology versions, and file tree record the intended plan rather than claiming to match the code today. Individual ADRs remain canonical for accepted decisions.
 
 **Project goal:** A tool that ingests any repository (via git URL or zip upload) and generates a study guide (architecture diagrams, plain-English explanations, trade-off analysis) plus quizzes (multiple choice, fill-in-blank, and diagram-drawing questions) to help the user build real understanding of codebases — including ones built with heavy AI coding assistance, where the risk is shipping code you don't actually understand.
-
-**Primary user:** The builder themself — a developer growing into a solutions architect role, using this tool against their own projects to verify comprehension, not just output.
 
 ---
 

@@ -1,4 +1,4 @@
-"""Implements docs/prompts/tradeoff_extractor.v1.md (PROJECT_PLAN.md §9.3) —
+"""Implements docs/prompts/tradeoff_extractor.v1.md (docs/design/original-project-plan.md §9.3) —
 the product's differentiator. Two parts: `identify_decision_points` picks
 which files are worth asking about (a deterministic heuristic — the spec
 doesn't pin this down, see the module docstring below), and
@@ -23,7 +23,7 @@ from app.db.models import CodeUnit, UnitType
 from app.semantics.llm_provider import LLMProvider, Message
 from app.semantics.prompts import load_prompt
 
-# JUDGMENT CALL — PROJECT_PLAN.md doesn't specify how to identify "decision
+# JUDGMENT CALL — docs/design/original-project-plan.md doesn't specify how to identify "decision
 # points" to feed the trade-off extractor. This heuristic combines (a) files
 # with high fan-in+fan-out in the dependency graph and (b) files importing a
 # known "infra" package (queue/cache/HTTP/DB libraries — the kind of import

@@ -1,7 +1,7 @@
 # fill_blank_concept_grader — v1
 
 **Used by:** `backend/app/quizzing/grading/fill_blank_grader.py`
-**Model tier:** N/A — fallback only, after exact/alternative match fails. See `PROJECT_PLAN.md` §10.2.
+**Model tier:** N/A — fallback only, after exact/alternative match fails. See `docs/design/original-project-plan.md` §10.2.
 
 ## System
 

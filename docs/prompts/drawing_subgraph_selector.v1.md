@@ -1,7 +1,7 @@
 # drawing_subgraph_selector — v1
 
 **Used by:** `backend/app/quizzing/drawing_generator.py`
-**Model tier:** N/A for the reference graph itself (deterministic, extracted from Layer A) — this prompt only picks question framing + scope. See `PROJECT_PLAN.md` §9.6.
+**Model tier:** N/A for the reference graph itself (deterministic, extracted from Layer A) — this prompt only picks question framing + scope. See `docs/design/original-project-plan.md` §9.6.
 
 ## System
 
