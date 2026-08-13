@@ -7,7 +7,7 @@ Live phase tracker — update this table the moment a phase starts or its checkp
 | 0 — Scoping & Setup | Done (2026-08-09) |
 | 1 — Ingestion + Layer A (structural analysis) | Done (2026-08-10) |
 | 1.5 — Job Queue Wiring | Done (2026-08-11) |
-| 2 — Layer B (Semantic Analysis) | PR open: [#17](https://github.com/bghannum/strata-learn/pull/17) (2026-08-12, `feature/phase-2-layer-b-semantic-analysis`) — code complete, 127 tests passing, real-repo checkpoint reviewed and judged good, remaining P2 review findings backlogged as [#14](https://github.com/bghannum/strata-learn/issues/14)/[#15](https://github.com/bghannum/strata-learn/issues/15)/[#16](https://github.com/bghannum/strata-learn/issues/16) — awaiting merge confirmation. Hands-on review of the output deferred by the user to Phase 4 (no frontend yet to look at it through) |
+| 2 — Layer B (Semantic Analysis) | PR open: [#17](https://github.com/bghannum/strata-learn/pull/17) (2026-08-12, `feature/phase-2-layer-b-semantic-analysis`) — code complete, 127 tests passing, CI green, real-repo checkpoint reviewed and judged good, remaining non-blocking review findings backlogged as [#14](https://github.com/bghannum/strata-learn/issues/14)/[#15](https://github.com/bghannum/strata-learn/issues/15)/[#16](https://github.com/bghannum/strata-learn/issues/16)/[#18](https://github.com/bghannum/strata-learn/issues/18)/[#19](https://github.com/bghannum/strata-learn/issues/19)/[#20](https://github.com/bghannum/strata-learn/issues/20) — awaiting merge confirmation. Hands-on review of the output deferred by the user to Phase 4 (no frontend yet to look at it through) |
 | 3 — Study Guide Generation | Not started |
 | 4 — Frontend Shell | Not started |
 | 5 — Quiz Generation & Taking (MCQ/fill-blank) | Not started |
