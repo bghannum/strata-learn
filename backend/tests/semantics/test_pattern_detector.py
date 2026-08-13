@@ -40,6 +40,47 @@ def test_bound_graph_caps_nodes_deterministically() -> None:
     assert {n["id"] for n in bounded["nodes"]} == {f"file_{i:04d}.py" for i in range(MAX_GRAPH_NODES)}
 
 
+def test_bound_graph_prioritizes_file_nodes_over_external_nodes() -> None:
+    # Found via Codex's Phase 2 pre-push review round 8: sorting every node
+    # together let "external:*" package nodes (often alphabetically early)
+    # crowd real files out of the fixed node budget on a dependency-heavy
+    # repo. All files must survive if they fit within the budget, even when
+    # there are far more external nodes than remaining room.
+    file_nodes = [{"id": f"src/file_{i:04d}.py", "kind": "file", "language": "python"} for i in range(10)]
+    external_nodes = [
+        {"id": f"external:package_{i:04d}", "kind": "external", "language": None}
+        for i in range(MAX_GRAPH_NODES + 10)
+    ]
+    edges = [
+        {"source": "src/file_0000.py", "target": n["id"], "kind": "imports_external"} for n in external_nodes
+    ]
+    dependency_graph = {"nodes": file_nodes + external_nodes, "edges": edges}
+
+    bounded = _bound_graph(dependency_graph)
+
+    kept_ids = {n["id"] for n in bounded["nodes"]}
+    assert {n["id"] for n in file_nodes} <= kept_ids
+    assert len(bounded["nodes"]) == MAX_GRAPH_NODES
+
+
+def test_bound_graph_drops_external_nodes_not_adjacent_to_a_kept_file() -> None:
+    # An external node with no edge to any retained file is dropped even
+    # when budget remains — it isn't evidence of an actual dependency
+    # relationship the model could ground a claim in.
+    file_nodes = [{"id": "src/a.py", "kind": "file", "language": "python"}]
+    connected = {"id": "external:used", "kind": "external", "language": None}
+    orphan = {"id": "external:unused", "kind": "external", "language": None}
+    dependency_graph = {
+        "nodes": [*file_nodes, connected, orphan],
+        "edges": [{"source": "src/a.py", "target": "external:used", "kind": "imports_external"}],
+    }
+
+    bounded = _bound_graph(dependency_graph)
+
+    kept_ids = {n["id"] for n in bounded["nodes"]}
+    assert kept_ids == {"src/a.py", "external:used"}
+
+
 def test_bound_graph_drops_edges_touching_a_truncated_node() -> None:
     # An edge referencing a node that got cut by the node cap must not
     # survive — otherwise the graph handed to the model references a node it

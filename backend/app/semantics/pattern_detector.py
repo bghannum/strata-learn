@@ -63,12 +63,35 @@ def _candidate_paths(raw: str) -> list[str]:
 
 
 def _bound_graph(dependency_graph: dict) -> dict:
-    nodes = sorted(dependency_graph.get("nodes", []), key=lambda n: n["id"])[:MAX_GRAPH_NODES]
-    kept_ids = {n["id"] for n in nodes}
+    all_nodes = dependency_graph.get("nodes", [])
+    all_edges = dependency_graph.get("edges", [])
 
-    edges = [
-        e for e in dependency_graph.get("edges", []) if e["source"] in kept_ids and e["target"] in kept_ids
-    ]
+    # File nodes get priority over "external:*" package nodes (found via
+    # Codex's Phase 2 pre-push review round 8: sorting every node together
+    # let external dependency IDs — often alphabetically early, e.g.
+    # "external:aiohttp" — crowd real files out of the budget on a
+    # dependency-heavy repo, skewing pattern detection toward files that
+    # happened to sort late). Files are capped first; any remaining budget
+    # goes to external nodes, and only ones actually adjacent to a kept file
+    # (real evidence of a dependency relationship), not an arbitrary subset.
+    file_nodes = sorted((n for n in all_nodes if n.get("kind") == "file"), key=lambda n: n["id"])
+    external_nodes = sorted((n for n in all_nodes if n.get("kind") != "file"), key=lambda n: n["id"])
+
+    kept_file_nodes = file_nodes[:MAX_GRAPH_NODES]
+    kept_file_ids = {n["id"] for n in kept_file_nodes}
+
+    remaining_budget = MAX_GRAPH_NODES - len(kept_file_nodes)
+    kept_external_nodes: list[dict] = []
+    if remaining_budget > 0:
+        adjacent_external_ids = {e["target"] for e in all_edges if e["source"] in kept_file_ids} | {
+            e["source"] for e in all_edges if e["target"] in kept_file_ids
+        }
+        kept_external_nodes = [n for n in external_nodes if n["id"] in adjacent_external_ids][:remaining_budget]
+
+    nodes = kept_file_nodes + kept_external_nodes
+    kept_ids = kept_file_ids | {n["id"] for n in kept_external_nodes}
+
+    edges = [e for e in all_edges if e["source"] in kept_ids and e["target"] in kept_ids]
     edges = sorted(edges, key=lambda e: (e["source"], e["target"], e["kind"]))[:MAX_GRAPH_EDGES]
 
     return {"nodes": nodes, "edges": edges}
