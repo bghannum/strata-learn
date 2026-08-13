@@ -4,15 +4,16 @@ Strata Learn ingests a repository from a Git URL or zip upload, extracts its str
 
 ## Current status
 
-Phases 0 through 3 are complete:
+Phases 0 through 3, plus the core of Phase 4, are complete:
 
 - project scaffolding and local Docker environment;
 - repository ingestion and deterministic Layer A analysis;
 - Redis/arq background processing and WebSocket progress;
 - Anthropic-backed Layer B module summaries, architecture-pattern detection, and trade-off extraction;
-- citation-grounded study guide generation (Overview, Architecture, Trade-offs, Glossary, Deep-Dives) plus a Mermaid architecture diagram, served via `GET /repos/{id}/study-guide`.
+- citation-grounded study guide generation (Overview, Architecture, Trade-offs, Glossary, Deep-Dives) plus a Mermaid architecture diagram, served via `GET /repos/{id}/study-guide`;
+- a working frontend: add a repo, watch it index live, and read the generated study guide with inline diagrams and clickable citations.
 
-Phase 4, the frontend shell, is next — a real UI for adding a repo, watching indexing progress, and reading the generated study guide. Until then the frontend routes are placeholders and the study guide is only reachable through the API. Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
+What's left of Phase 4 is session authentication (login/register UI + backend session handling) — the app is currently single-tenant with no login wall, by design for this stage. Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
 
 See the [documentation index](docs/README.md) for current architecture, development workflow, decisions, planned UX, and historical design material.
 
@@ -45,7 +46,7 @@ curl http://localhost:8000/health   # {"status":"ok"}
 open http://localhost:5173
 ```
 
-The frontend is currently a scaffold, so API-driven ingestion is the meaningful Phase 2 workflow. Interactive API documentation is available at `http://localhost:8000/docs`.
+Add a repository from the Dashboard, watch it index, and open the generated study guide once it's ready. Interactive API documentation is available at `http://localhost:8000/docs`.
 
 Stop the stack with `docker compose down`. Add `-v` only when you intentionally want to delete the local PostgreSQL volume.
 
@@ -119,7 +120,7 @@ alembic revision --autogenerate -m "message"
 ```text
 strata-learn/
 ├── backend/             FastAPI, analysis pipeline, arq worker, and tests
-├── frontend/            React/Vite scaffold for the planned product UI
+├── frontend/            React/Vite app: add a repo, watch progress, read the study guide
 ├── docs/
 │   ├── adr/             Architecture decision records
 │   ├── design/          Planned and historical design documents
