@@ -165,12 +165,17 @@ def _build_tradeoffs(tradeoff_cards: list[TradeoffCard]) -> SectionSpec | None:
             f"**Confidence:** {card.confidence}",
             "",
         ]
-        # claim_excerpt covers decision + reasoning + cost, not just the
-        # decision headline — evidence_refs were validated against the same
-        # LLM call that produced all three together (tradeoff_extractor.py),
-        # so they ground the whole card, not only its title (found via
+        # claim_excerpt covers every rendered generated field except
+        # confidence (self-reported certainty, not itself a claim about the
+        # code) — evidence_refs were validated against the same LLM call
+        # that produced decision/reasoning/cost/alternatives together
+        # (tradeoff_extractor.py), so they ground the whole card (found via
         # Codex's Phase 3 pre-push review).
-        claim_excerpt = f"{card.decision} — {card.likely_reasoning} Trade-off: {card.tradeoff_cost}"
+        alternatives = ", ".join(card.alternatives_considered) or "none recorded"
+        claim_excerpt = (
+            f"{card.decision} — {card.likely_reasoning} "
+            f"Trade-off: {card.tradeoff_cost} Alternatives considered: {alternatives}"
+        )
         for ref in card.evidence_refs:
             citations.append(
                 CitationSpec(
@@ -193,12 +198,13 @@ def _build_glossary(module_summaries: list[ModuleSummary]) -> SectionSpec | None
     if not module_summaries:
         return None
 
-    # First module (by file_path) to mention a concept is credited as its
-    # source citation — a concept repeated across many files would otherwise
-    # need one citation per mention, which the Section/Citation schema
-    # doesn't need for a glossary entry.
+    # First module (by file_path, then line_start for a file split into
+    # multiple chunks — see _build_deep_dives) to mention a concept is
+    # credited as its source citation — a concept repeated across many files
+    # would otherwise need one citation per mention, which the
+    # Section/Citation schema doesn't need for a glossary entry.
     first_source: dict[str, ModuleSummary] = {}
-    for summary in sorted(module_summaries, key=lambda s: s.file_path):
+    for summary in sorted(module_summaries, key=lambda s: (s.file_path, s.line_start)):
         for concept in summary.key_concepts:
             first_source.setdefault(concept, summary)
 
@@ -225,29 +231,43 @@ def _build_deep_dives(module_summaries: list[ModuleSummary]) -> SectionSpec | No
     if not module_summaries:
         return None
 
+    # A file with more class/function units than MAX_UNITS_PER_CHUNK
+    # (chunking.py) gets split into multiple ModuleSummary rows, each
+    # covering the *same* whole-file line range (chunk.module_unit is shared
+    # across a file's chunks, on purpose, for grounding context —
+    # module_summarizer.py) but describing a different subset of the file's
+    # units, so their purpose/role_in_system can genuinely differ. Grouping
+    # by file_path keeps one heading per file instead of repeating it once
+    # per chunk with conflicting text (found via Codex's Phase 3 pre-push
+    # review; the underlying multi-row-per-file behavior is a known,
+    # already-deferred Phase 2 limitation — issue #14 — this only fixes how
+    # Phase 3 renders it).
+    by_file: dict[str, list[ModuleSummary]] = {}
+    for summary in module_summaries:
+        by_file.setdefault(summary.file_path, []).append(summary)
+
     lines = []
     citations = []
-    for summary in sorted(module_summaries, key=lambda s: (s.file_path, s.line_start)):
-        lines += [
-            f"### `{summary.file_path}` (lines {summary.line_start}-{summary.line_end})",
-            "",
-            summary.purpose,
-            "",
-            summary.role_in_system,
-            "",
-        ]
-        # Both rendered sentences, not just purpose — they come from the same
-        # LLM call grounded in the same line range, so both are covered by
-        # this one citation (found via Codex's Phase 3 pre-push review:
-        # citing only purpose left role_in_system with no citation).
-        citations.append(
-            CitationSpec(
-                file_path=summary.file_path,
-                line_start=summary.line_start,
-                line_end=summary.line_end,
-                claim_excerpt=f"{summary.purpose} {summary.role_in_system}",
+    for file_path in sorted(by_file):
+        chunks = sorted(by_file[file_path], key=lambda s: s.line_start)
+        lines += [f"### `{file_path}` (lines {chunks[0].line_start}-{chunks[0].line_end})", ""]
+        for i, summary in enumerate(chunks):
+            if len(chunks) > 1:
+                lines.append(f"**Part {i + 1} of {len(chunks)}:**")
+            lines += [summary.purpose, "", summary.role_in_system, ""]
+            # Both rendered sentences, not just purpose — they come from the
+            # same LLM call grounded in the same line range, so both are
+            # covered by this one citation (found via Codex's Phase 3
+            # pre-push review: citing only purpose left role_in_system with
+            # no citation).
+            citations.append(
+                CitationSpec(
+                    file_path=summary.file_path,
+                    line_start=summary.line_start,
+                    line_end=summary.line_end,
+                    claim_excerpt=f"{summary.purpose} {summary.role_in_system}",
+                )
             )
-        )
 
     return SectionSpec(
         section_type=SectionType.deep_dive, title="Deep Dives", content_md="\n".join(lines).rstrip(), citations=citations
@@ -269,9 +289,15 @@ async def build_sections(
         module_purposes.setdefault(summary.file_path, summary.purpose)
 
     diagram = await build_component_diagram(llm, snapshot.dependency_graph, module_purposes)
+    # claim_excerpt names the actual generated label ("HTTP API routes"),
+    # not just "included in the diagram" — the label itself is the LLM's
+    # claim about this file's role, so the citation should say what it's
+    # grounding (found via Codex's Phase 3 pre-push review).
     diagram_citations = (
         [
-            _whole_file_citation(module_units_by_path, source_dir, path, "Included in the architecture diagram")
+            _whole_file_citation(
+                module_units_by_path, source_dir, path, f"Diagram label: {diagram.labels[path]}"
+            )
             for path in diagram.file_paths
         ]
         if diagram is not None

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.generation.citation import MAX_SNIPPET_LINES, build_citation, read_snippet
+from app.generation.citation import MAX_SNIPPET_CHARS, MAX_SNIPPET_LINES, build_citation, read_snippet
 
 
 def test_build_citation_reads_the_requested_line_range(tmp_path: Path) -> None:
@@ -43,6 +43,19 @@ def test_build_citation_truncates_snippets_beyond_max_lines(tmp_path: Path) -> N
     assert lines[-1] == "… (truncated)"
     assert lines[0] == "line1"
     assert lines[MAX_SNIPPET_LINES - 1] == f"line{MAX_SNIPPET_LINES}"
+
+
+def test_build_citation_truncates_a_single_giant_line_by_character_count(tmp_path: Path) -> None:
+    # A minified/generated file can hold nearly 1 MiB on one line — a
+    # line-count cap alone never truncates that, since len(lines) stays 1.
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "big.min.js").write_text("x" * (MAX_SNIPPET_CHARS * 2))
+
+    citation = build_citation(source_dir, "big.min.js", 1, 1, "claim")
+
+    assert len(citation.snippet_text) <= MAX_SNIPPET_CHARS + len("\n… (truncated)")
+    assert citation.snippet_text.endswith("… (truncated)")
 
 
 def test_read_snippet_matches_build_citation_snippet_text(tmp_path: Path) -> None:

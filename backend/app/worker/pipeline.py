@@ -133,11 +133,19 @@ async def index_repo(
         # obviously-bad URLs before enqueueing, but a remote can still turn
         # slow *after* that passes — this is a separate, later window it
         # doesn't cover.) Shared by both the normal path and the
-        # resume-from-`generating` path below, which also needs source on
-        # disk but not a fresh commit_hash (already recorded).
-        async def _acquire_source():
+        # resume-from-`generating` path below.
+        async def _acquire_source(pinned_commit: str | None = None):
+            # Clear any workspace retained from a crashed earlier attempt
+            # before reacquiring — cleanup_workspace normally runs in this
+            # function's own `finally`, but a hard kill (not a graceful
+            # CancelledError, which does reach `finally`) skips it entirely,
+            # and cloning into or extracting over a non-empty leftover
+            # directory either fails outright or silently mixes stale files
+            # into the reacquired source (found via Codex's Phase 3 pre-push
+            # review).
+            cleanup_workspace(job_id)
             if source_type == SourceType.git_url.value:
-                return await asyncio.to_thread(clone_git_repo, git_url, job_id)  # type: ignore[arg-type]
+                return await asyncio.to_thread(clone_git_repo, git_url, job_id, pinned_commit)  # type: ignore[arg-type]
             zip_bytes = await redis.get(zip_redis_key)
             if zip_bytes is None:
                 raise SourcePreparationError("Uploaded zip is no longer available (expired or already consumed)")
@@ -145,7 +153,11 @@ async def index_repo(
 
         if resuming_from_generating:
             snapshot = existing
-            source_dir, _commit_hash = await _acquire_source()
+            # Pinned to the commit Layer A/B data already describes — a fresh
+            # tip clone could have moved on since the original analysis,
+            # disagreeing with already-persisted line ranges and evidence
+            # (found via Codex's Phase 3 pre-push review).
+            source_dir, _commit_hash = await _acquire_source(existing.commit_hash)
         else:
             # Inside the try, not before it: if this specific publish is what
             # fails (Redis hiccup right here), the snapshot's already committed

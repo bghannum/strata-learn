@@ -56,11 +56,32 @@ def check_git_url_reachable(url: str, timeout_seconds: float = 10) -> None:
         raise SourcePreparationError(f"Could not reach repository: {exc}") from exc
 
 
-def clone_git_repo(url: str, job_id: uuid.UUID) -> tuple[Path, str | None]:
-    """Shallow-clone `url` into a scoped job workspace. Returns (source_dir, commit_hash)."""
+def clone_git_repo(url: str, job_id: uuid.UUID, pinned_commit: str | None = None) -> tuple[Path, str | None]:
+    """Shallow-clone `url` into a scoped job workspace. Returns (source_dir, commit_hash).
+
+    `pinned_commit`, when given, fetches and checks out that exact commit
+    instead of the branch tip — used when worker/pipeline.py resumes study
+    guide generation after a crash: the persisted Layer A/B data (line
+    ranges, evidence, citations) describes the commit originally analyzed,
+    not whatever the tracked branch has since advanced to, so re-acquiring
+    source for citation snippet capture must reacquire that exact commit —
+    a fresh tip clone could disagree with already-persisted line numbers or
+    no longer contain a since-deleted file (found via Codex's Phase 3
+    pre-push review). Requires the remote to allow fetching a reachable SHA
+    directly (`uploadpack.allowReachableSHA1InWant`) — true for GitHub/
+    GitLab and for the local file:// remotes this test suite uses; an
+    origin that rejects it surfaces as a clear SourcePreparationError, not
+    a silent fall-back to the wrong commit.
+    """
     source_dir = job_workspace(job_id) / "source"
     try:
-        repo = git.Repo.clone_from(url, source_dir, depth=1)
+        if pinned_commit is not None:
+            repo = git.Repo.init(source_dir)
+            origin = repo.create_remote("origin", url)
+            origin.fetch(pinned_commit, depth=1)
+            repo.git.checkout(pinned_commit)
+        else:
+            repo = git.Repo.clone_from(url, source_dir, depth=1)
     except git.GitCommandError as exc:
         raise SourcePreparationError(f"Could not clone repository: {exc}") from exc
 

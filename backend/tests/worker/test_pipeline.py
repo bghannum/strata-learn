@@ -13,6 +13,7 @@ reaches Layer B.
 import asyncio
 import io
 import json
+import subprocess
 import zipfile
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -28,9 +29,12 @@ import app.worker.pipeline as pipeline_module
 from app.analysis.snapshot import analyze_source, complete_snapshot
 from app.db.models import (
     AnalysisSnapshot,
+    Citation,
     ModuleSummary,
     PatternClaim,
     Repo,
+    Section,
+    SectionType,
     SnapshotStatus,
     SourceType,
     StudyGuide,
@@ -584,6 +588,81 @@ async def test_index_repo_resumes_from_generating_without_rerunning_layer_b(
         guides = list((await session.exec(select(StudyGuide).where(StudyGuide.snapshot_id == snapshot_id))).all())
     assert len(post_summaries) == 1  # unchanged — not re-run, not duplicated
     assert len(guides) == 1
+
+
+def _commit_repo_file(repo_dir: Path, content: str, message: str) -> str:
+    (repo_dir / "app.py").write_text(content)
+    subprocess.run(["git", "add", "app.py"], cwd=repo_dir, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-q", "-m", message],
+        cwd=repo_dir,
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_dir, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+async def test_index_repo_resume_pins_commit_and_clears_stale_workspace(
+    redis_pool: ArqRedis, tmp_path: Path, pending_repo_factory
+) -> None:
+    # Two real bugs found alongside the resume path above (Codex's Phase 3
+    # pre-push review): (1) a leftover workspace from the crashed original
+    # attempt must not break re-cloning, and (2) the remote branch may have
+    # moved on since the original analysis — resume must reacquire the exact
+    # analyzed commit, not the new tip, since persisted Layer A/B data still
+    # describes the old one.
+    repo_dir = tmp_path / "multi-commit-repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo_dir, check=True)
+    v1_sha = _commit_repo_file(repo_dir, "print('v1')\n", "v1")
+
+    git_url = repo_dir.as_uri()
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
+
+    analysis = analyze_source(repo_dir)
+    async with async_session_factory() as session:
+        snapshot = await complete_snapshot(
+            session, snapshot_id, v1_sha, analysis, final_status=SnapshotStatus.analyzing
+        )
+        assert snapshot is not None
+    await run_layer_b(_no_decision_point_llm(), snapshot, repo_dir)
+
+    # Simulate a leftover workspace from the crashed original attempt: a
+    # stale file sitting exactly where clone_git_repo would try to clone.
+    stale_dir = JOBS_ROOT / str(snapshot_id) / "source"
+    stale_dir.mkdir(parents=True, exist_ok=True)
+    (stale_dir / "stale.txt").write_text("leftover from a crashed attempt\n")
+
+    # The remote moves on after the original analysis.
+    _commit_repo_file(repo_dir, "print('v2')\n", "v2")
+
+    async def run() -> None:
+        await index_repo(
+            {"redis": redis_pool},
+            snapshot_id=snapshot_id,
+            repo_id=repo_id,
+            source_type=SourceType.git_url.value,
+            git_url=git_url,
+            llm=_BoomLLMProvider(),
+        )
+
+    messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)
+    assert [m["status"] for m in messages] == [SnapshotStatus.ready.value]
+
+    snapshot = await _get_snapshot(snapshot_id)
+    assert snapshot.status == SnapshotStatus.ready
+    assert snapshot.commit_hash == v1_sha  # unchanged — resume didn't silently drift to v2
+
+    async with async_session_factory() as session:
+        guide = (await session.exec(select(StudyGuide).where(StudyGuide.snapshot_id == snapshot_id))).one()
+        sections = list((await session.exec(select(Section).where(Section.study_guide_id == guide.id))).all())
+        deep_dive = next(s for s in sections if s.section_type == SectionType.deep_dive)
+        citations = list((await session.exec(select(Citation).where(Citation.section_id == deep_dive.id))).all())
+
+    app_citation = next(c for c in citations if c.file_path == "app.py")
+    assert "v1" in app_citation.snippet_text
+    assert "v2" not in app_citation.snippet_text
 
 
 async def test_index_repo_short_circuit_publish_failure_does_not_mark_failed(

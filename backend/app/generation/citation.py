@@ -18,6 +18,13 @@ from pathlib import Path
 # Phase 3 pre-push review).
 MAX_SNIPPET_LINES = 200
 
+# A line-count cap alone doesn't bound size: a minified/generated file can
+# hold nearly 1 MiB on a single line, which passes the line check untouched
+# (found via Codex's Phase 3 pre-push review — a second BLOCK finding on the
+# same line-cap-only version of this module). Bounds worst-case snippet size
+# regardless of how the content is laid out across lines.
+MAX_SNIPPET_CHARS = 20_000
+
 
 @dataclass(frozen=True)
 class CitationData:
@@ -39,6 +46,9 @@ def read_snippet(source_dir: Path, file_path: str, line_start: int, line_end: in
     if truncated:
         lines = lines[:MAX_SNIPPET_LINES]
     snippet = "\n".join(lines)
+    if len(snippet) > MAX_SNIPPET_CHARS:
+        snippet = snippet[:MAX_SNIPPET_CHARS]
+        truncated = True
     if truncated:
         snippet += "\n… (truncated)"
     return snippet

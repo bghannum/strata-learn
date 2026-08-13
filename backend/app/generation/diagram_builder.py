@@ -40,6 +40,10 @@ class DiagramLabelOutput(BaseModel):
 class DiagramResult:
     mermaid: str
     file_paths: list[str]  # files included, so the caller can attach citations to them
+    labels: dict[str, str]  # resolved label per file_path (LLM or fallback) — the actual
+    # rendered claim about that file, so the caller's citation can name what
+    # it supports instead of just "included in the diagram" (found via
+    # Codex's Phase 3 pre-push review).
     prompt_version: str
     model: str
 
@@ -110,12 +114,14 @@ async def build_component_diagram(
     assert isinstance(output, DiagramLabelOutput)
 
     kept_set = set(file_paths)
-    labels = {item.file_path: item.label for item in output.labels if item.file_path in kept_set}
+    raw_labels = {item.file_path: item.label for item in output.labels if item.file_path in kept_set}
     node_ids = {path: f"n{i}" for i, path in enumerate(file_paths)}
 
     lines = ["flowchart TD"]
+    resolved_labels: dict[str, str] = {}
     for path in file_paths:
-        label = _sanitize_label(labels.get(path) or _fallback_label(path))
+        label = _sanitize_label(raw_labels.get(path) or _fallback_label(path))
+        resolved_labels[path] = label
         lines.append(f'    {node_ids[path]}["{label}"]')
     for edge in edges:
         lines.append(f"    {node_ids[edge['source']]} --> {node_ids[edge['target']]}")
@@ -123,6 +129,7 @@ async def build_component_diagram(
     return DiagramResult(
         mermaid="\n".join(lines),
         file_paths=file_paths,
+        labels=resolved_labels,
         prompt_version=template.version,
         model=response.model,
     )

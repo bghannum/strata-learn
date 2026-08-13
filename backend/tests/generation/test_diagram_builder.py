@@ -41,6 +41,7 @@ async def test_build_component_diagram_renders_nodes_and_edges() -> None:
     assert "-->" in result.mermaid
     assert result.prompt_version == "v1"
     assert result.model == "fake-model"
+    assert result.labels == {"app/config.py": "Settings", "app/main.py": "App Entry Point"}
 
 
 async def test_build_component_diagram_excludes_external_packages() -> None:
@@ -68,6 +69,7 @@ async def test_build_component_diagram_falls_back_to_basename_when_unlabeled() -
     assert result is not None
     assert '["App Entry Point"]' in result.mermaid
     assert '["Db Utils"]' in result.mermaid
+    assert result.labels["app/db_utils.py"] == "Db Utils"  # fallback label, resolved into .labels too
 
 
 async def test_build_component_diagram_sanitizes_unsafe_label_characters() -> None:
