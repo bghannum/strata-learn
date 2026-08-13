@@ -25,12 +25,13 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.responses import RedirectResponse
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.analysis.snapshot import create_pending_snapshot, fail_snapshot
 from app.config import settings
-from app.db.models import AnalysisSnapshot, Repo, SnapshotStatus, SourceType
+from app.db.models import AnalysisSnapshot, Repo, SnapshotStatus, SourceType, StudyGuide
 from app.db.session import get_session
 from app.ingestion.source import (
     SourcePreparationError,
@@ -159,6 +160,27 @@ async def get_latest_snapshot(repo_id: UUID, session: AsyncSession = Depends(get
     if snapshot is None:
         raise HTTPException(404, "snapshot not found")
     return snapshot
+
+
+@router.get("/{repo_id}/study-guide")
+async def get_repo_study_guide(repo_id: UUID, session: AsyncSession = Depends(get_session)) -> RedirectResponse:
+    """`StudyGuide.id` is generated inside the worker (study_guide_builder.py)
+    and never surfaces through create_repo's response, the snapshot endpoint
+    above, or the progress WebSocket — GET /study-guides/{id} (the only
+    route that can actually fetch one) is otherwise unreachable without
+    direct DB access (found via Codex's Phase 3 pre-push review). Redirects
+    to the canonical resource instead of duplicating its response-building
+    logic here.
+    """
+    repo = await session.get(Repo, repo_id)
+    if repo is None or repo.latest_snapshot_id is None:
+        raise HTTPException(404, "repo has no snapshot yet")
+    guide = (
+        await session.exec(select(StudyGuide).where(StudyGuide.snapshot_id == repo.latest_snapshot_id))
+    ).first()
+    if guide is None:
+        raise HTTPException(404, "study guide not ready yet")
+    return RedirectResponse(f"/study-guides/{guide.id}")
 
 
 @router.websocket("/{repo_id}/progress")

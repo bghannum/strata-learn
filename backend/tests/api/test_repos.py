@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.config import settings
+from app.db.models import SourceType, StudyGuide
+from app.db.session import async_session_factory
 from app.main import app
 from app.redis_pool import get_redis_pool
 
@@ -172,6 +174,40 @@ def test_list_and_get_repo(git_fixture_repo: Path) -> None:
 def test_get_repo_not_found_returns_404() -> None:
     with TestClient(app) as client:
         response = client.get("/repos/00000000-0000-0000-0000-000000000000")
+    assert response.status_code == 404
+
+
+async def test_get_repo_study_guide_redirects_to_canonical_resource(pending_repo_factory) -> None:
+    # StudyGuide.id is generated inside the worker and never surfaces
+    # through create_repo's response or the snapshot endpoint — this is the
+    # only way an API client can discover it (found via Codex's Phase 3
+    # pre-push review).
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, "https://example.com/repo.git")
+    async with async_session_factory() as session:
+        guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=1)
+        session.add(guide)
+        await session.commit()
+        guide_id = guide.id
+
+    with TestClient(app) as client:
+        response = client.get(f"/repos/{repo_id}/study-guide", follow_redirects=False)
+
+    assert response.status_code in (302, 307)
+    assert response.headers["location"] == f"/study-guides/{guide_id}"
+
+
+async def test_get_repo_study_guide_404_before_guide_exists(pending_repo_factory) -> None:
+    repo_id, _snapshot_id = await pending_repo_factory(SourceType.git_url, "https://example.com/repo.git")
+
+    with TestClient(app) as client:
+        response = client.get(f"/repos/{repo_id}/study-guide")
+
+    assert response.status_code == 404
+
+
+def test_get_repo_study_guide_404_for_unknown_repo() -> None:
+    with TestClient(app) as client:
+        response = client.get("/repos/00000000-0000-0000-0000-000000000000/study-guide")
     assert response.status_code == 404
 
 

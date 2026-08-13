@@ -1,4 +1,5 @@
 import io
+import subprocess
 import uuid
 import zipfile
 from pathlib import Path
@@ -29,6 +30,41 @@ def test_clone_git_repo_bad_url_raises() -> None:
     try:
         with pytest.raises(SourcePreparationError):
             clone_git_repo("file:///definitely/does/not/exist", job_id)
+    finally:
+        cleanup_workspace(job_id)
+
+
+def test_clone_git_repo_pinned_commit_ignores_later_tip(tmp_path: Path) -> None:
+    # A resumed study guide generation (worker/pipeline.py) must reacquire
+    # the exact commit Layer A/B data was persisted against, not whatever
+    # the branch has since advanced to.
+    repo_dir = tmp_path / "multi-commit-repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo_dir, check=True)
+    (repo_dir / "file.txt").write_text("v1\n")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo_dir, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-q", "-m", "v1"],
+        cwd=repo_dir,
+        check=True,
+    )
+    first_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_dir, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    (repo_dir / "file.txt").write_text("v2\n")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo_dir, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-q", "-m", "v2"],
+        cwd=repo_dir,
+        check=True,
+    )
+
+    job_id = uuid.uuid4()
+    try:
+        source_dir, commit_hash = clone_git_repo(repo_dir.as_uri(), job_id, pinned_commit=first_sha)
+        assert commit_hash == first_sha
+        assert (source_dir / "file.txt").read_text() == "v1\n"
     finally:
         cleanup_workspace(job_id)
 

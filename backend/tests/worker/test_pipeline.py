@@ -13,6 +13,7 @@ reaches Layer B.
 import asyncio
 import io
 import json
+import subprocess
 import zipfile
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -25,19 +26,25 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 import app.worker.pipeline as pipeline_module
+from app.analysis.snapshot import analyze_source, complete_snapshot
 from app.db.models import (
     AnalysisSnapshot,
+    Citation,
     ModuleSummary,
     PatternClaim,
     Repo,
+    Section,
+    SectionType,
     SnapshotStatus,
     SourceType,
+    StudyGuide,
     TradeoffCard,
 )
 from app.db.session import async_session_factory
 from app.ingestion.source import JOBS_ROOT
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse, Message
 from app.semantics.module_summarizer import ModuleSummaryOutput
+from app.semantics.orchestrator import run_layer_b
 from app.semantics.pattern_detector import PatternClaimOutput, PatternEvidenceItem
 from app.semantics.tradeoff_extractor import EvidenceRef, TradeoffCardOutput
 from app.worker.pipeline import index_repo, progress_channel
@@ -176,6 +183,7 @@ async def test_index_repo_git_url_success(
     assert [m["status"] for m in messages] == [
         SnapshotStatus.parsing.value,
         SnapshotStatus.analyzing.value,
+        SnapshotStatus.generating.value,
         SnapshotStatus.ready.value,
     ]
 
@@ -208,6 +216,7 @@ async def test_index_repo_zip_upload_success(redis_pool: ArqRedis, pending_repo_
     assert [m["status"] for m in messages] == [
         SnapshotStatus.parsing.value,
         SnapshotStatus.analyzing.value,
+        SnapshotStatus.generating.value,
         SnapshotStatus.ready.value,
     ]
 
@@ -256,11 +265,16 @@ async def test_index_repo_runs_layer_b_and_persists_all_three_tables(
         summaries = list((await session.exec(select(ModuleSummary).where(ModuleSummary.snapshot_id == snapshot_id))).all())
         patterns = list((await session.exec(select(PatternClaim).where(PatternClaim.snapshot_id == snapshot_id))).all())
         cards = list((await session.exec(select(TradeoffCard).where(TradeoffCard.snapshot_id == snapshot_id))).all())
+        guides = list((await session.exec(select(StudyGuide).where(StudyGuide.snapshot_id == snapshot_id))).all())
 
     assert len(summaries) == 1
     assert len(patterns) == 1
     assert len(cards) == 1
     assert cards[0].decision == "use arq for background jobs"
+    # Phase 3: the pipeline doesn't stop at Layer B anymore — it assembles a
+    # study guide from these same rows and that's what actually sets `ready`
+    # (see study_guide_builder.persist_study_guide).
+    assert len(guides) == 1
 
 
 async def test_index_repo_layer_b_failure_marks_failed(
@@ -512,6 +526,176 @@ async def test_index_repo_short_circuits_when_snapshot_already_ready(
 
     messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)
     assert [m["status"] for m in messages] == [SnapshotStatus.ready.value]
+
+    snapshot = await _get_snapshot(snapshot_id)
+    assert snapshot.status == SnapshotStatus.ready
+
+
+async def test_index_repo_resumes_from_generating_without_rerunning_layer_b(
+    redis_pool: ArqRedis, git_fixture_repo: Path, pending_repo_factory
+) -> None:
+    # Phase 3's counterpart to the "already ready" short-circuit above: a
+    # redelivery landing between run_layer_b's `generating` commit and
+    # persist_study_guide's `ready` commit (a hard worker crash — a graceful
+    # timeout/shutdown goes through the CancelledError path instead, which
+    # already fails+cleans up terminally) must not re-run Layer A/B a second
+    # time. Build that exact state by hand (Layer A + Layer B already done,
+    # status=generating) rather than via index_repo itself, then redeliver
+    # with a boom LLM to prove Layer B is skipped, not just idempotent.
+    git_url = git_fixture_repo.as_uri()
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
+
+    analysis = analyze_source(git_fixture_repo)
+    async with async_session_factory() as session:
+        snapshot = await complete_snapshot(
+            session, snapshot_id, None, analysis, final_status=SnapshotStatus.analyzing
+        )
+        assert snapshot is not None
+    await run_layer_b(_no_decision_point_llm(), snapshot, git_fixture_repo)
+
+    async with async_session_factory() as session:
+        pre = await session.get(AnalysisSnapshot, snapshot_id)
+        assert pre is not None
+        assert pre.status == SnapshotStatus.generating
+        pre_summaries = list(
+            (await session.exec(select(ModuleSummary).where(ModuleSummary.snapshot_id == snapshot_id))).all()
+        )
+    assert len(pre_summaries) == 1  # sanity: Layer B actually ran and persisted
+
+    async def run() -> None:
+        await index_repo(
+            {"redis": redis_pool},
+            snapshot_id=snapshot_id,
+            repo_id=repo_id,
+            source_type=SourceType.git_url.value,
+            git_url=git_url,
+            # Would raise if Layer B (or diagram_builder's label call) ran
+            # again — proving the resume path skips both, not just tolerates
+            # re-running them via existing delete-then-insert idempotency.
+            llm=_BoomLLMProvider(),
+        )
+
+    messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)
+    assert [m["status"] for m in messages] == [SnapshotStatus.ready.value]
+
+    snapshot = await _get_snapshot(snapshot_id)
+    assert snapshot.status == SnapshotStatus.ready
+
+    async with async_session_factory() as session:
+        post_summaries = list(
+            (await session.exec(select(ModuleSummary).where(ModuleSummary.snapshot_id == snapshot_id))).all()
+        )
+        guides = list((await session.exec(select(StudyGuide).where(StudyGuide.snapshot_id == snapshot_id))).all())
+    assert len(post_summaries) == 1  # unchanged — not re-run, not duplicated
+    assert len(guides) == 1
+
+
+def _commit_repo_file(repo_dir: Path, content: str, message: str) -> str:
+    (repo_dir / "app.py").write_text(content)
+    subprocess.run(["git", "add", "app.py"], cwd=repo_dir, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-q", "-m", message],
+        cwd=repo_dir,
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_dir, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+async def test_index_repo_resume_pins_commit_and_clears_stale_workspace(
+    redis_pool: ArqRedis, tmp_path: Path, pending_repo_factory
+) -> None:
+    # Two real bugs found alongside the resume path above (Codex's Phase 3
+    # pre-push review): (1) a leftover workspace from the crashed original
+    # attempt must not break re-cloning, and (2) the remote branch may have
+    # moved on since the original analysis — resume must reacquire the exact
+    # analyzed commit, not the new tip, since persisted Layer A/B data still
+    # describes the old one.
+    repo_dir = tmp_path / "multi-commit-repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo_dir, check=True)
+    v1_sha = _commit_repo_file(repo_dir, "print('v1')\n", "v1")
+
+    git_url = repo_dir.as_uri()
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
+
+    analysis = analyze_source(repo_dir)
+    async with async_session_factory() as session:
+        snapshot = await complete_snapshot(
+            session, snapshot_id, v1_sha, analysis, final_status=SnapshotStatus.analyzing
+        )
+        assert snapshot is not None
+    await run_layer_b(_no_decision_point_llm(), snapshot, repo_dir)
+
+    # Simulate a leftover workspace from the crashed original attempt: a
+    # stale file sitting exactly where clone_git_repo would try to clone.
+    stale_dir = JOBS_ROOT / str(snapshot_id) / "source"
+    stale_dir.mkdir(parents=True, exist_ok=True)
+    (stale_dir / "stale.txt").write_text("leftover from a crashed attempt\n")
+
+    # The remote moves on after the original analysis.
+    _commit_repo_file(repo_dir, "print('v2')\n", "v2")
+
+    async def run() -> None:
+        await index_repo(
+            {"redis": redis_pool},
+            snapshot_id=snapshot_id,
+            repo_id=repo_id,
+            source_type=SourceType.git_url.value,
+            git_url=git_url,
+            llm=_BoomLLMProvider(),
+        )
+
+    messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)
+    assert [m["status"] for m in messages] == [SnapshotStatus.ready.value]
+
+    snapshot = await _get_snapshot(snapshot_id)
+    assert snapshot.status == SnapshotStatus.ready
+    assert snapshot.commit_hash == v1_sha  # unchanged — resume didn't silently drift to v2
+
+    async with async_session_factory() as session:
+        guide = (await session.exec(select(StudyGuide).where(StudyGuide.snapshot_id == snapshot_id))).one()
+        sections = list((await session.exec(select(Section).where(Section.study_guide_id == guide.id))).all())
+        deep_dive = next(s for s in sections if s.section_type == SectionType.deep_dive)
+        citations = list((await session.exec(select(Citation).where(Citation.section_id == deep_dive.id))).all())
+
+    app_citation = next(c for c in citations if c.file_path == "app.py")
+    assert "v1" in app_citation.snippet_text
+    assert "v2" not in app_citation.snippet_text
+
+
+async def test_index_repo_generating_publish_failure_does_not_mark_failed(
+    redis_pool: ArqRedis, git_fixture_repo: Path, pending_repo_factory, monkeypatch
+) -> None:
+    # Mirrors the "ready" short-circuit publish-failure test below: a
+    # failure on just the `generating` notification — right after
+    # run_layer_b commits its billed rows — must not fall through to the
+    # generic exception handler and mark the snapshot failed. That would
+    # make the next redelivery miss resuming_from_generating and repeat
+    # every billed Layer B call for nothing (found via Codex's Phase 3
+    # pre-push review).
+    git_url = git_fixture_repo.as_uri()
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
+
+    real_publish = redis_pool.publish
+
+    async def _flaky_publish(channel, data):
+        if '"generating"' in data:
+            raise RuntimeError("simulated Redis publish failure")
+        return await real_publish(channel, data)
+
+    monkeypatch.setattr(redis_pool, "publish", _flaky_publish)
+
+    # Must not raise, and must still reach `ready` despite the dropped notification.
+    await index_repo(
+        {"redis": redis_pool},
+        snapshot_id=snapshot_id,
+        repo_id=repo_id,
+        source_type=SourceType.git_url.value,
+        git_url=git_url,
+        llm=_no_decision_point_llm(),
+    )
 
     snapshot = await _get_snapshot(snapshot_id)
     assert snapshot.status == SnapshotStatus.ready

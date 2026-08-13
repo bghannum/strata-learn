@@ -1,5 +1,6 @@
 """Exercises the Phase 1.5 checkpoint from docs/design/original-project-plan.md §12 directly: add a
-repo, watch status transition pending -> parsing -> ready over the websocket.
+repo, watch status transition pending -> parsing -> analyzing -> generating ->
+ready over the websocket.
 
 No arq worker process runs during the test suite, so the pipeline is driven in
 a background thread with its own event loop + Redis pool — this is what a real
@@ -31,8 +32,10 @@ def _fake_llm() -> FakeLLMProvider:
     # git_fixture_repo (tests/conftest.py) is a single file with no imports —
     # module_summarizer and pattern_detector each make one call;
     # identify_decision_points finds nothing, so extract_tradeoffs never calls
-    # the LLM. A real ANTHROPIC_API_KEY isn't even loaded in this test process
-    # (no backend/.env), so an omitted `llm` would fail loudly, not silently
+    # the LLM, and diagram_builder's node selection requires at least one
+    # internal file-to-file edge, so it never calls the LLM either. A real
+    # ANTHROPIC_API_KEY isn't even loaded in this test process (no
+    # backend/.env), so an omitted `llm` would fail loudly, not silently
     # bill — but a fake keeps this test decoupled from that either way.
     return FakeLLMProvider(
         [
@@ -107,4 +110,4 @@ def test_progress_ws_reports_pending_parsing_ready(git_fixture_repo: Path, pendi
         finally:
             thread.join(timeout=10)
 
-    assert statuses == ["pending", "parsing", "analyzing", "ready"]
+    assert statuses == ["pending", "parsing", "analyzing", "generating", "ready"]

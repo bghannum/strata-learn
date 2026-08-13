@@ -21,6 +21,9 @@ from app.db.session import async_session_factory
 async def _clean_db() -> None:
     async with async_session_factory() as session:
         await session.exec(text("UPDATE repo SET latest_snapshot_id = NULL"))
+        await session.exec(text("DELETE FROM citation"))
+        await session.exec(text("DELETE FROM section"))
+        await session.exec(text("DELETE FROM studyguide"))
         await session.exec(text("DELETE FROM codeunit"))
         await session.exec(text("DELETE FROM tradeoffcard"))
         await session.exec(text("DELETE FROM patternclaim"))

@@ -35,8 +35,17 @@ fi
 
 rm -f "$output_file"
 
-read -r -d '' review_prompt <<'PROMPT' || true
-Perform one merge-readiness review of this branch against the base branch.
+# codex-cli 0.147.0 made --base/--commit/--uncommitted mutually exclusive
+# with a custom [PROMPT] (the two used to compose; see `codex exec review
+# --help`), so the diff scope can no longer be passed as a flag alongside our
+# BLOCK/DEFER instructions. codex runs agentically with shell access, so the
+# fix is to ask it to determine the scope itself via `git diff` rather than
+# pass --base — same effective review, just scoped by prompt instead of flag.
+read -r -d '' review_prompt <<PROMPT || true
+Perform one merge-readiness review of this branch against '$base_branch'.
+Run \`git diff $base_branch...HEAD\` (and \`git log $base_branch..HEAD\` for
+context) yourself to see the actual changes — do not review uncommitted
+working-tree state or any other scope.
 
 Focus on correctness, security, data integrity, concurrency, resource usage,
 paid API exposure, and the phase acceptance criteria. Classify every real
@@ -58,7 +67,6 @@ PROMPT
 
 echo "codex-review: reviewing $branch against $base_branch..." >&2
 if codex exec review \
-  --base "$base_branch" \
   --title "$branch" \
   --output-last-message "$output_file" \
   "$review_prompt"; then
