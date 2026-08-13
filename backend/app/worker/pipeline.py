@@ -198,7 +198,18 @@ async def index_repo(
                 # sessions internally (a short-lived read, then a short-lived
                 # write only after all LLM calls finish) — no session passed in.
                 await run_layer_b(llm, snapshot, source_dir)
-                await publish(SnapshotStatus.generating)
+                # Guarded the same way the "already ready" short-circuit's own
+                # publish is guarded above: Layer B's billed rows are already
+                # committed at this point, so a failure on just this
+                # notification must not fall through to the generic except
+                # Exception below, which would mark this snapshot `failed` and
+                # make the next redelivery miss resuming_from_generating —
+                # repeating every billed Layer B call for nothing (found via
+                # Codex's Phase 3 pre-push review).
+                try:
+                    await publish(SnapshotStatus.generating)
+                except Exception:  # noqa: BLE001, S110 — deliberately swallowed, see comment above
+                    pass
 
             # run_study_guide_generation sets the final "ready" status itself,
             # in the same commit as the study guide rows — same invariant,

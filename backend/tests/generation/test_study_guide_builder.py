@@ -9,7 +9,7 @@ snippet reading (via layer_a_ready_factory, Layer A only, no LLM).
 """
 
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlmodel import select
 
@@ -28,7 +28,12 @@ from app.db.models import (
 )
 from app.db.session import async_session_factory
 from app.generation.diagram_builder import DiagramLabelItem, DiagramLabelOutput
-from app.generation.study_guide_builder import _whole_file_citation, run_study_guide_generation
+from app.generation.study_guide_builder import (
+    MAX_OVERVIEW_ENTRY_POINTS,
+    _build_overview,
+    _whole_file_citation,
+    run_study_guide_generation,
+)
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 
 _FILES = {
@@ -161,6 +166,23 @@ def test_whole_file_citation_uses_real_line_count_when_no_code_unit(tmp_path: Pa
     assert citation.line_end == 4
 
 
+def test_build_overview_caps_entry_points(tmp_path: Path) -> None:
+    # git_url ingestion has no file-count cap, so a large repo could detect
+    # far more entry points than are useful to render or worth citing.
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    for i in range(40):
+        (source_dir / f"file{i}.py").write_text("if __name__ == '__main__':\n    pass\n")
+    entry_points = [{"file": f"file{i}.py", "kind": "cli", "reason": "guard"} for i in range(40)]
+    snapshot = AnalysisSnapshot(repo_id=uuid4(), language_summary={}, entry_points=entry_points)
+
+    section = _build_overview(snapshot, {}, source_dir)
+
+    assert len(section.citations) == MAX_OVERVIEW_ENTRY_POINTS
+    assert section.content_md.count("- **file") == MAX_OVERVIEW_ENTRY_POINTS
+    assert "10 more, not shown" in section.content_md
+
+
 async def test_run_study_guide_generation_builds_all_five_sections(layer_a_ready_factory) -> None:
     repo_id, snapshot_id, source_dir = await layer_a_ready_factory(_FILES)
     await _seed_layer_b(snapshot_id)
@@ -188,9 +210,13 @@ async def test_run_study_guide_generation_builds_all_five_sections(layer_a_ready
     assert architecture.diagram_mermaid is not None
     assert architecture.diagram_mermaid.startswith("flowchart TD")
     assert architecture.prompt_version == "v1"
+    assert "confidence: medium" in architecture.content_md
+    assert "Confidence." not in architecture.content_md  # not the raw enum name
 
     tradeoffs = sections[2]
     assert "centralize settings in one module" in tradeoffs.content_md
+    assert "**Confidence:** medium" in tradeoffs.content_md
+    assert "Confidence." not in tradeoffs.content_md
 
     glossary = sections[3]
     assert "configuration" in glossary.content_md

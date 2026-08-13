@@ -53,6 +53,17 @@ class SectionSpec:
     model: str | None = None
 
 
+# git_url ingestion has no file-count cap (only zip uploads are capped, at
+# settings.zip_upload_max_files — see pattern_detector.py's own MAX_GRAPH_NODES
+# comment for the same gap), so entry_points can be arbitrarily large on a
+# big repo. Each one gets a whole-file citation (up to MAX_SNIPPET_CHARS,
+# citation.py) — uncapped, that's an unbounded number of them, read and
+# persisted, then all returned by GET /study-guides/{id} in one response
+# (found via Codex's Phase 3 pre-push review). Also just more useful: an
+# Overview section with hundreds of bullet points isn't a readable overview.
+MAX_OVERVIEW_ENTRY_POINTS = 30
+
+
 def _file_line_count(source_dir: Path, file_path: str) -> int:
     try:
         text = (source_dir / file_path).read_bytes().decode("utf-8", errors="replace")
@@ -83,11 +94,14 @@ def _build_overview(
     lang_line = ", ".join(f"{lang} ({count} files)" for lang, count in sorted(snapshot.language_summary.items()))
     lines = ["## Tech Stack", "", f"Languages: {lang_line or 'none detected'}.", "", "## Entry Points", ""]
 
+    entry_points = sorted(snapshot.entry_points, key=lambda ep: (ep["file"], ep["kind"]))
     citations = []
-    for ep in snapshot.entry_points:
+    for ep in entry_points[:MAX_OVERVIEW_ENTRY_POINTS]:
         reason = ep.get("reason", "")
         lines.append(f"- **{ep['file']}** ({ep['kind']}): {reason}")
         citations.append(_whole_file_citation(module_units_by_path, source_dir, ep["file"], reason or ep["file"]))
+    if len(entry_points) > MAX_OVERVIEW_ENTRY_POINTS:
+        lines.append(f"- _...and {len(entry_points) - MAX_OVERVIEW_ENTRY_POINTS} more, not shown._")
 
     return SectionSpec(
         section_type=SectionType.overview,
@@ -107,7 +121,14 @@ def _build_architecture(
     lines: list[str] = []
     citations = list(diagram_citations)
     if pattern_claim is not None:
-        lines.append(f"**Primary pattern:** {pattern_claim.primary_pattern} (confidence: {pattern_claim.confidence})")
+        # .value, not the bare enum — Confidence is `str, Enum`, but Python's
+        # default Enum.__str__ still wins over the str mixin in f-strings,
+        # rendering "Confidence.medium" instead of "medium" (confirmed via
+        # Codex's Phase 3 pre-push review, and visible in the Phase 3 manual
+        # checkpoint's own output).
+        lines.append(
+            f"**Primary pattern:** {pattern_claim.primary_pattern} (confidence: {pattern_claim.confidence.value})"
+        )
         if pattern_claim.caveats:
             lines += ["", pattern_claim.caveats]
         lines += ["", "**Evidence:**", ""]
@@ -162,7 +183,7 @@ def _build_tradeoffs(tradeoff_cards: list[TradeoffCard]) -> SectionSpec | None:
             "",
             f"**Alternatives considered:** {', '.join(card.alternatives_considered) or 'none recorded'}",
             "",
-            f"**Confidence:** {card.confidence}",
+            f"**Confidence:** {card.confidence.value}",  # .value — see the Architecture section's comment
             "",
         ]
         # claim_excerpt covers every rendered generated field except
@@ -331,6 +352,23 @@ async def _next_version(session, repo_id, existing_guide: StudyGuide | None) -> 
 
 
 async def persist_study_guide(snapshot: AnalysisSnapshot, sections: list[SectionSpec], source_dir: Path) -> None:
+    # Read every cited snippet before opening the write transaction below —
+    # NullPool means every session checkout is a real Postgres connection,
+    # and synchronous file I/O for potentially many citations (deep-dive and
+    # glossary citations both reuse a module's whole-file line range, so
+    # this also naturally dedupes repeated reads of the same range) has no
+    # business happening while one is held open (found via Codex's Phase 3
+    # pre-push review — the same class of concern as orchestrator.py's "no
+    # session across slow work" rule, just for disk reads instead of LLM
+    # calls). MAX_SNIPPET_LINES/MAX_SNIPPET_CHARS (citation.py) bound each
+    # entry's size; this cache only avoids redundant reads of the same range.
+    snippet_cache: dict[tuple[str, int, int], str] = {}
+    for spec in sections:
+        for cite_spec in spec.citations:
+            key = (cite_spec.file_path, cite_spec.line_start, cite_spec.line_end)
+            if key not in snippet_cache:
+                snippet_cache[key] = read_snippet(source_dir, *key)
+
     async with async_session_factory() as session:
         existing_guide = (
             await session.exec(select(StudyGuide).where(StudyGuide.snapshot_id == snapshot.id))
@@ -349,15 +387,6 @@ async def persist_study_guide(snapshot: AnalysisSnapshot, sections: list[Section
         guide = StudyGuide(repo_id=snapshot.repo_id, snapshot_id=snapshot.id, version=version)
         session.add(guide)
         await session.flush()  # assigns guide.id without committing yet
-
-        # Deep-dive and glossary citations both reuse a module's whole-file
-        # line range (every key_concept from one module cites the same
-        # range) — cached so that range is only read/decoded off disk once,
-        # not once per citation that happens to reuse it (found via Codex's
-        # Phase 3 pre-push review). MAX_SNIPPET_LINES (citation.py) is what
-        # actually bounds each entry's size; this cache only avoids redundant
-        # reads of the same range.
-        snippet_cache: dict[tuple[str, int, int], str] = {}
 
         for order, spec in enumerate(sections):
             section = Section(

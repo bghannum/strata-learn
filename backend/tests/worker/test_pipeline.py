@@ -665,6 +665,42 @@ async def test_index_repo_resume_pins_commit_and_clears_stale_workspace(
     assert "v2" not in app_citation.snippet_text
 
 
+async def test_index_repo_generating_publish_failure_does_not_mark_failed(
+    redis_pool: ArqRedis, git_fixture_repo: Path, pending_repo_factory, monkeypatch
+) -> None:
+    # Mirrors the "ready" short-circuit publish-failure test below: a
+    # failure on just the `generating` notification — right after
+    # run_layer_b commits its billed rows — must not fall through to the
+    # generic exception handler and mark the snapshot failed. That would
+    # make the next redelivery miss resuming_from_generating and repeat
+    # every billed Layer B call for nothing (found via Codex's Phase 3
+    # pre-push review).
+    git_url = git_fixture_repo.as_uri()
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
+
+    real_publish = redis_pool.publish
+
+    async def _flaky_publish(channel, data):
+        if '"generating"' in data:
+            raise RuntimeError("simulated Redis publish failure")
+        return await real_publish(channel, data)
+
+    monkeypatch.setattr(redis_pool, "publish", _flaky_publish)
+
+    # Must not raise, and must still reach `ready` despite the dropped notification.
+    await index_repo(
+        {"redis": redis_pool},
+        snapshot_id=snapshot_id,
+        repo_id=repo_id,
+        source_type=SourceType.git_url.value,
+        git_url=git_url,
+        llm=_no_decision_point_llm(),
+    )
+
+    snapshot = await _get_snapshot(snapshot_id)
+    assert snapshot.status == SnapshotStatus.ready
+
+
 async def test_index_repo_short_circuit_publish_failure_does_not_mark_failed(
     redis_pool: ArqRedis, layer_a_ready_factory, monkeypatch
 ) -> None:
