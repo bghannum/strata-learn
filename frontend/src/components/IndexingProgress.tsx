@@ -13,7 +13,7 @@ const STAGES: { label: string; statuses: SnapshotStatus[] }[] = [
   { label: 'Ready', statuses: ['ready'] },
 ]
 
-type StageState = 'not-started' | 'in-progress' | 'complete'
+type StageState = 'not-started' | 'in-progress' | 'complete' | 'failed'
 
 function stageState(stageIndex: number, currentIndex: number, isReady: boolean): StageState {
   if (stageIndex < currentIndex) return 'complete'
@@ -25,30 +25,68 @@ const DOT_CLASSES: Record<StageState, string> = {
   'not-started': 'bg-gray-300 dark:bg-gray-600',
   'in-progress': 'bg-blue-500 animate-pulse',
   complete: 'bg-green-500',
+  failed: 'bg-red-500',
 }
 
 interface IndexingProgressProps {
   status: SnapshotStatus | undefined
+  // The last non-terminal status seen before `failed` — lets the stepper
+  // show *which* stage failed instead of a generic message (`status` alone
+  // has already been overwritten to `failed` by the time this renders).
+  lastNonTerminalStatus?: SnapshotStatus
   error?: string
   variant: 'chip' | 'stepper'
 }
 
-function IndexingProgress({ status, error, variant }: IndexingProgressProps) {
+function IndexingProgress({ status, lastNonTerminalStatus, error, variant }: IndexingProgressProps) {
   if (status === 'failed') {
-    return variant === 'chip' ? (
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:bg-red-950 dark:text-red-300">
-        <span className="h-2 w-2 rounded-full bg-red-500" />
-        Failed
-      </span>
-    ) : (
-      <div className="rounded-md border border-red-300 bg-red-50 p-4 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
-        <p className="font-medium">Indexing failed</p>
-        <p className="mt-1 text-sm">
-          {/* The backend only carries an error message on the live progress
-          WebSocket, not on AnalysisSnapshot itself — a page load that missed
-          that message (e.g. after a refresh) has no specific text to show. */}
-          {error ?? 'No error detail is available — this page loaded after the failure message was sent.'}
-        </p>
+    const failedIndex = lastNonTerminalStatus
+      ? STAGES.findIndex((s) => s.statuses.includes(lastNonTerminalStatus))
+      : -1
+    const failedStageLabel = failedIndex >= 0 ? STAGES[failedIndex].label : undefined
+
+    if (variant === 'chip') {
+      return (
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:bg-red-950 dark:text-red-300">
+          <span className="h-2 w-2 rounded-full bg-red-500" />
+          Failed
+        </span>
+      )
+    }
+
+    return (
+      <div>
+        <ol className="flex flex-wrap items-center gap-x-2 gap-y-3">
+          {STAGES.map((stage, index) => {
+            const state: StageState = index < failedIndex ? 'complete' : index === failedIndex ? 'failed' : 'not-started'
+            return (
+              <li key={stage.label} className="flex items-center gap-2">
+                <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${DOT_CLASSES[state]}`} />
+                <span
+                  className={
+                    state === 'not-started'
+                      ? 'text-sm text-gray-400 dark:text-gray-500'
+                      : 'text-sm font-medium text-gray-900 dark:text-gray-100'
+                  }
+                >
+                  {stage.label}
+                </span>
+                {index < STAGES.length - 1 && <span className="mx-1 h-px w-6 bg-gray-300 dark:bg-gray-600" />}
+              </li>
+            )
+          })}
+        </ol>
+        <div className="mt-3 rounded-md border border-red-300 bg-red-50 p-4 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
+          <p className="font-medium">
+            Indexing failed{failedStageLabel ? ` during ${failedStageLabel}` : ''}
+          </p>
+          <p className="mt-1 text-sm">
+            {/* The backend only carries an error message on the live progress
+            WebSocket, not on AnalysisSnapshot itself — a page load that missed
+            that message (e.g. after a refresh) has no specific text to show. */}
+            {error ?? 'No error detail is available — this page loaded after the failure message was sent.'}
+          </p>
+        </div>
       </div>
     )
   }

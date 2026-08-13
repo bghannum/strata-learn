@@ -1,6 +1,6 @@
 import { useState, type DragEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ApiError, createRepo } from '../api/client'
+import { ApiError, createRepo, MAX_ZIP_UPLOAD_BYTES } from '../api/client'
 
 type Tab = 'git_url' | 'zip_upload'
 
@@ -25,38 +25,62 @@ function AddRepo() {
   const [gitUrl, setGitUrl] = useState('')
   const [gitUrlTouched, setGitUrlTouched] = useState(false)
   const [file, setFile] = useState<File | null>(null)
+  const [fileSizeError, setFileSizeError] = useState<string | null>(null)
   const [displayName, setDisplayName] = useState('')
   const [isDragging, setIsDragging] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const gitUrlValid = isValidHttpUrl(gitUrl)
-  const canSubmit = tab === 'git_url' ? gitUrlValid : file !== null
+  const canSubmit = tab === 'git_url' ? gitUrlValid : file !== null && !fileSizeError
+
+  function selectFile(selected: File | undefined) {
+    if (!selected) {
+      setFile(null)
+      setFileSizeError(null)
+      return
+    }
+    if (selected.size > MAX_ZIP_UPLOAD_BYTES) {
+      // Rejected here, before ever starting the upload — the backend
+      // enforces this too, but failing after transferring the whole file
+      // just to get the same 422 wastes the person's bandwidth.
+      setFile(selected)
+      setFileSizeError(`This file is ${formatBytes(selected.size)}, over the ${formatBytes(MAX_ZIP_UPLOAD_BYTES)} limit.`)
+      return
+    }
+    setFile(selected)
+    setFileSizeError(null)
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!canSubmit || submitting) return
     setSubmitting(true)
     setError(null)
+    setUploadProgress(tab === 'zip_upload' ? 0 : null)
     try {
       const repo =
         tab === 'git_url'
           ? await createRepo({ sourceType: 'git_url', gitUrl, displayName: displayName || undefined })
-          : await createRepo({ sourceType: 'zip_upload', file: file!, displayName: displayName || undefined })
+          : await createRepo(
+              { sourceType: 'zip_upload', file: file!, displayName: displayName || undefined },
+              setUploadProgress,
+            )
       navigate(`/repos/${repo.id}`)
     } catch (err) {
       // Surfaced verbatim, not paraphrased — the backend's message (unreachable
       // URL, malformed zip, etc.) is more specific than anything generic here.
       setError(err instanceof ApiError ? err.message : 'Something went wrong. Please try again.')
       setSubmitting(false)
+      setUploadProgress(null)
     }
   }
 
   function handleDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault()
     setIsDragging(false)
-    const dropped = e.dataTransfer.files[0]
-    if (dropped) setFile(dropped)
+    selectFile(e.dataTransfer.files[0])
   }
 
   return (
@@ -100,33 +124,44 @@ function AddRepo() {
             )}
           </div>
         ) : (
-          <div
-            onDragOver={(e) => {
-              e.preventDefault()
-              setIsDragging(true)
-            }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={handleDrop}
-            className={`rounded-lg border-2 border-dashed p-6 text-center transition-colors ${
-              isDragging ? 'border-blue-500 bg-blue-50 dark:bg-blue-950' : 'border-gray-300 dark:border-gray-600'
-            }`}
-          >
-            {file ? (
-              <p className="text-sm text-gray-700 dark:text-gray-300">
-                {file.name} <span className="text-gray-400">({formatBytes(file.size)})</span>
-              </p>
-            ) : (
-              <p className="text-sm text-gray-500 dark:text-gray-400">Drag a .zip file here, or</p>
+          <div>
+            <div
+              onDragOver={(e) => {
+                e.preventDefault()
+                setIsDragging(true)
+              }}
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={handleDrop}
+              className={`rounded-lg border-2 border-dashed p-6 text-center transition-colors ${
+                isDragging ? 'border-blue-500 bg-blue-50 dark:bg-blue-950' : 'border-gray-300 dark:border-gray-600'
+              }`}
+            >
+              {file ? (
+                <p className="text-sm text-gray-700 dark:text-gray-300">
+                  {file.name} <span className="text-gray-400">({formatBytes(file.size)})</span>
+                </p>
+              ) : (
+                <p className="text-sm text-gray-500 dark:text-gray-400">Drag a .zip file here, or</p>
+              )}
+              <label className="mt-2 inline-block cursor-pointer text-sm font-medium text-blue-600 hover:underline dark:text-blue-400">
+                choose a file
+                <input
+                  type="file"
+                  accept=".zip"
+                  className="hidden"
+                  onChange={(e) => selectFile(e.target.files?.[0])}
+                />
+              </label>
+            </div>
+            {fileSizeError && <p className="mt-1 text-sm text-red-600 dark:text-red-400">{fileSizeError}</p>}
+            {uploadProgress !== null && (
+              <div className="mt-2">
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
+                  <div className="h-full bg-blue-600 transition-all" style={{ width: `${uploadProgress}%` }} />
+                </div>
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Uploading… {uploadProgress}%</p>
+              </div>
             )}
-            <label className="mt-2 inline-block cursor-pointer text-sm font-medium text-blue-600 hover:underline dark:text-blue-400">
-              choose a file
-              <input
-                type="file"
-                accept=".zip"
-                className="hidden"
-                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-              />
-            </label>
           </div>
         )}
 

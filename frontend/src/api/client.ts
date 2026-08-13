@@ -135,20 +135,58 @@ export interface CreateRepoFromZip {
   displayName?: string
 }
 
-export async function createRepo(input: CreateRepoFromGitUrl | CreateRepoFromZip): Promise<Repo> {
+// Mirrors backend/app/config.py's zip_upload_max_bytes default — the server
+// is still the source of truth (this is a UX pre-check, not a security
+// boundary), but rejecting an obviously-oversized file before spending
+// bandwidth on it needs to know the same number the server enforces.
+export const MAX_ZIP_UPLOAD_BYTES = 50 * 1024 * 1024
+
+export async function createRepo(
+  input: CreateRepoFromGitUrl | CreateRepoFromZip,
+  onUploadProgress?: (percent: number) => void,
+): Promise<Repo> {
   const form = new FormData()
   form.set('source_type', input.sourceType)
   if (input.displayName) form.set('display_name', input.displayName)
+
   if (input.sourceType === 'git_url') {
     form.set('git_url', input.gitUrl)
-  } else {
-    form.set('file', input.file)
+    const response = await fetch(`${API_BASE_URL}/repos`, { method: 'POST', body: form })
+    if (!response.ok) {
+      throw new ApiError(response.status, await parseErrorDetail(response))
+    }
+    return response.json()
   }
-  const response = await fetch(`${API_BASE_URL}/repos`, { method: 'POST', body: form })
-  if (!response.ok) {
-    throw new ApiError(response.status, await parseErrorDetail(response))
-  }
-  return response.json()
+
+  form.set('file', input.file)
+  // XMLHttpRequest, not fetch — fetch exposes no upload-progress event, and
+  // a zip can be large enough (up to MAX_ZIP_UPLOAD_BYTES) that "Adding…"
+  // alone leaves no feedback for a real transfer.
+  return new Promise<Repo>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${API_BASE_URL}/repos`)
+    xhr.upload.onprogress = (event) => {
+      if (onUploadProgress && event.lengthComputable) {
+        onUploadProgress(Math.round((event.loaded / event.total) * 100))
+      }
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(JSON.parse(xhr.responseText))
+        return
+      }
+      let detail = `Request failed: ${xhr.status}`
+      try {
+        const body = JSON.parse(xhr.responseText)
+        if (typeof body?.detail === 'string') detail = body.detail
+      } catch {
+        // not JSON — use the generic fallback above
+      }
+      reject(new ApiError(xhr.status, detail))
+    }
+    xhr.onerror = () => reject(new ApiError(0, 'Network error while uploading'))
+    xhr.send(form)
+  })
 }
 
 // --- Progress WebSocket ---
@@ -175,19 +213,29 @@ function isTerminal(status: SnapshotStatus | undefined): boolean {
  * non-terminal row, not one per row unconditionally) — this hook doesn't
  * make that call itself, since `initialStatus` is typically only known
  * after an async fetch the caller runs on its own, arriving after this
- * hook's first render either way. */
+ * hook's first render either way.
+ *
+ * `lastNonTerminalStatus` is tracked separately from `status` so a caller
+ * can show *which* stage failed instead of just a generic failure — once
+ * `status` becomes `failed` it overwrites what came before, but the last
+ * real progress stage is exactly the point IndexingProgress's stepper needs
+ * to mark as the failure point. */
 export function useIndexingProgress(
   repoId: string | undefined,
   initialStatus?: SnapshotStatus,
-): { status: SnapshotStatus | undefined; error: string | undefined } {
+): { status: SnapshotStatus | undefined; error: string | undefined; lastNonTerminalStatus: SnapshotStatus | undefined } {
   const [status, setStatus] = useState<SnapshotStatus | undefined>(initialStatus)
   const [error, setError] = useState<string | undefined>(undefined)
+  const [lastNonTerminalStatus, setLastNonTerminalStatus] = useState<SnapshotStatus | undefined>(
+    isTerminal(initialStatus) ? undefined : initialStatus,
+  )
 
   // initialStatus commonly arrives after mount — keep displaying it until a
   // live WS message takes over, rather than seeding once at mount (before
   // the caller's own fetch has resolved) and never updating again.
   useEffect(() => {
     setStatus((current) => current ?? initialStatus)
+    setLastNonTerminalStatus((current) => current ?? (isTerminal(initialStatus) ? undefined : initialStatus))
   }, [initialStatus])
 
   useEffect(() => {
@@ -197,10 +245,14 @@ export function useIndexingProgress(
       const message: ProgressMessage = JSON.parse(event.data)
       setStatus(message.status)
       setError(message.error)
-      if (isTerminal(message.status)) socket.close()
+      if (isTerminal(message.status)) {
+        socket.close()
+      } else {
+        setLastNonTerminalStatus(message.status)
+      }
     }
     return () => socket.close()
   }, [repoId])
 
-  return { status, error }
+  return { status, error, lastNonTerminalStatus }
 }

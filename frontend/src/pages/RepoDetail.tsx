@@ -39,7 +39,11 @@ function RepoDetail() {
   }, [repoId])
 
   const shouldConnect = loaded && !isTerminal(snapshot?.status)
-  const { status, error: liveError } = useIndexingProgress(shouldConnect ? repoId : undefined, snapshot?.status)
+  const {
+    status,
+    error: liveError,
+    lastNonTerminalStatus,
+  } = useIndexingProgress(shouldConnect ? repoId : undefined, snapshot?.status)
 
   useEffect(() => {
     if (status !== 'ready' || !repoId) return
@@ -75,7 +79,12 @@ function RepoDetail() {
       <p className="text-sm text-gray-500 dark:text-gray-400">{repo.source_uri}</p>
 
       <div className="mt-6">
-        <IndexingProgress status={status} error={liveError} variant="stepper" />
+        <IndexingProgress
+          status={status}
+          lastNonTerminalStatus={lastNonTerminalStatus}
+          error={liveError}
+          variant="stepper"
+        />
       </div>
 
       {status === 'ready' && (
