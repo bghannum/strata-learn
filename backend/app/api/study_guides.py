@@ -12,7 +12,8 @@ from pydantic import BaseModel
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.db.models import Citation, Section, StudyGuide
+from app.api.auth import get_current_user
+from app.db.models import Citation, Repo, Section, StudyGuide, User
 from app.db.session import get_session
 
 router = APIRouter(prefix="/study-guides", tags=["study-guides"])
@@ -46,9 +47,17 @@ class StudyGuideOut(BaseModel):
 
 
 @router.get("/{study_guide_id}", response_model=StudyGuideOut)
-async def get_study_guide(study_guide_id: UUID, session: AsyncSession = Depends(get_session)) -> StudyGuideOut:
+async def get_study_guide(
+    study_guide_id: UUID, session: AsyncSession = Depends(get_session), current_user: User = Depends(get_current_user)
+) -> StudyGuideOut:
     guide = await session.get(StudyGuide, study_guide_id)
     if guide is None:
+        raise HTTPException(404, "study guide not found")
+
+    # Same "404, not 403" reasoning as api/repos.py's ownership checks — a
+    # guide's repo_id is enough to scope it without a join.
+    repo = await session.get(Repo, guide.repo_id)
+    if repo is None or repo.user_id != current_user.id:
         raise HTTPException(404, "study guide not found")
 
     sections = list(

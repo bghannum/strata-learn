@@ -35,6 +35,7 @@ dependencies = [
     "anthropic>=0.77",
     "openai>=1.57",
     "bcrypt>=4.2",
+    "email-validator>=2.2",  # enables pydantic's EmailStr, used by auth registration/login
     "python-multipart>=0.0.17",
     "pathspec>=0.12",
     "rapidfuzz>=3.10",

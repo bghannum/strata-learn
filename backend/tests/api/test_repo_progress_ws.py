@@ -26,6 +26,7 @@ from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 from app.semantics.module_summarizer import ModuleSummaryOutput
 from app.semantics.pattern_detector import PatternClaimOutput
 from app.worker.pipeline import index_repo
+from tests.conftest import register_test_user
 
 
 def _fake_llm() -> FakeLLMProvider:
@@ -88,26 +89,31 @@ def test_progress_ws_reports_pending_parsing_ready(git_fixture_repo: Path, pendi
     # below uses — safe under NullPool (db/session.py), which was chosen
     # specifically to tolerate exactly this kind of cross-loop access.
     git_url = git_fixture_repo.as_uri()
-    repo_id, snapshot_id = asyncio.run(pending_repo_factory(SourceType.git_url, git_url))
 
-    with TestClient(app) as client, client.websocket_connect(f"/repos/{repo_id}/progress") as ws:
-        # First message is the WS handler's own DB read, sent right after it
-        # subscribes to pub/sub — confirms it's actually listening before the
-        # pipeline (which publishes over that same channel) starts. Starting
-        # the pipeline any earlier risks it finishing before the WS subscribes,
-        # which would silently drop the "pending"/"parsing" transitions.
-        first = ws.receive_json()
-        assert first["status"] == "pending"
-        statuses = [first["status"]]
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, snapshot_id = asyncio.run(
+            pending_repo_factory(SourceType.git_url, git_url, user_id=UUID(user["id"]))
+        )
 
-        thread = _run_pipeline_in_background(snapshot_id=snapshot_id, repo_id=repo_id, git_url=git_url)
-        try:
-            while True:
-                message = ws.receive_json()
-                statuses.append(message["status"])
-                if message["status"] in ("ready", "failed"):
-                    break
-        finally:
-            thread.join(timeout=10)
+        with client.websocket_connect(f"/repos/{repo_id}/progress") as ws:
+            # First message is the WS handler's own DB read, sent right after it
+            # subscribes to pub/sub — confirms it's actually listening before the
+            # pipeline (which publishes over that same channel) starts. Starting
+            # the pipeline any earlier risks it finishing before the WS subscribes,
+            # which would silently drop the "pending"/"parsing" transitions.
+            first = ws.receive_json()
+            assert first["status"] == "pending"
+            statuses = [first["status"]]
+
+            thread = _run_pipeline_in_background(snapshot_id=snapshot_id, repo_id=repo_id, git_url=git_url)
+            try:
+                while True:
+                    message = ws.receive_json()
+                    statuses.append(message["status"])
+                    if message["status"] in ("ready", "failed"):
+                        break
+            finally:
+                thread.join(timeout=10)
 
     assert statuses == ["pending", "parsing", "analyzing", "generating", "ready"]
