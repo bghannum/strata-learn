@@ -3,8 +3,11 @@ import uuid
 from app.db.models import CodeUnit, UnitType
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 from app.semantics.pattern_detector import (
+    MAX_GRAPH_EDGES,
+    MAX_GRAPH_NODES,
     PatternClaimOutput,
     PatternEvidenceItem,
+    _bound_graph,
     _render_directory_tree,
     detect_pattern,
 )
@@ -19,6 +22,49 @@ def _module_unit(file_path: str, line_end: int) -> CodeUnit:
 def test_render_directory_tree_is_deterministic() -> None:
     tree = _render_directory_tree(["b/two.py", "a.py", "b/one.py"])
     assert tree == "a.py\nb\n  one.py\n  two.py"
+
+
+def test_bound_graph_caps_nodes_deterministically() -> None:
+    # Found via Codex's Phase 2 pre-push review: git-cloned repos have no
+    # file-count cap (unlike zip uploads, capped at 5,000), so a large repo's
+    # dependency graph could blow the LLM request past its context limit
+    # unbounded. Truncation must be deterministic — the same node subset
+    # every run, not whatever order build_dependency_graph happened to emit.
+    node_count = MAX_GRAPH_NODES + 10
+    nodes = [{"id": f"file_{i:04d}.py", "kind": "file", "language": "python"} for i in range(node_count)]
+    dependency_graph = {"nodes": nodes, "edges": []}
+
+    bounded = _bound_graph(dependency_graph)
+
+    assert len(bounded["nodes"]) == MAX_GRAPH_NODES
+    assert {n["id"] for n in bounded["nodes"]} == {f"file_{i:04d}.py" for i in range(MAX_GRAPH_NODES)}
+
+
+def test_bound_graph_drops_edges_touching_a_truncated_node() -> None:
+    # An edge referencing a node that got cut by the node cap must not
+    # survive — otherwise the graph handed to the model references a node it
+    # never actually sees, which is worse than dropping the edge.
+    nodes = [{"id": f"file_{i:04d}.py", "kind": "file", "language": "python"} for i in range(MAX_GRAPH_NODES + 1)]
+    kept_edge = {"source": "file_0000.py", "target": "file_0001.py", "kind": "imports"}
+    dropped_edge = {"source": "file_0000.py", "target": f"file_{MAX_GRAPH_NODES:04d}.py", "kind": "imports"}
+    dependency_graph = {"nodes": nodes, "edges": [kept_edge, dropped_edge]}
+
+    bounded = _bound_graph(dependency_graph)
+
+    assert bounded["edges"] == [kept_edge]
+
+
+def test_bound_graph_caps_edges() -> None:
+    nodes = [{"id": f"file_{i:04d}.py", "kind": "file", "language": "python"} for i in range(2)]
+    edges = [
+        {"source": "file_0000.py", "target": "file_0001.py", "kind": f"kind_{i:04d}"}
+        for i in range(MAX_GRAPH_EDGES + 10)
+    ]
+    dependency_graph = {"nodes": nodes, "edges": edges}
+
+    bounded = _bound_graph(dependency_graph)
+
+    assert len(bounded["edges"]) == MAX_GRAPH_EDGES
 
 
 async def test_detect_pattern_resolves_and_drops_citations() -> None:

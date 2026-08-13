@@ -17,6 +17,17 @@ from app.db.models import CodeUnit, UnitType
 from app.semantics.llm_provider import LLMProvider, Message
 from app.semantics.prompts import load_prompt
 
+# A hard cap on the dependency graph's size before it's serialized into the
+# prompt — found via Codex's Phase 2 pre-push review: ingestion has no
+# file-count cap on a git-cloned repo (only zip uploads are capped, at 5,000
+# files), so a large repo's full node/edge list could blow the request past
+# the model's context limit. Nodes are truncated first, sorted by id for
+# determinism (the same subset every run); edges are then filtered to only
+# those whose source AND target both survived, so the graph handed to the
+# model stays internally consistent rather than referencing dropped nodes.
+MAX_GRAPH_NODES = 500
+MAX_GRAPH_EDGES = 1000
+
 
 class PatternEvidenceItem(BaseModel):
     claim: str
@@ -51,6 +62,18 @@ def _candidate_paths(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(" -> ")]
 
 
+def _bound_graph(dependency_graph: dict) -> dict:
+    nodes = sorted(dependency_graph.get("nodes", []), key=lambda n: n["id"])[:MAX_GRAPH_NODES]
+    kept_ids = {n["id"] for n in nodes}
+
+    edges = [
+        e for e in dependency_graph.get("edges", []) if e["source"] in kept_ids and e["target"] in kept_ids
+    ]
+    edges = sorted(edges, key=lambda e: (e["source"], e["target"], e["kind"]))[:MAX_GRAPH_EDGES]
+
+    return {"nodes": nodes, "edges": edges}
+
+
 def _render_directory_tree(file_paths: list[str]) -> str:
     tree: dict = {}
     for path in file_paths:
@@ -72,12 +95,16 @@ def _render_directory_tree(file_paths: list[str]) -> str:
 async def detect_pattern(
     llm: LLMProvider, dependency_graph: dict, code_units: list[CodeUnit], entry_points: list[dict]
 ) -> PatternClaimResult | None:
-    file_paths = [node["id"] for node in dependency_graph.get("nodes", []) if node.get("kind") == "file"]
+    bounded_graph = _bound_graph(dependency_graph)
+    # Directory tree is derived from the same bounded node set, not the raw
+    # graph — otherwise it could list files the model's own graph view no
+    # longer includes, and the two payloads would disagree with each other.
+    file_paths = [node["id"] for node in bounded_graph["nodes"] if node.get("kind") == "file"]
     module_units_by_path = {u.file_path: u for u in code_units if u.unit_type == UnitType.module}
 
     template = load_prompt("pattern_detector")
     input_text = template.render_input(
-        dependency_graph_json=json.dumps(dependency_graph),
+        dependency_graph_json=json.dumps(bounded_graph),
         directory_tree=_render_directory_tree(file_paths),
         entry_points_json=json.dumps(entry_points),
     )

@@ -159,9 +159,10 @@ async def index_repo(
         if snapshot is not None:
             # run_layer_b sets the final "ready" status itself, in the same
             # commit as the Layer B rows — see its docstring/comment for why
-            # a separate, later status commit is unsafe.
-            async with async_session_factory() as session:
-                await run_layer_b(session, llm, snapshot, source_dir)
+            # a separate, later status commit is unsafe. It manages its own
+            # sessions internally (a short-lived read, then a short-lived
+            # write only after all LLM calls finish) — no session passed in.
+            await run_layer_b(llm, snapshot, source_dir)
     except SourcePreparationError as exc:
         async with async_session_factory() as session:
             await fail_snapshot(session, snapshot_id)

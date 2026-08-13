@@ -65,7 +65,7 @@ async def test_run_layer_b_persists_all_three_tables(layer_a_ready_factory) -> N
     async with async_session_factory() as session:
         snapshot = await session.get(AnalysisSnapshot, snapshot_id)
         assert snapshot is not None
-        await run_layer_b(session, _seeded_llm(), snapshot, source_dir)
+    await run_layer_b(_seeded_llm(), snapshot, source_dir)
 
     assert await _counts(snapshot_id) == (1, 1, 1)
 
@@ -77,6 +77,6 @@ async def test_run_layer_b_is_idempotent_under_redelivery(layer_a_ready_factory)
         async with async_session_factory() as session:
             snapshot = await session.get(AnalysisSnapshot, snapshot_id)
             assert snapshot is not None
-            await run_layer_b(session, _seeded_llm(), snapshot, source_dir)
+        await run_layer_b(_seeded_llm(), snapshot, source_dir)
 
     assert await _counts(snapshot_id) == (1, 1, 1)
