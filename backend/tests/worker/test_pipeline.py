@@ -294,16 +294,17 @@ async def test_index_repo_layer_b_failure_marks_failed(
     assert not (JOBS_ROOT / str(snapshot_id)).exists()
 
 
-async def test_index_repo_cancelled_on_final_attempt_marks_failed(
+async def test_index_repo_cancelled_during_layer_b_marks_failed(
     redis_pool: ArqRedis, git_fixture_repo: Path, pending_repo_factory
 ) -> None:
     # Found via the Phase 2 manual checkpoint: arq cancels a running job via
     # asyncio.CancelledError (job_timeout, worker shutdown) — a BaseException,
     # not an Exception, so `except Exception` alone left the snapshot stuck at
-    # "analyzing" forever with no failure ever recorded. ctx here has no
-    # job_try/max_tries (same shape every other test in this file uses) —
-    # the handler's conservative default when it can't tell whether arq will
-    # retry is to treat it as final, matching this test's name.
+    # "analyzing" forever with no failure ever recorded. Always marks failed,
+    # unconditionally — see pipeline.py's CancelledError handler for why a
+    # job_try/max_tries-based "maybe arq will retry this" check is actually
+    # wrong (confirmed via a direct empirical probe against a real arq
+    # Worker: job_timeout expiry is never retried, regardless of max_tries).
     git_url = git_fixture_repo.as_uri()
     repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
 
@@ -328,39 +329,6 @@ async def test_index_repo_cancelled_on_final_attempt_marks_failed(
 
     snapshot = await _get_snapshot(snapshot_id)
     assert snapshot.status == SnapshotStatus.failed
-    assert not (JOBS_ROOT / str(snapshot_id)).exists()
-
-
-async def test_index_repo_cancelled_with_retries_remaining_does_not_mark_failed(
-    redis_pool: ArqRedis, git_fixture_repo: Path, pending_repo_factory
-) -> None:
-    # Found via Codex's Phase 2 pre-push review, confirmed against arq's own
-    # run_job source: with retry_jobs=True (the default), arq silently
-    # retries a CancelledError job whenever job_try < max_tries — it never
-    # calls finish_failed_job for that attempt. Marking the snapshot "failed"
-    # here would be premature and would make a connected WS client disconnect
-    # thinking the job is done, even though arq is about to run it again.
-    git_url = git_fixture_repo.as_uri()
-    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
-
-    async def run() -> None:
-        with pytest.raises(asyncio.CancelledError):
-            await index_repo(
-                {"redis": redis_pool, "job_try": 1, "max_tries": 5},
-                snapshot_id=snapshot_id,
-                repo_id=repo_id,
-                source_type=SourceType.git_url.value,
-                git_url=git_url,
-                llm=_CancelledLLMProvider(),
-            )
-
-    messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)
-    # No terminal "failed" published — just the real transitions so far.
-    assert [m["status"] for m in messages] == [SnapshotStatus.parsing.value, SnapshotStatus.analyzing.value]
-
-    snapshot = await _get_snapshot(snapshot_id)
-    assert snapshot.status == SnapshotStatus.analyzing  # left as-is for the retried attempt to pick back up
-    # cleanup_workspace still runs regardless — the *next* attempt re-clones/re-extracts fresh
     assert not (JOBS_ROOT / str(snapshot_id)).exists()
 
 
@@ -519,3 +487,31 @@ async def test_index_repo_tolerates_snapshot_deleted_mid_job(
         git_url=git_url,
         llm=FakeLLMProvider([]),
     )
+
+
+async def test_index_repo_short_circuits_when_snapshot_already_ready(
+    redis_pool: ArqRedis, layer_a_ready_factory
+) -> None:
+    # Found via Codex's Phase 2 pre-push review: at-least-once redelivery of
+    # a job whose snapshot already reached "ready" must not re-run the whole
+    # pipeline (Layer B is billed, non-deterministic LLM work) or risk
+    # destroying already-good data via run_layer_b's own delete-then-insert
+    # idempotency. _BoomLLMProvider would raise if Layer B were actually
+    # invoked — proving it never is.
+    repo_id, snapshot_id, _source_dir = await layer_a_ready_factory({"app.py": "x = 1\n"})
+
+    async def run() -> None:
+        await index_repo(
+            {"redis": redis_pool},
+            snapshot_id=snapshot_id,
+            repo_id=repo_id,
+            source_type=SourceType.git_url.value,
+            git_url="file:///should-never-be-cloned",
+            llm=_BoomLLMProvider(),
+        )
+
+    messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)
+    assert [m["status"] for m in messages] == [SnapshotStatus.ready.value]
+
+    snapshot = await _get_snapshot(snapshot_id)
+    assert snapshot.status == SnapshotStatus.ready

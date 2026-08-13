@@ -60,6 +60,9 @@ async def test_detect_pattern_resolves_and_drops_citations() -> None:
     # app/missing.py has no matching CodeUnit — dropped, not fabricated
     assert {c["file_path"] for c in citations} == {"app/api.py", "app/db.py"}
     assert {"file_path": "app/api.py", "line_start": 1, "line_end": 30} in citations
+    # persisted supporting_paths must match what actually resolved, not the
+    # LLM's raw list — app/missing.py must not appear here either
+    assert set(result.evidence[0]["supporting_paths"]) == {"app/api.py", "app/db.py"}
 
 
 async def test_detect_pattern_resolves_relationship_style_evidence_paths() -> None:

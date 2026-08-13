@@ -113,7 +113,15 @@ async def detect_pattern(
             # Rule #3 (found via Codex's Phase 2 pre-push review). Drop the
             # item rather than keep it with an empty citations list.
             continue
-        evidence.append({"claim": item.claim, "supporting_paths": item.supporting_paths, "citations": citations})
+        # Persist only the paths that actually resolved (== citations' own
+        # file_paths, same order) — not the LLM's raw supporting_paths, which
+        # can still contain hallucinated/relationship-notation entries that
+        # were silently dropped from citations above (found via Codex's
+        # Phase 2 pre-push review: persisting the raw list made it look like
+        # those paths were validated when they weren't).
+        evidence.append(
+            {"claim": item.claim, "supporting_paths": [c["file_path"] for c in citations], "citations": citations}
+        )
 
     if not evidence:
         # Every evidence item lost its citations — persisting primary_pattern

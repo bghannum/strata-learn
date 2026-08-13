@@ -35,7 +35,7 @@ from app.analysis.snapshot import (
     set_snapshot_status,
 )
 from app.config import settings
-from app.db.models import SnapshotStatus, SourceType
+from app.db.models import AnalysisSnapshot, SnapshotStatus, SourceType
 from app.db.session import async_session_factory
 from app.ingestion.source import (
     SourcePreparationError,
@@ -73,6 +73,24 @@ async def index_repo(
     # already a unique per-job identifier, no need to mint a separate one.
     job_id = snapshot_id
     try:
+        # Short-circuit a redelivery of an already-fully-completed job (found
+        # via Codex's Phase 2 pre-push review): arq is at-least-once, so a
+        # worker crash between run_layer_b's own commit and arq acking the
+        # job can redeliver it even though the snapshot is already `ready`.
+        # Without this, the redelivered attempt would re-run the entire
+        # pipeline from scratch, including Layer B's billed, non-deterministic
+        # LLM calls — and if *that* redundant run then fails partway,
+        # run_layer_b's own delete-then-insert idempotency (needed for the
+        # normal, not-yet-complete redelivery case) would delete the already-
+        # good rows before the redundant run's replacements are ready,
+        # turning a fully successful snapshot into a failed one. If it's
+        # already ready, there's nothing left to do.
+        async with async_session_factory() as session:
+            existing = await session.get(AnalysisSnapshot, snapshot_id)
+        if existing is not None and existing.status == SnapshotStatus.ready:
+            await publish(SnapshotStatus.ready)
+            return
+
         # Constructed inside the try, not before it, for the same reason as the
         # comment below: a missing/invalid ANTHROPIC_API_KEY (AnthropicProvider
         # raises ValueError on a falsy one) needs to reach the same fail_snapshot
@@ -147,21 +165,26 @@ async def index_repo(
         # failure mode the Exception handler below already guards against for
         # every other kind of crash.
         #
-        # But marking the snapshot terminally "failed" unconditionally is
-        # itself wrong (found via Codex's Phase 2 pre-push review, confirmed
-        # against arq's own run_job source): with retry_jobs=True (arq's
-        # default, unchanged here), arq silently retries a CancelledError job
-        # — it never calls finish_failed_job for that attempt at all — as
-        # long as job_try hasn't reached max_tries yet. Only mark it failed
-        # when this genuinely was the last attempt; otherwise stay quiet and
-        # re-raise, letting the retried attempt's own "parsing" transition
-        # pick the snapshot back up idempotently.
-        job_try = ctx.get("job_try", 1)
-        max_tries = ctx.get("max_tries")
-        if max_tries is None or job_try >= max_tries:
-            async with async_session_factory() as session:
-                await fail_snapshot(session, snapshot_id)
-            await publish(SnapshotStatus.failed, error="Indexing was cancelled (timed out or worker shutdown)")
+        # Always mark it failed here — do NOT try to guess whether arq will
+        # retry based on job_try/max_tries. A prior version of this handler
+        # did exactly that and was wrong: verified empirically (a standalone
+        # probe against a real arq Worker + Redis, not just reading the
+        # source) that a job_timeout expiry is converted by
+        # asyncio.wait_for/asyncio.timeout() into a plain TimeoutError before
+        # arq's own retry check ever runs — TimeoutError isn't
+        # asyncio.CancelledError, so arq's `retry_jobs` branch (which only
+        # matches CancelledError/RetryJob) never fires, and the job
+        # terminally fails on the very first attempt regardless of
+        # max_tries. index_repo has no way to distinguish that (the common,
+        # never-retried case) from a worker-shutdown-triggered CancelledError
+        # (which arq genuinely might retry) — both look identical from in
+        # here. Given that asymmetry, always marking failed is the safe
+        # default: the cost of an occasional premature "failed" on a rare
+        # shutdown-retry is far smaller than the cost of a permanently stuck
+        # snapshot on the common timeout path.
+        async with async_session_factory() as session:
+            await fail_snapshot(session, snapshot_id)
+        await publish(SnapshotStatus.failed, error="Indexing was cancelled (timed out or worker shutdown)")
         raise
     except Exception:
         # Anything beyond a validated bad-source error (a parse crash, an
