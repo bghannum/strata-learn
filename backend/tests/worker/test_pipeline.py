@@ -515,3 +515,32 @@ async def test_index_repo_short_circuits_when_snapshot_already_ready(
 
     snapshot = await _get_snapshot(snapshot_id)
     assert snapshot.status == SnapshotStatus.ready
+
+
+async def test_index_repo_short_circuit_publish_failure_does_not_mark_failed(
+    redis_pool: ArqRedis, layer_a_ready_factory, monkeypatch
+) -> None:
+    # Found via Codex's Phase 2 pre-push review: a failure on just the
+    # redundant "ready" re-publish above must not fall through to the
+    # generic exception handler and flip an already-successful snapshot to
+    # "failed" — the snapshot itself is already correct; only the
+    # notification attempt failed, and there's nothing to compensate for.
+    repo_id, snapshot_id, _source_dir = await layer_a_ready_factory({"app.py": "x = 1\n"})
+
+    async def _boom_publish(*args, **kwargs):
+        raise RuntimeError("simulated Redis publish failure")
+
+    monkeypatch.setattr(redis_pool, "publish", _boom_publish)
+
+    # Must not raise.
+    await index_repo(
+        {"redis": redis_pool},
+        snapshot_id=snapshot_id,
+        repo_id=repo_id,
+        source_type=SourceType.git_url.value,
+        git_url="file:///should-never-be-cloned",
+        llm=_BoomLLMProvider(),
+    )
+
+    snapshot = await _get_snapshot(snapshot_id)
+    assert snapshot.status == SnapshotStatus.ready

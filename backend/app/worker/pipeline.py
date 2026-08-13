@@ -88,7 +88,18 @@ async def index_repo(
         async with async_session_factory() as session:
             existing = await session.get(AnalysisSnapshot, snapshot_id)
         if existing is not None and existing.status == SnapshotStatus.ready:
-            await publish(SnapshotStatus.ready)
+            # A failure on just this notification must not fall through to
+            # the except Exception below — the snapshot is already correctly
+            # `ready`; only the publish attempt failed, and there's nothing
+            # to compensate for. Letting it fall through would mark an
+            # already-successful snapshot "failed", defeating the entire
+            # point of this short-circuit (found via Codex's Phase 2
+            # pre-push review — this exact block was the second thing it
+            # flagged in the same diff).
+            try:
+                await publish(SnapshotStatus.ready)
+            except Exception:  # noqa: BLE001, S110 — deliberately swallowed, see comment above
+                pass
             return
 
         # Constructed inside the try, not before it, for the same reason as the
