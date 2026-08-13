@@ -6,8 +6,9 @@ goes so `WS /repos/{repo_id}/progress` can relay them live.
 Phase 2 (Layer B — semantic analysis) added the `analyzing` transition: after
 Layer A (analyze_source/complete_snapshot) finishes, run_layer_b runs the
 LLM-backed module summarizer, pattern detector, and trade-off extractor, then
-the snapshot moves to `ready`. `generating` (Phase 3, study guide assembly)
-stays defined-but-unused until that phase lands.
+moves the snapshot to `generating`. Phase 3 (study guide assembly) then runs
+run_study_guide_generation, which assembles the StudyGuide/Section/Citation
+rows from that Layer A/B data and moves the snapshot to `ready`.
 
 git_url jobs clone independently in this process — no dependency on anything the
 API process touched. zip_upload jobs read the uploaded bytes back out of Redis
@@ -43,6 +44,7 @@ from app.ingestion.source import (
     clone_git_repo,
     extract_zip_upload,
 )
+from app.generation.study_guide_builder import run_study_guide_generation
 from app.semantics.llm_provider import AnthropicProvider, LLMProvider
 from app.semantics.orchestrator import run_layer_b
 
@@ -150,19 +152,25 @@ async def index_repo(
         if snapshot is not None:
             await publish(SnapshotStatus.analyzing)
 
-        # LAYER B — Phase 2. Still inside the try: source_dir must still exist
-        # (the trade-off extractor reads real code bodies from it, since
-        # CodeUnit only stores signatures), so cleanup_workspace in the
-        # finally below must not run until this finishes either way. A
-        # vanished snapshot (see complete_snapshot's own None-return case)
-        # skips Layer B entirely — nothing left to attach it to.
+        # LAYER B — Phase 2, then study guide assembly — Phase 3. Still inside
+        # the try: source_dir must still exist for both (the trade-off
+        # extractor reads real code bodies from it since CodeUnit only stores
+        # signatures, and citation.py captures every Citation's snippet_text
+        # from it), so cleanup_workspace in the finally below must not run
+        # until both finish. A vanished snapshot (see complete_snapshot's own
+        # None-return case) skips both entirely — nothing left to attach them to.
         if snapshot is not None:
-            # run_layer_b sets the final "ready" status itself, in the same
-            # commit as the Layer B rows — see its docstring/comment for why
-            # a separate, later status commit is unsafe. It manages its own
+            # run_layer_b sets `generating`, not `ready`, in the same commit
+            # as the Layer B rows — see its comment. It manages its own
             # sessions internally (a short-lived read, then a short-lived
             # write only after all LLM calls finish) — no session passed in.
             await run_layer_b(llm, snapshot, source_dir)
+            await publish(SnapshotStatus.generating)
+
+            # run_study_guide_generation sets the final "ready" status itself,
+            # in the same commit as the study guide rows — same invariant,
+            # one step later. Also manages its own sessions internally.
+            await run_study_guide_generation(llm, snapshot, source_dir)
     except SourcePreparationError as exc:
         async with async_session_factory() as session:
             await fail_snapshot(session, snapshot_id)

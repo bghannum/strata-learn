@@ -106,7 +106,7 @@ async def run_layer_b(llm: LLMProvider, snapshot: AnalysisSnapshot, source_dir: 
                 )
             )
 
-        # Set the final `ready` status in this same commit, not a later
+        # Set `generating` — not `ready` — in this same commit, not a later
         # separate one — found via Codex's Phase 2 pre-push review: a worker
         # crash between a separate status commit and this one left a window
         # where Layer B's data was fully persisted but the snapshot still
@@ -117,9 +117,14 @@ async def run_layer_b(llm: LLMProvider, snapshot: AnalysisSnapshot, source_dir: 
         # it in *this* session rather than mutating the detached object; a
         # vanished target (repo deleted mid-job) is tolerated the same way
         # set_snapshot_status already tolerates it.
+        #
+        # Phase 3: `ready` is now set by study_guide_builder.persist_study_guide
+        # instead, once the study guide built from this data is itself
+        # persisted — the same "final status commits with the data it
+        # describes" rule, just one step later in the pipeline.
         current = await session.get(AnalysisSnapshot, snapshot.id)
         if current is not None:
-            current.status = SnapshotStatus.ready
+            current.status = SnapshotStatus.generating
             session.add(current)
 
         await session.commit()

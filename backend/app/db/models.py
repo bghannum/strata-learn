@@ -50,6 +50,14 @@ class Confidence(str, Enum):
     low = "low"
 
 
+class SectionType(str, Enum):
+    overview = "overview"
+    architecture = "architecture"
+    tradeoffs = "tradeoffs"
+    glossary = "glossary"
+    deep_dive = "deep_dive"
+
+
 def _by_value(enum_cls: type[Enum]) -> SAEnum:
     # SQLAlchemy's Enum type persists a Python Enum's *name* by default. UnitType.class_'s
     # name ("class_") isn't the string we want stored — values_callable makes it persist
@@ -162,3 +170,41 @@ class TradeoffCard(SQLModel, table=True):
     prompt_version: str
     model: str
     created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
+
+
+# --- Study guide (Phase 3) — assembled from Layer A/B facts already collected above,
+# no new facts invented here, only formatted and cited (see generation/study_guide_builder.py) ---
+
+
+class StudyGuide(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    repo_id: uuid.UUID = Field(foreign_key="repo.id", index=True)
+    snapshot_id: uuid.UUID = Field(foreign_key="analysissnapshot.id", index=True)
+    version: int
+    generated_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
+
+
+class Section(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    study_guide_id: uuid.UUID = Field(foreign_key="studyguide.id", index=True)
+    section_type: SectionType = Field(sa_column=Column(_by_value(SectionType), nullable=False))
+    title: str
+    order: int
+    content_md: str
+    diagram_mermaid: str | None = None
+    # only the architecture section makes a new LLM call (diagram node labels) — every
+    # other section is assembled from already-generated, already-attributed Layer B rows,
+    # so these stay null there rather than re-stating provenance that's already recorded
+    # on the source ModuleSummary/PatternClaim/TradeoffCard row.
+    prompt_version: str | None = None
+    model: str | None = None
+
+
+class Citation(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    section_id: uuid.UUID = Field(foreign_key="section.id", index=True)
+    file_path: str
+    line_start: int
+    line_end: int
+    claim_excerpt: str  # the sentence/claim in content_md this citation supports
+    snippet_text: str  # actual source lines, captured now — source_dir is deleted right after (§8)

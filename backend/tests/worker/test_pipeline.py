@@ -32,6 +32,7 @@ from app.db.models import (
     Repo,
     SnapshotStatus,
     SourceType,
+    StudyGuide,
     TradeoffCard,
 )
 from app.db.session import async_session_factory
@@ -176,6 +177,7 @@ async def test_index_repo_git_url_success(
     assert [m["status"] for m in messages] == [
         SnapshotStatus.parsing.value,
         SnapshotStatus.analyzing.value,
+        SnapshotStatus.generating.value,
         SnapshotStatus.ready.value,
     ]
 
@@ -208,6 +210,7 @@ async def test_index_repo_zip_upload_success(redis_pool: ArqRedis, pending_repo_
     assert [m["status"] for m in messages] == [
         SnapshotStatus.parsing.value,
         SnapshotStatus.analyzing.value,
+        SnapshotStatus.generating.value,
         SnapshotStatus.ready.value,
     ]
 
@@ -256,11 +259,16 @@ async def test_index_repo_runs_layer_b_and_persists_all_three_tables(
         summaries = list((await session.exec(select(ModuleSummary).where(ModuleSummary.snapshot_id == snapshot_id))).all())
         patterns = list((await session.exec(select(PatternClaim).where(PatternClaim.snapshot_id == snapshot_id))).all())
         cards = list((await session.exec(select(TradeoffCard).where(TradeoffCard.snapshot_id == snapshot_id))).all())
+        guides = list((await session.exec(select(StudyGuide).where(StudyGuide.snapshot_id == snapshot_id))).all())
 
     assert len(summaries) == 1
     assert len(patterns) == 1
     assert len(cards) == 1
     assert cards[0].decision == "use arq for background jobs"
+    # Phase 3: the pipeline doesn't stop at Layer B anymore — it assembles a
+    # study guide from these same rows and that's what actually sets `ready`
+    # (see study_guide_builder.persist_study_guide).
+    assert len(guides) == 1
 
 
 async def test_index_repo_layer_b_failure_marks_failed(
