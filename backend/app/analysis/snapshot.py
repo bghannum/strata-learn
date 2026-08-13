@@ -84,10 +84,25 @@ async def set_snapshot_status(session: AsyncSession, snapshot_id: UUID, status: 
 
 
 async def complete_snapshot(
-    session: AsyncSession, snapshot_id: UUID, commit_hash: str | None, analysis: StructuralAnalysis
+    session: AsyncSession,
+    snapshot_id: UUID,
+    commit_hash: str | None,
+    analysis: StructuralAnalysis,
+    final_status: SnapshotStatus = SnapshotStatus.ready,
 ) -> AnalysisSnapshot | None:
-    """Fills in a pending snapshot with analysis results and marks it ready.
+    """Fills in a pending snapshot with analysis results and marks it
+    `final_status` (defaults to `ready`, i.e. Layer A is the whole pipeline).
     Run by the worker (worker/pipeline.py) after analyze_source succeeds.
+
+    Phase 2 passes `final_status=SnapshotStatus.analyzing` here specifically
+    so this is the *only* commit — without a caller-supplied override, this
+    function's own commit would briefly make `ready` externally visible (to
+    a poller or a WS client connecting in the gap) before pipeline.py's own
+    follow-up transition to `analyzing`, and a WS client that reads `ready`
+    disconnects immediately, never seeing Layer B run or fail (found via
+    Codex's Phase 2 pre-push review). This function stays Layer-A-only in
+    spirit — it doesn't know Layer B exists, it just writes whatever
+    terminal-or-not status its caller decides is accurate right now.
 
     Returns None if the snapshot is gone by the time the job finishes (repo
     deleted mid-index, or — in dev/test — an orphaned job outliving whatever
@@ -98,7 +113,7 @@ async def complete_snapshot(
         return None
 
     snapshot.commit_hash = commit_hash
-    snapshot.status = SnapshotStatus.ready
+    snapshot.status = final_status
     snapshot.file_count = analysis.file_count
     snapshot.language_summary = analysis.language_summary
     snapshot.dependency_graph = analysis.dependency_graph

@@ -16,6 +16,21 @@ def test_respects_gitignore(tmp_path: Path) -> None:
     assert paths == {"app.py", ".gitignore"}
 
 
+def test_skips_symlinks(tmp_path: Path) -> None:
+    # Found via Codex's Phase 2 pre-push review: a tracked symlink like
+    # leak.py -> /etc/passwd survives git clone, and following it would let
+    # Layer A "parse" — and Phase 2's trade-off extractor send to an
+    # external LLM — an arbitrary file's contents.
+    outside_target = tmp_path.parent / "outside_target.py"
+    outside_target.write_text("SECRET = 1")
+    (tmp_path / "app.py").write_text("x = 1")
+    (tmp_path / "leak.py").symlink_to(outside_target)
+
+    paths = {f.relative_path for f in walk_files(tmp_path)}
+
+    assert paths == {"app.py"}
+
+
 def test_skips_default_ignore_dirs_even_without_gitignore(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text("x = 1")
     (tmp_path / "node_modules" / "pkg").mkdir(parents=True)

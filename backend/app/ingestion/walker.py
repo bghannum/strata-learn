@@ -1,6 +1,14 @@
 """File walking over a prepared source directory: .gitignore-based filtering
 (signal reduction, not a safety boundary — the trust boundary is ADR-008's
 scoped clone/extract, not this filter), size caps, and binary-file skip.
+
+The symlink skip below IS a safety boundary, unlike the rest of this module:
+git can track a symlink entry pointing anywhere on disk (e.g. `leak.py ->
+/etc/passwd`), and `Path.is_file()`/`.read_bytes()` follow it transparently.
+Without excluding symlinks here, a malicious repo could get an arbitrary
+file's contents parsed as "source" by Layer A, and — once Phase 2's trade-off
+extractor reads file contents to send to the LLM — actually exfiltrated to a
+third-party API. Found via Codex's Phase 2 pre-push review.
 """
 
 from dataclasses import dataclass
@@ -58,6 +66,8 @@ def walk_files(source_dir: Path) -> list[WalkedFile]:
     results: list[WalkedFile] = []
 
     for path in sorted(source_dir.rglob("*")):
+        if path.is_symlink():
+            continue
         if not path.is_file():
             continue
 

@@ -48,11 +48,16 @@ services:
     command: arq app.worker.tasks.WorkerSettings
     volumes:
       - ./backend/app:/app/app
+      # Phase 2: prompt templates live at the repo root (docs/prompts/), not
+      # inside backend/ — the Dockerfile only ever copies backend/ into the
+      # image, so this needs its own mount. Read-only: the worker never writes here.
+      - ./docs:/app/docs:ro
     env_file:
       - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://strata:strata@postgres:5432/strata_learn
       REDIS_URL: redis://redis:6379/0
+      PROMPTS_DIR: /app/docs/prompts
     depends_on:
       postgres:
         condition: service_healthy
