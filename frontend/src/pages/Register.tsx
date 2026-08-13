@@ -8,6 +8,7 @@ function Register() {
   const { setUser } = useAuth()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [registrationSecret, setRegistrationSecret] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -16,7 +17,7 @@ function Register() {
     setSubmitting(true)
     setError(null)
     try {
-      const user = await register(email, password)
+      const user = await register(email, password, registrationSecret)
       setUser(user)
       navigate('/')
     } catch (err) {
@@ -57,6 +58,21 @@ function Register() {
             onChange={(e) => setPassword(e.target.value)}
             className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800"
           />
+        </div>
+
+        <div>
+          <label htmlFor="registrationSecret" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+            Registration secret
+          </label>
+          <input
+            id="registrationSecret"
+            type="password"
+            required
+            value={registrationSecret}
+            onChange={(e) => setRegistrationSecret(e.target.value)}
+            className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800"
+          />
+          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">REGISTRATION_SECRET from the server's .env</p>
         </div>
 
         {error && (

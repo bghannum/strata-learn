@@ -19,6 +19,8 @@ from app.config import settings
 from app.db.models import Repo, SourceType
 from app.db.session import async_session_factory
 
+REGISTRATION_SECRET = settings.registration_secret
+
 
 async def _clean_db() -> None:
     async with async_session_factory() as session:
@@ -43,7 +45,10 @@ def register_test_user(client: TestClient) -> dict:
     4b. TestClient persists cookies across calls on the same instance, so
     callers just do this once before their real requests."""
     email = f"test-{uuid.uuid4()}@example.com"
-    response = client.post("/auth/register", json={"email": email, "password": "test-password-123"})
+    response = client.post(
+        "/auth/register",
+        json={"email": email, "password": "test-password-123", "registration_secret": REGISTRATION_SECRET},
+    )
     assert response.status_code == 201, response.text
     return response.json()
 

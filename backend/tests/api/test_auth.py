@@ -1,12 +1,22 @@
 from fastapi.testclient import TestClient
 
+from app.config import settings
 from app.db.models import SourceType
 from app.main import app
+
+REGISTRATION_SECRET = settings.registration_secret
 
 
 def test_register_sets_session_cookie_and_returns_user_without_password_hash() -> None:
     with TestClient(app) as client:
-        response = client.post("/auth/register", json={"email": "new@example.com", "password": "a-real-password"})
+        response = client.post(
+            "/auth/register",
+            json={
+                "email": "new@example.com",
+                "password": "a-real-password",
+                "registration_secret": REGISTRATION_SECRET,
+            },
+        )
 
     assert response.status_code == 201
     body = response.json()
@@ -26,14 +36,44 @@ def test_register_after_lockout_returns_the_same_response_regardless_of_email() 
     # registration to enumerate whether a given email is the registered
     # account (found via Codex's Phase 4b pre-push review, round 2).
     with TestClient(app) as client:
-        client.post("/auth/register", json={"email": "first@example.com", "password": "a-real-password"})
+        client.post(
+            "/auth/register",
+            json={"email": "first@example.com", "password": "a-real-password", "registration_secret": REGISTRATION_SECRET},
+        )
 
-        same_email = client.post("/auth/register", json={"email": "first@example.com", "password": "whatever"})
-        different_email = client.post("/auth/register", json={"email": "second@example.com", "password": "whatever"})
+        same_email = client.post(
+            "/auth/register",
+            json={"email": "first@example.com", "password": "whatever", "registration_secret": REGISTRATION_SECRET},
+        )
+        different_email = client.post(
+            "/auth/register",
+            json={"email": "second@example.com", "password": "whatever", "registration_secret": REGISTRATION_SECRET},
+        )
 
     assert same_email.status_code == 403
     assert different_email.status_code == 403
     assert same_email.json() == different_email.json()
+
+
+def test_register_with_wrong_secret_is_rejected_even_for_the_first_account() -> None:
+    # The single-tenant lockout (see the test above) only closes registration
+    # *after* an account exists — on a freshly reachable deployment, that
+    # leaves a race where whoever hits this endpoint first, not necessarily
+    # the operator, permanently owns the app. registration_secret closes
+    # that gap: it's required even when no account exists yet, and a wrong
+    # secret gets the identical 403 as "already registered" so it isn't a
+    # way to probe whether the app has been provisioned (found via Codex's
+    # Phase 4b pre-push review, round 3).
+    with TestClient(app) as client:
+        response = client.post(
+            "/auth/register",
+            json={"email": "attacker@example.com", "password": "whatever", "registration_secret": "wrong-secret"},
+        )
+        assert response.status_code == 403
+
+        me = client.get("/auth/me")
+
+    assert me.status_code == 401  # definitely didn't get a session
 
 
 async def test_register_claims_repos_left_over_from_before_auth_existed(pending_repo_factory) -> None:
@@ -46,7 +86,14 @@ async def test_register_claims_repos_left_over_from_before_auth_existed(pending_
     orphaned_repo_id, _snapshot_id = await pending_repo_factory(SourceType.git_url, "https://example.com/repo.git")
 
     with TestClient(app) as client:
-        client.post("/auth/register", json={"email": "claims-orphans@example.com", "password": "a-real-password"})
+        client.post(
+            "/auth/register",
+            json={
+                "email": "claims-orphans@example.com",
+                "password": "a-real-password",
+                "registration_secret": REGISTRATION_SECRET,
+            },
+        )
         response = client.get(f"/repos/{orphaned_repo_id}")
 
     assert response.status_code == 200
@@ -55,13 +102,27 @@ async def test_register_claims_repos_left_over_from_before_auth_existed(pending_
 
 def test_register_rejects_invalid_email() -> None:
     with TestClient(app) as client:
-        response = client.post("/auth/register", json={"email": "not-an-email", "password": "a-real-password"})
+        response = client.post(
+            "/auth/register",
+            json={
+                "email": "not-an-email",
+                "password": "a-real-password",
+                "registration_secret": REGISTRATION_SECRET,
+            },
+        )
     assert response.status_code == 422
 
 
 def test_login_with_correct_credentials_sets_session_cookie() -> None:
     with TestClient(app) as client:
-        client.post("/auth/register", json={"email": "login-test@example.com", "password": "a-real-password"})
+        client.post(
+            "/auth/register",
+            json={
+                "email": "login-test@example.com",
+                "password": "a-real-password",
+                "registration_secret": REGISTRATION_SECRET,
+            },
+        )
         client.cookies.clear()  # simulate a fresh browser session, no leftover cookie from register
 
         response = client.post(
@@ -75,7 +136,14 @@ def test_login_with_correct_credentials_sets_session_cookie() -> None:
 
 def test_login_with_wrong_password_returns_401() -> None:
     with TestClient(app) as client:
-        client.post("/auth/register", json={"email": "wrong-pw@example.com", "password": "a-real-password"})
+        client.post(
+            "/auth/register",
+            json={
+                "email": "wrong-pw@example.com",
+                "password": "a-real-password",
+                "registration_secret": REGISTRATION_SECRET,
+            },
+        )
         client.cookies.clear()
 
         response = client.post("/auth/login", json={"email": "wrong-pw@example.com", "password": "nope"})
@@ -93,13 +161,22 @@ def test_login_with_unknown_email_still_pays_bcrypt_cost(monkeypatch) -> None:
     # A missing user must not short-circuit past verify_password — otherwise
     # "no such account" is measurably faster than "wrong password", a timing
     # side-channel even though both return the identical 401 body (found via
-    # Codex's Phase 4b pre-push review, round 2).
+    # Codex's Phase 4b pre-push review, round 2). Also confirms the call
+    # actually runs off the main thread (asyncio.to_thread) — bcrypt is
+    # synchronous and deliberately slow, so calling it directly would stall
+    # the event loop, including the repo-progress WebSocket, for its
+    # duration on every login attempt (found via Codex's Phase 4b pre-push
+    # review, round 3).
+    import threading
+
     import app.api.auth as auth_module
 
+    calling_threads: list[threading.Thread] = []
     calls: list[str] = []
     original = auth_module.verify_password
 
     def _spy(password: str, password_hash: str) -> bool:
+        calling_threads.append(threading.current_thread())
         calls.append(password_hash)
         return original(password, password_hash)
 
@@ -110,6 +187,37 @@ def test_login_with_unknown_email_still_pays_bcrypt_cost(monkeypatch) -> None:
 
     assert response.status_code == 401
     assert calls == [auth_module._DUMMY_PASSWORD_HASH]
+    assert calling_threads[0] is not threading.current_thread()
+
+
+def test_register_hashes_the_password_off_the_event_loop(monkeypatch) -> None:
+    # Same reasoning as the login test above, for the register path's own
+    # bcrypt call (found via Codex's Phase 4b pre-push review, round 3).
+    import threading
+
+    import app.api.auth as auth_module
+
+    calling_threads: list[threading.Thread] = []
+    original = auth_module.hash_password
+
+    def _spy(password: str) -> str:
+        calling_threads.append(threading.current_thread())
+        return original(password)
+
+    monkeypatch.setattr(auth_module, "hash_password", _spy)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/auth/register",
+            json={
+                "email": "thread-check@example.com",
+                "password": "a-real-password",
+                "registration_secret": REGISTRATION_SECRET,
+            },
+        )
+
+    assert response.status_code == 201
+    assert calling_threads[0] is not threading.current_thread()
 
 
 def test_me_without_a_session_returns_401() -> None:
@@ -127,7 +235,14 @@ def test_me_with_garbage_cookie_returns_401() -> None:
 
 def test_logout_clears_the_cookie_and_invalidates_the_session() -> None:
     with TestClient(app) as client:
-        client.post("/auth/register", json={"email": "logout-test@example.com", "password": "a-real-password"})
+        client.post(
+            "/auth/register",
+            json={
+                "email": "logout-test@example.com",
+                "password": "a-real-password",
+                "registration_secret": REGISTRATION_SECRET,
+            },
+        )
         assert client.get("/auth/me").status_code == 200
 
         logout_response = client.post("/auth/logout")

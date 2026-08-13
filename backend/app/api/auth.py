@@ -8,6 +8,8 @@ get_current_user is the dependency other routers (api/repos.py,
 api/study_guides.py) import to scope requests to the logged-in user.
 """
 
+import secrets
+from asyncio import to_thread
 from datetime import datetime
 from uuid import UUID
 
@@ -17,7 +19,13 @@ from sqlmodel import select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.auth.security import hash_password, verify_password
-from app.auth.session import SESSION_LIFETIME, create_session, delete_session, get_user_from_token
+from app.auth.session import (
+    SESSION_LIFETIME,
+    create_session,
+    delete_session,
+    get_user_from_token,
+)
+from app.config import settings
 from app.db.models import Repo, User
 from app.db.session import get_session
 
@@ -38,6 +46,7 @@ _DUMMY_PASSWORD_HASH = hash_password("not-a-real-account-timing-safety-only")
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
+    registration_secret: str
 
 
 class LoginRequest(BaseModel):
@@ -84,11 +93,29 @@ async def register(
     # "this doesn't" is an email-enumeration oracle despite login's already
     # being careful about exactly that (found via Codex's Phase 4b pre-push
     # review, round 2).
+    #
+    # That lockout only closes the door *after* the first account exists —
+    # on a freshly reachable deployment, whoever reaches this endpoint first
+    # isn't necessarily the operator. registration_secret (settings.py) is
+    # an out-of-band shared secret only the operator has, so this is really
+    # "provision the account", not "sign up" (found via Codex's Phase 4b
+    # pre-push review, round 3). compare_digest avoids leaking the secret's
+    # value byte-by-byte through response timing; token_ok is still computed
+    # even once any_existing_user is set, for the same reason login always
+    # pays bcrypt's cost below — a short-circuit would make "already
+    # registered" measurably faster than "wrong secret, first account".
     any_existing_user = (await session.exec(select(User.id).limit(1))).first()
-    if any_existing_user is not None:
+    token_ok = secrets.compare_digest(body.registration_secret, settings.registration_secret)
+    if any_existing_user is not None or not token_ok:
         raise HTTPException(403, "Registration is closed — this app supports a single account")
     try:
-        password_hash = hash_password(body.password)
+        # bcrypt is deliberately slow (that's the point of a password hash),
+        # which means it blocks the single Uvicorn event loop for the
+        # duration if called directly from an async endpoint — including the
+        # repo-progress WebSocket other requests may be waiting on
+        # concurrently. Offloaded to a worker thread (found via Codex's
+        # Phase 4b pre-push review, round 3).
+        password_hash = await to_thread(hash_password, body.password)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -123,10 +150,15 @@ async def login(body: LoginRequest, response: Response, session: AsyncSession = 
     # verify_password's real bcrypt cost, making a missing account's 401
     # measurably faster than a wrong-password 401 even with identical
     # response bodies (found via Codex's Phase 4b pre-push review, round 2).
+    # Both branches run off the event loop (asyncio.to_thread) — bcrypt is
+    # synchronous and deliberately slow, so calling it directly here would
+    # stall every other request (including the repo-progress WebSocket) for
+    # its duration on every login attempt, not just a rare one (found via
+    # Codex's Phase 4b pre-push review, round 3).
     if user is not None:
-        password_ok = verify_password(body.password, user.password_hash)
+        password_ok = await to_thread(verify_password, body.password, user.password_hash)
     else:
-        verify_password(body.password, _DUMMY_PASSWORD_HASH)  # pays the same cost, result unused
+        await to_thread(verify_password, body.password, _DUMMY_PASSWORD_HASH)  # pays the same cost, result unused
         password_ok = False
     if user is None or not password_ok:
         raise HTTPException(401, "Incorrect email or password")

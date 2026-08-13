@@ -112,11 +112,11 @@ export interface User {
   created_at: string
 }
 
-export function register(email: string, password: string): Promise<User> {
+export function register(email: string, password: string, registrationSecret: string): Promise<User> {
   return request('/auth/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, registration_secret: registrationSecret }),
   })
 }
 
