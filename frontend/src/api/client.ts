@@ -94,12 +94,52 @@ async function parseErrorDetail(response: Response): Promise<string> {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, init)
+  // credentials: 'include' — every endpoint requires the session cookie as
+  // of Phase 4b, and the API runs on a different port than the frontend
+  // dev server, so the browser won't attach it without being told to.
+  const response = await fetch(`${API_BASE_URL}${path}`, { ...init, credentials: 'include' })
   if (!response.ok) {
     throw new ApiError(response.status, await parseErrorDetail(response))
   }
   return response.json()
 }
+
+// --- Auth ---
+
+export interface User {
+  id: string
+  email: string
+  created_at: string
+}
+
+export function register(email: string, password: string, registrationSecret: string): Promise<User> {
+  return request('/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, registration_secret: registrationSecret }),
+  })
+}
+
+export function login(email: string, password: string): Promise<User> {
+  return request('/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  })
+}
+
+export async function logout(): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/auth/logout`, { method: 'POST', credentials: 'include' })
+  if (!response.ok) {
+    throw new ApiError(response.status, await parseErrorDetail(response))
+  }
+}
+
+export function getCurrentUser(): Promise<User> {
+  return request('/auth/me')
+}
+
+// --- Repos ---
 
 export function listRepos(): Promise<Repo[]> {
   return request('/repos')
@@ -151,7 +191,7 @@ export async function createRepo(
 
   if (input.sourceType === 'git_url') {
     form.set('git_url', input.gitUrl)
-    const response = await fetch(`${API_BASE_URL}/repos`, { method: 'POST', body: form })
+    const response = await fetch(`${API_BASE_URL}/repos`, { method: 'POST', body: form, credentials: 'include' })
     if (!response.ok) {
       throw new ApiError(response.status, await parseErrorDetail(response))
     }
@@ -165,6 +205,7 @@ export async function createRepo(
   return new Promise<Repo>((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', `${API_BASE_URL}/repos`)
+    xhr.withCredentials = true // send the session cookie, same reason as request()'s credentials: 'include'
     xhr.upload.onprogress = (event) => {
       if (onUploadProgress && event.lengthComputable) {
         onUploadProgress(Math.round((event.loaded / event.total) * 100))

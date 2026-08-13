@@ -1,4 +1,5 @@
 import subprocess
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from uuid import UUID
@@ -6,6 +7,7 @@ from uuid import UUID
 import pytest
 from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
+from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app.analysis.snapshot import (
@@ -16,6 +18,8 @@ from app.analysis.snapshot import (
 from app.config import settings
 from app.db.models import Repo, SourceType
 from app.db.session import async_session_factory
+
+REGISTRATION_SECRET = settings.registration_secret
 
 
 async def _clean_db() -> None:
@@ -30,8 +34,51 @@ async def _clean_db() -> None:
         await session.exec(text("DELETE FROM modulesummary"))
         await session.exec(text("DELETE FROM analysissnapshot"))
         await session.exec(text("DELETE FROM repo"))
+        await session.exec(text("DELETE FROM session"))
         await session.exec(text('DELETE FROM "user"'))
         await session.commit()
+
+
+def register_test_user(client: TestClient) -> dict:
+    """Registers (and, via the response cookie, logs in) a throwaway user on
+    the given TestClient — every API endpoint requires a session as of Phase
+    4b. TestClient persists cookies across calls on the same instance, so
+    callers just do this once before their real requests."""
+    email = f"test-{uuid.uuid4()}@example.com"
+    response = client.post(
+        "/auth/register",
+        json={"email": email, "password": "test-password-123", "registration_secret": REGISTRATION_SECRET},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+async def login_as_new_user(client: TestClient, email: str | None = None) -> dict:
+    """For tests that need a *second* account to verify cross-user isolation:
+    POST /auth/register only ever allows the first account ever created
+    (ADR-007's single-tenant design — found via Codex's Phase 4b pre-push
+    review), so a second real account can't come from the HTTP endpoint.
+    Creates the User + Session directly via the same helpers the real login
+    flow uses (app/auth/session.py), then sets the resulting cookie on the
+    client exactly as a real login response would — arguably more realistic
+    than going through registration anyway, since any actual second account
+    in this single-tenant app would come from a different provisioning path,
+    not self-registration."""
+    from app.api.auth import SESSION_COOKIE_NAME
+    from app.auth.security import hash_password
+    from app.auth.session import create_session
+    from app.db.models import User
+
+    user_email = email or f"test-{uuid.uuid4()}@example.com"
+    async with async_session_factory() as session:
+        user = User(email=user_email, password_hash=hash_password("test-password-123"))
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        raw_token = await create_session(session, user.id)
+
+    client.cookies.set(SESSION_COOKIE_NAME, raw_token)
+    return {"id": str(user.id), "email": user.email}
 
 
 @pytest.fixture(autouse=True)
@@ -58,15 +105,20 @@ async def redis_pool() -> AsyncIterator[ArqRedis]:
 
 
 @pytest.fixture
-def pending_repo_factory() -> Callable[[SourceType, str], Awaitable[tuple[UUID, UUID]]]:
+def pending_repo_factory() -> Callable[..., Awaitable[tuple[UUID, UUID]]]:
     """Creates a Repo + pending AnalysisSnapshot directly via the DB, bypassing
     both the HTTP layer and the real arq enqueue — for tests that drive the
     worker pipeline themselves and don't want an unconsumed job left sitting
-    in the queue (no arq worker process runs during the test suite)."""
+    in the queue (no arq worker process runs during the test suite).
 
-    async def _make(source_type: SourceType, source_uri: str) -> tuple[UUID, UUID]:
+    `user_id` is optional (defaults to None, matching Repo.user_id's own
+    nullable-until-Phase-4b default) — only tests that then hit the
+    ownership-scoped API endpoints (register_test_user + this fixture's
+    caller passing that user's id) need to set it."""
+
+    async def _make(source_type: SourceType, source_uri: str, user_id: UUID | None = None) -> tuple[UUID, UUID]:
         async with async_session_factory() as session:
-            repo = Repo(source_type=source_type, source_uri=source_uri, display_name=source_uri)
+            repo = Repo(source_type=source_type, source_uri=source_uri, display_name=source_uri, user_id=user_id)
             session.add(repo)
             await session.flush()
             snapshot = await create_pending_snapshot(session, repo.id)

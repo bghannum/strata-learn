@@ -30,8 +30,10 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.analysis.snapshot import create_pending_snapshot, fail_snapshot
+from app.api.auth import get_current_user
+from app.auth.session import get_user_from_token
 from app.config import settings
-from app.db.models import AnalysisSnapshot, Repo, SnapshotStatus, SourceType, StudyGuide
+from app.db.models import AnalysisSnapshot, Repo, SnapshotStatus, SourceType, StudyGuide, User
 from app.db.session import get_session
 from app.ingestion.source import (
     SourcePreparationError,
@@ -62,6 +64,7 @@ async def create_repo(
     file: UploadFile | None = File(None),
     session: AsyncSession = Depends(get_session),
     redis: ArqRedis = Depends(get_redis_pool),
+    current_user: User = Depends(get_current_user),
 ) -> Repo:
     zip_bytes: bytes | None = None
 
@@ -97,6 +100,7 @@ async def create_repo(
             raise HTTPException(422, str(exc)) from exc
 
     repo = Repo(
+        user_id=current_user.id,
         source_type=source_type,
         source_uri=source_uri,
         display_name=display_name or source_uri,
@@ -136,23 +140,34 @@ async def create_repo(
 
 
 @router.get("", response_model=list[Repo])
-async def list_repos(session: AsyncSession = Depends(get_session)) -> list[Repo]:
-    result = await session.exec(select(Repo).order_by(Repo.created_at.desc()))
+async def list_repos(
+    session: AsyncSession = Depends(get_session), current_user: User = Depends(get_current_user)
+) -> list[Repo]:
+    result = await session.exec(
+        select(Repo).where(Repo.user_id == current_user.id).order_by(Repo.created_at.desc())
+    )
     return list(result.all())
 
 
 @router.get("/{repo_id}", response_model=Repo)
-async def get_repo(repo_id: UUID, session: AsyncSession = Depends(get_session)) -> Repo:
+async def get_repo(
+    repo_id: UUID, session: AsyncSession = Depends(get_session), current_user: User = Depends(get_current_user)
+) -> Repo:
     repo = await session.get(Repo, repo_id)
-    if repo is None:
+    # 404, not 403, for a repo that exists but belongs to someone else — a
+    # distinct "forbidden" response would confirm the repo_id is real to a
+    # caller who shouldn't be able to tell either way.
+    if repo is None or repo.user_id != current_user.id:
         raise HTTPException(404, "repo not found")
     return repo
 
 
 @router.get("/{repo_id}/snapshot", response_model=AnalysisSnapshot)
-async def get_latest_snapshot(repo_id: UUID, session: AsyncSession = Depends(get_session)) -> AnalysisSnapshot:
+async def get_latest_snapshot(
+    repo_id: UUID, session: AsyncSession = Depends(get_session), current_user: User = Depends(get_current_user)
+) -> AnalysisSnapshot:
     repo = await session.get(Repo, repo_id)
-    if repo is None:
+    if repo is None or repo.user_id != current_user.id:
         raise HTTPException(404, "repo not found")
     if repo.latest_snapshot_id is None:
         raise HTTPException(404, "repo has no snapshot yet")
@@ -163,7 +178,9 @@ async def get_latest_snapshot(repo_id: UUID, session: AsyncSession = Depends(get
 
 
 @router.get("/{repo_id}/study-guide")
-async def get_repo_study_guide(repo_id: UUID, session: AsyncSession = Depends(get_session)) -> RedirectResponse:
+async def get_repo_study_guide(
+    repo_id: UUID, session: AsyncSession = Depends(get_session), current_user: User = Depends(get_current_user)
+) -> RedirectResponse:
     """`StudyGuide.id` is generated inside the worker (study_guide_builder.py)
     and never surfaces through create_repo's response, the snapshot endpoint
     above, or the progress WebSocket — GET /study-guides/{id} (the only
@@ -173,7 +190,7 @@ async def get_repo_study_guide(repo_id: UUID, session: AsyncSession = Depends(ge
     logic here.
     """
     repo = await session.get(Repo, repo_id)
-    if repo is None or repo.latest_snapshot_id is None:
+    if repo is None or repo.user_id != current_user.id or repo.latest_snapshot_id is None:
         raise HTTPException(404, "repo has no snapshot yet")
     guide = (
         await session.exec(select(StudyGuide).where(StudyGuide.snapshot_id == repo.latest_snapshot_id))
@@ -192,8 +209,19 @@ async def repo_progress(
 ) -> None:
     await websocket.accept()
 
+    # A WebSocket handshake carries cookies the same way a normal HTTP
+    # request does, but Depends(get_current_user) raises HTTPException,
+    # which has no meaning once the connection is already accepted — a
+    # WebSocket rejection is a close code instead, so this reads the same
+    # cookie manually rather than reusing that dependency directly.
+    session_token = websocket.cookies.get("session_token")
+    current_user = await get_user_from_token(session, session_token) if session_token else None
+    if current_user is None:
+        await websocket.close(code=4401)
+        return
+
     repo = await session.get(Repo, repo_id)
-    if repo is None or repo.latest_snapshot_id is None:
+    if repo is None or repo.user_id != current_user.id or repo.latest_snapshot_id is None:
         await websocket.close(code=4404)
         return
 

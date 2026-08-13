@@ -3,10 +3,16 @@ the context manager, each call can spin up a fresh anyio event loop, and our
 global asyncpg-backed async engine (created once at import time) then raises
 "Future attached to a different loop" on the second call in a test. Entering
 the context manager pins one loop for the whole block.
+
+Every endpoint requires a session as of Phase 4b — register_test_user
+(tests/conftest.py) registers a throwaway user on the client before the
+real request under test, since TestClient persists the resulting cookie
+across calls on the same instance.
 """
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -16,6 +22,7 @@ from app.db.models import SourceType, StudyGuide
 from app.db.session import async_session_factory
 from app.main import app
 from app.redis_pool import get_redis_pool
+from tests.conftest import login_as_new_user, register_test_user
 
 
 def test_create_repo_from_git_url(git_fixture_repo: Path) -> None:
@@ -26,6 +33,7 @@ def test_create_repo_from_git_url(git_fixture_repo: Path) -> None:
     # which actually drive the worker (nothing does here — no arq worker
     # process runs during the test suite).
     with TestClient(app) as client:
+        register_test_user(client)
         response = client.post(
             "/repos",
             data={"source_type": "git_url", "git_url": git_fixture_repo.as_uri()},
@@ -48,6 +56,7 @@ def test_create_repo_from_zip_upload(tmp_path: Path) -> None:
         zf.writestr("hello.py", "def hello():\n    return 'hi'\n")
 
     with TestClient(app) as client, open(zip_path, "rb") as f:
+        register_test_user(client)
         response = client.post(
             "/repos",
             data={"source_type": "zip_upload", "display_name": "zip test"},
@@ -72,6 +81,7 @@ def test_create_repo_zip_upload_over_size_limit_returns_422(tmp_path: Path, monk
         zf.writestr("hello.py", "def hello():\n    return 'hi'\n")
 
     with TestClient(app) as client, open(zip_path, "rb") as f:
+        register_test_user(client)
         response = client.post(
             "/repos",
             data={"source_type": "zip_upload"},
@@ -98,6 +108,7 @@ def test_create_repo_enqueue_failure_marks_snapshot_failed(git_fixture_repo: Pat
     app.dependency_overrides[get_redis_pool] = broken_redis_pool
     try:
         with TestClient(app) as client:
+            register_test_user(client)
             response = client.post(
                 "/repos",
                 data={"source_type": "git_url", "git_url": git_fixture_repo.as_uri()},
@@ -125,6 +136,7 @@ def test_create_repo_redis_unreachable_at_dependency_time_returns_503(git_fixtur
     app.dependency_overrides[get_redis_pool] = failing_redis_pool
     try:
         with TestClient(app) as client:
+            register_test_user(client)
             response = client.post(
                 "/repos",
                 data={"source_type": "git_url", "git_url": git_fixture_repo.as_uri()},
@@ -137,6 +149,7 @@ def test_create_repo_redis_unreachable_at_dependency_time_returns_503(git_fixtur
 
 def test_create_repo_bad_git_url_returns_422() -> None:
     with TestClient(app) as client:
+        register_test_user(client)
         response = client.post(
             "/repos", data={"source_type": "git_url", "git_url": "file:///definitely/does/not/exist"}
         )
@@ -145,18 +158,21 @@ def test_create_repo_bad_git_url_returns_422() -> None:
 
 def test_create_repo_missing_git_url_returns_422() -> None:
     with TestClient(app) as client:
+        register_test_user(client)
         response = client.post("/repos", data={"source_type": "git_url"})
     assert response.status_code == 422
 
 
 def test_create_repo_missing_file_returns_422() -> None:
     with TestClient(app) as client:
+        register_test_user(client)
         response = client.post("/repos", data={"source_type": "zip_upload"})
     assert response.status_code == 422
 
 
 def test_list_and_get_repo(git_fixture_repo: Path) -> None:
     with TestClient(app) as client:
+        register_test_user(client)
         created = client.post(
             "/repos",
             data={"source_type": "git_url", "git_url": git_fixture_repo.as_uri()},
@@ -171,8 +187,31 @@ def test_list_and_get_repo(git_fixture_repo: Path) -> None:
         assert detail.json()["id"] == created["id"]
 
 
+async def test_list_repos_only_returns_the_current_users_own(git_fixture_repo: Path) -> None:
+    with TestClient(app) as client_a:
+        register_test_user(client_a)
+        created = client_a.post(
+            "/repos",
+            data={"source_type": "git_url", "git_url": git_fixture_repo.as_uri()},
+        ).json()
+
+    # A second account can't come from POST /auth/register (only the first
+    # account ever created is allowed — ADR-007's single-tenant design), so
+    # this uses login_as_new_user's DB-level bypass instead.
+    with TestClient(app) as client_b:
+        await login_as_new_user(client_b)
+        listed_b = client_b.get("/repos").json()
+        assert listed_b == []  # a second account sees none of the first account's repos
+
+        # Same "404, not 403" reasoning as the ownership checks themselves —
+        # a real repo_id belonging to someone else isn't reachable either.
+        assert client_b.get(f"/repos/{created['id']}").status_code == 404
+        assert client_b.get(f"/repos/{created['id']}/snapshot").status_code == 404
+
+
 def test_get_repo_not_found_returns_404() -> None:
     with TestClient(app) as client:
+        register_test_user(client)
         response = client.get("/repos/00000000-0000-0000-0000-000000000000")
     assert response.status_code == 404
 
@@ -182,14 +221,17 @@ async def test_get_repo_study_guide_redirects_to_canonical_resource(pending_repo
     # through create_repo's response or the snapshot endpoint — this is the
     # only way an API client can discover it (found via Codex's Phase 3
     # pre-push review).
-    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, "https://example.com/repo.git")
-    async with async_session_factory() as session:
-        guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=1)
-        session.add(guide)
-        await session.commit()
-        guide_id = guide.id
-
     with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=UUID(user["id"])
+        )
+        async with async_session_factory() as session:
+            guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=1)
+            session.add(guide)
+            await session.commit()
+            guide_id = guide.id
+
         response = client.get(f"/repos/{repo_id}/study-guide", follow_redirects=False)
 
     assert response.status_code in (302, 307)
@@ -197,9 +239,11 @@ async def test_get_repo_study_guide_redirects_to_canonical_resource(pending_repo
 
 
 async def test_get_repo_study_guide_404_before_guide_exists(pending_repo_factory) -> None:
-    repo_id, _snapshot_id = await pending_repo_factory(SourceType.git_url, "https://example.com/repo.git")
-
     with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, _snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=UUID(user["id"])
+        )
         response = client.get(f"/repos/{repo_id}/study-guide")
 
     assert response.status_code == 404
@@ -207,6 +251,7 @@ async def test_get_repo_study_guide_404_before_guide_exists(pending_repo_factory
 
 def test_get_repo_study_guide_404_for_unknown_repo() -> None:
     with TestClient(app) as client:
+        register_test_user(client)
         response = client.get("/repos/00000000-0000-0000-0000-000000000000/study-guide")
     assert response.status_code == 404
 
@@ -217,5 +262,6 @@ def test_get_snapshot_for_repo_without_one_is_unreachable() -> None:
     # code path that creates a repo without one, so 404 is only reachable via
     # a nonexistent repo id
     with TestClient(app) as client:
+        register_test_user(client)
         response = client.get("/repos/00000000-0000-0000-0000-000000000000/snapshot")
     assert response.status_code == 404

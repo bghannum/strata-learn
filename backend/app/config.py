@@ -23,7 +23,16 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://strata:strata@localhost:5432/strata_learn"
     redis_url: str = "redis://localhost:6379/0"
 
-    session_secret: str = "change-me"
+    # ADR-007's single-tenant lockout only closes registration *after* the
+    # first account exists — on a freshly reachable deployment, whoever hits
+    # POST /auth/register first (not necessarily the operator) permanently
+    # owns the app. Requiring this out-of-band secret in the request body
+    # closes that race (found via Codex's Phase 4b pre-push review, round
+    # 3). Reusing the slot originally reserved for session signing, which
+    # went unused once sessions ended up DB-backed rather than signed
+    # (see app/auth/session.py) — same "operator must change this before a
+    # real deployment" placeholder value either way.
+    registration_secret: str = "change-me"
     cors_origins: list[str] = ["http://localhost:5173"]
 
     anthropic_api_key: str | None = None

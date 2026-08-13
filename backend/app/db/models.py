@@ -75,6 +75,19 @@ class User(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
 
 
+class Session(SQLModel, table=True):
+    """A logged-in session, looked up by hashing the opaque token the cookie
+    carries (app/auth/session.py) — the DB never stores the raw token, same
+    defense-in-depth reasoning as password hashing (ADR-007's self-implemented,
+    DB-backed session design, not a signed cookie)."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    user_id: uuid.UUID = Field(foreign_key="user.id", index=True)
+    token_hash: str = Field(unique=True, index=True)
+    created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
+    expires_at: datetime = Field(sa_column=_timestamptz_column())
+
+
 # --- Core repo tracking ---
 
 

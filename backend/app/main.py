@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 
-from app.api import repos, study_guides
+from app.api import auth, repos, study_guides
 from app.config import settings
 
 app = FastAPI(title="Strata Learn API")
@@ -16,6 +16,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(repos.router)
 app.include_router(study_guides.router)
 
