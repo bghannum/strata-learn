@@ -1,16 +1,16 @@
 # Current architecture
 
-**Status:** Current through Phase 2, merged 2026-08-12 in PR #17.
+**Status:** Current through Phase 3, merged 2026-08-13 in PR #22.
 
-Strata Learn is a Docker Compose-based modular monolith that ingests a Git repository or uploaded zip, extracts deterministic structural facts, and enriches them with citation-grounded LLM analysis. Study-guide generation, authentication, quizzes, and the functional frontend remain future phases.
+Strata Learn is a Docker Compose-based modular monolith that ingests a Git repository or uploaded zip, extracts deterministic structural facts, enriches them with citation-grounded LLM analysis, and assembles the result into a study guide. Authentication, quizzes, and the functional frontend remain future phases.
 
 ## System components
 
 | Component | Technology | Current responsibility |
 |---|---|---|
-| API | FastAPI | Health, repository ingestion, repository lookup, snapshot lookup, and progress WebSocket |
-| Worker | arq | Source preparation, Layer A analysis, Layer B analysis, persistence, and status publication |
-| Database | PostgreSQL 16 | Repositories, snapshots, code units, module summaries, pattern claims, and trade-off cards |
+| API | FastAPI | Health, repository ingestion, repository/snapshot lookup, progress WebSocket, and study guide lookup |
+| Worker | arq | Source preparation, Layer A analysis, Layer B analysis, study guide generation, persistence, and status publication |
+| Database | PostgreSQL 16 | Repositories, snapshots, code units, module summaries, pattern claims, trade-off cards, and study guides/sections/citations |
 | Queue/events | Redis 7 | arq jobs, temporary zip bytes, and snapshot progress pub/sub |
 | Frontend | React/Vite | Scaffold and placeholder routes only; functional UI begins in Phase 4 |
 | LLM provider | Anthropic | Claude-backed structured output for all current Layer B tasks |
@@ -31,6 +31,9 @@ flowchart LR
     LayerA --> LayerB[Layer B: semantic analysis]
     LayerB --> Anthropic
     LayerB --> PostgreSQL
+    LayerB --> Guide[Study guide generation]
+    Guide --> Anthropic
+    Guide --> PostgreSQL
     Worker -->|status events| Redis
     Redis -->|WebSocket relay| Client
 ```
@@ -58,6 +61,10 @@ The implementation bounds request volume, validates model-provided evidence agai
 
 Versioned templates under [`docs/prompts/`](prompts/) are runtime inputs, not passive prose.
 
+### Study guide generation
+
+Runs after Layer B and assembles its output (plus Layer A facts) into a study guide: Overview, Architecture, Trade-offs, Glossary, and Deep-Dive sections, each with citations back to real source lines. The only new LLM call is short labels for a Mermaid component diagram built from the (already-deterministic) dependency graph; every other section is deterministic formatting of already-generated, already-cited Layer B rows. A crash between Layer B's commit and the guide's commit resumes on redelivery without re-running Layer B's billed calls, reacquiring source pinned to the originally analyzed commit rather than the branch's current tip.
+
 ## Persistence model
 
 Implemented tables are:
@@ -66,18 +73,19 @@ Implemented tables are:
 - `Repo` — an ingested source and pointer to its latest snapshot;
 - `AnalysisSnapshot` — one indexed state plus status and Layer A graph data;
 - `CodeUnit` — a parsed module, class, or function;
-- `ModuleSummary`, `PatternClaim`, and `TradeoffCard` — citation-grounded Layer B output.
+- `ModuleSummary`, `PatternClaim`, and `TradeoffCard` — citation-grounded Layer B output;
+- `StudyGuide`, `Section`, and `Citation` — the assembled study guide and its per-claim citations.
 
-Study-guide, quiz, question, attempt, and answer-submission tables are not implemented yet.
+Quiz, question, attempt, and answer-submission tables are not implemented yet.
 
 ## Status lifecycle
 
 ```text
-pending → parsing → analyzing → ready
+pending → parsing → analyzing → generating → ready
                             ↘ failed
 ```
 
-`generating` is defined for Phase 3 but currently unused. The worker commits final Layer B rows and `ready` atomically to reduce duplicate paid work under arq’s at-least-once delivery model.
+The worker commits final Layer B rows with `generating` atomically, and the study guide rows with `ready` atomically, to reduce duplicate paid work under arq's at-least-once delivery model. A redelivery landing between those two commits resumes directly into study guide generation instead of repeating Layer B.
 
 ## Implemented API
 
@@ -88,6 +96,8 @@ pending → parsing → analyzing → ready
 | `GET` | `/repos` | List repositories |
 | `GET` | `/repos/{repo_id}` | Fetch a repository |
 | `GET` | `/repos/{repo_id}/snapshot` | Fetch its latest analysis snapshot |
+| `GET` | `/repos/{repo_id}/study-guide` | Redirect to its generated study guide |
+| `GET` | `/study-guides/{study_guide_id}` | Fetch a study guide with ordered sections and citations |
 | `WS` | `/repos/{repo_id}/progress` | Stream persisted and pub/sub status updates |
 
 The broader API in the [original project plan](design/original-project-plan.md) is a target surface, not a description of current routes.

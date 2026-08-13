@@ -4,14 +4,15 @@ Strata Learn ingests a repository from a Git URL or zip upload, extracts its str
 
 ## Current status
 
-Phases 0 through 2 are complete:
+Phases 0 through 3 are complete:
 
 - project scaffolding and local Docker environment;
 - repository ingestion and deterministic Layer A analysis;
 - Redis/arq background processing and WebSocket progress;
-- Anthropic-backed Layer B module summaries, architecture-pattern detection, and trade-off extraction.
+- Anthropic-backed Layer B module summaries, architecture-pattern detection, and trade-off extraction;
+- citation-grounded study guide generation (Overview, Architecture, Trade-offs, Glossary, Deep-Dives) plus a Mermaid architecture diagram, served via `GET /repos/{id}/study-guide`.
 
-Phase 3, study-guide generation, is next. The frontend routes and later-phase backend modules are placeholders rather than functional product features. Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
+Phase 4, the frontend shell, is next — a real UI for adding a repo, watching indexing progress, and reading the generated study guide. Until then the frontend routes are placeholders and the study guide is only reachable through the API. Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
 
 See the [documentation index](docs/README.md) for current architecture, development workflow, decisions, planned UX, and historical design material.
 
