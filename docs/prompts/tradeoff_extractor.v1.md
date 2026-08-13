@@ -1,7 +1,7 @@
 # tradeoff_extractor — v1
 
 **Used by:** `backend/app/semantics/tradeoff_extractor.py`
-**Model tier:** Strongest available (see `PROJECT_PLAN.md` §9.0) — this is the product's differentiator; spend the most iteration time on this prompt (Phase 2 checkpoint).
+**Model tier:** Strongest available (see `docs/design/original-project-plan.md` §9.0) — this is the product's differentiator; spend the most iteration time on this prompt (Phase 2 checkpoint).
 
 ## System
 

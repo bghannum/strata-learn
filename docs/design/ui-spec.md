@@ -1,9 +1,11 @@
 # Strata Learn — UI/UX Feature Spec
 
+> **Planned behavior.** This document specifies the intended Phase 4–6 user experience. It does not track implementation status; the current React files are placeholders. See [Current architecture](../architecture.md) for what exists now.
+
 | | |
 |---|---|
-| **Status** | Draft — ready for design/build |
-| **Parent doc** | `PROJECT_PLAN.md` (this spec covers Phase 4–6 frontend surface only; backend/data model/API are defined there, not repeated here) |
+| **Status** | Planned — ready for Phase 4 design/build |
+| **Related design** | [Original project plan](original-project-plan.md); this spec covers the Phase 4–6 frontend surface |
 | **Owner** | Solo builder |
 | **Intended reader** | Claude Design / Claude Code (frontend build) |
 
@@ -39,7 +41,7 @@ One user (the builder). Four jobs, in the order they're typically done:
 
 ## 5. Screen Inventory
 
-Mapped to the component names already defined in `PROJECT_PLAN.md` §6/§12 — this spec elaborates their content and states, it doesn't rename anything.
+Mapped to the component names from the original project plan — this spec elaborates their intended content and states.
 
 | Screen/Component | Plan reference | Purpose |
 |---|---|---|
@@ -52,7 +54,7 @@ Mapped to the component names already defined in `PROJECT_PLAN.md` §6/§12 — 
 | `QuizTaker.tsx` | Phase 5 | Take a generated quiz |
 | `DrawingCanvas.tsx` | Phase 6 | tldraw-based box/arrow canvas for drawing questions (component, used within QuizTaker) |
 | `AttemptResults.tsx` | Phase 5 | Graded results + per-question feedback |
-| *(new)* `RepoDetail.tsx` | — | Not explicitly named in the master plan; needed as the container for a single repo's status, study guide link, and quiz history. See §9. |
+| `RepoDetail.tsx` | Phase 4 addition | Container for a single repo's status, study guide link, and quiz history |
 
 ---
 
@@ -145,7 +147,6 @@ Every data-bearing screen needs explicit design for: **loading**, **empty** (e.g
 
 ## 9. Open Items for Design/Build
 
-- `RepoDetail.tsx` needs to be added to the master plan's component list (§6/§12) — it's implied by this spec (container for status + guide link + quiz history) but wasn't named there. Add it to Phase 4 tasks when building.
 - Per-quiz feedback-timing toggle (§6.5) isn't in the master plan's `Quiz` schema — needs a field (e.g., `feedback_mode`) added if this is built as specified.
 - Whether the "View raw analysis" debug viewer (§6.4) is worth gating behind anything, or just always visible — leaning toward always-visible since this remains a single-user tool.
 

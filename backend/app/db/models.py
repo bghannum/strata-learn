@@ -22,7 +22,7 @@ def _timestamptz_column(**kwargs: object) -> Column:
 
 # SQLModel 0.0.39 can't turn a bare `typing.Literal` into a column type (it only
 # special-cases `enum.Enum` subclasses) — see get_sqlalchemy_type in sqlmodel/main.py.
-# PROJECT_PLAN.md's schema sketch uses Literal as shorthand; str-Enums are the
+# docs/design/original-project-plan.md's schema sketch uses Literal as shorthand; str-Enums are the
 # concrete equivalent that this SQLModel version can actually map to a column.
 class SourceType(str, Enum):
     git_url = "git_url"
@@ -53,7 +53,7 @@ class Confidence(str, Enum):
 def _by_value(enum_cls: type[Enum]) -> SAEnum:
     # SQLAlchemy's Enum type persists a Python Enum's *name* by default. UnitType.class_'s
     # name ("class_") isn't the string we want stored — values_callable makes it persist
-    # by .value ("class") instead, matching PROJECT_PLAN.md's schema exactly.
+    # by .value ("class") instead, matching docs/design/original-project-plan.md's schema exactly.
     return SAEnum(enum_cls, values_callable=lambda obj: [e.value for e in obj])
 
 

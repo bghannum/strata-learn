@@ -1,4 +1,4 @@
-"""Implements docs/prompts/pattern_detector.v1.md (PROJECT_PLAN.md §9.2): one
+"""Implements docs/prompts/pattern_detector.v1.md (docs/design/original-project-plan.md §9.2): one
 LLM call over the full dependency graph, producing a single architecture
 pattern claim grounded in specific evidence. The LLM returns evidence as file
 paths only (per the fixed prompt's OUTPUT schema) — it never invents line

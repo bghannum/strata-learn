@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+base_branch=${1:-main}
+output_file="$repo_root/CODEX_CODE_REVIEW.md"
+branch=$(git branch --show-current)
+
+if ! command -v codex >/dev/null 2>&1; then
+  echo "codex-review: codex CLI not found; install it and run 'codex login' first" >&2
+  exit 1
+fi
+
+if [ -z "$branch" ]; then
+  echo "codex-review: detached HEAD is not supported" >&2
+  exit 1
+fi
+
+if [ "$branch" = "$base_branch" ]; then
+  echo "codex-review: current branch is the base branch ($base_branch); switch to the feature branch" >&2
+  exit 1
+fi
+
+if ! git rev-parse --verify --quiet "$base_branch^{commit}" >/dev/null; then
+  echo "codex-review: base branch '$base_branch' does not exist locally" >&2
+  exit 1
+fi
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "codex-review: commit or stash all changes before review so the report covers a reproducible diff" >&2
+  exit 1
+fi
+
+rm -f "$output_file"
+
+read -r -d '' review_prompt <<'PROMPT' || true
+Perform one merge-readiness review of this branch against the base branch.
+
+Focus on correctness, security, data integrity, concurrency, resource usage,
+paid API exposure, and the phase acceptance criteria. Classify every real
+finding under exactly one of these headings:
+
+BLOCK — must be resolved before merge because it risks security, unintended
+data disclosure, data corruption, unbounded or repeated cost, failure on
+ordinary supported inputs, or violation of an acceptance criterion.
+
+DEFER — a valid concern that does not prevent this phase from safely
+delivering its intended scope. Make each deferred finding concise and ready
+to paste into a GitHub Issue.
+
+Do not report style preferences, speculative abstractions, or minor cleanup.
+Do not repeat a concern already explicitly documented as accepted or deferred
+unless the diff contains new evidence that its consequence was underestimated.
+If there are no findings in a category, say "None."
+PROMPT
+
+echo "codex-review: reviewing $branch against $base_branch..." >&2
+if codex exec review \
+  --base "$base_branch" \
+  --title "$branch" \
+  --output-last-message "$output_file" \
+  "$review_prompt"; then
+  echo "codex-review: review written to CODEX_CODE_REVIEW.md" >&2
+else
+  rm -f "$output_file"
+  echo "codex-review: review failed; no report was kept" >&2
+  exit 1
+fi

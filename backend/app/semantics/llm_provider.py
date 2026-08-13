@@ -4,7 +4,7 @@ through `LLMProvider`, never the Anthropic SDK directly, so tests can inject
 
 Only Anthropic is implemented (ADR-009 names both Anthropic and OpenAI, but
 OPENAI_API_KEY is unset for now — an OpenAI backend would be untested against
-a real key). One model for every Phase 2 task (PROJECT_PLAN.md D11).
+a real key). One model for every Phase 2 task (docs/design/original-project-plan.md D11).
 """
 
 from collections import deque

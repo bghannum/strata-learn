@@ -1,7 +1,7 @@
 # module_summarizer — v1
 
 **Used by:** `backend/app/semantics/module_summarizer.py`
-**Model tier:** Mid-tier (see `PROJECT_PLAN.md` §9.0)
+**Model tier:** Mid-tier (see `docs/design/original-project-plan.md` §9.0)
 
 ## System
 

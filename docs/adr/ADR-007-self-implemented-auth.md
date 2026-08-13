@@ -11,7 +11,7 @@ Strata Learn is single-tenant (one user account). A library like `fastapi-users`
 Auth is single-tenant, session-based, and deliberately hand-built:
 
 - Password hashing via bcrypt/argon2
-- `User` table (modeled from Phase 0, wired up in Phase 4 — see `PROJECT_PLAN.md` §12)
+- `User` table (modeled from Phase 0, wired up in Phase 4 — see `docs/design/original-project-plan.md` §12)
 - HTTP-only cookie sessions
 - `/auth/register`, `/auth/login`, `/auth/logout` endpoints
 
@@ -19,4 +19,4 @@ Auth is single-tenant, session-based, and deliberately hand-built:
 
 - Slower to build than reaching for a library — an explicit, accepted trade of build speed for hands-on auth experience.
 - `Repo.user_id` and `Attempt.user_id` are modeled as nullable FKs from the phases that create those tables, so wiring up real auth in Phase 4 is additive, not a retrofit.
-- Revisit if auth scope ever grows beyond single-tenant (OAuth, multi-user sharing) — that's a different, larger project and explicitly out of scope for now (see Open Question Q6 in `PROJECT_PLAN.md` §4).
+- Revisit if auth scope ever grows beyond single-tenant (OAuth, multi-user sharing) — that's a different, larger project and explicitly out of scope for now (see Open Question Q6 in `docs/design/original-project-plan.md` §4).

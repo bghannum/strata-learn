@@ -13,5 +13,9 @@ Use only Anthropic and OpenAI, both behind the ADR-003 provider abstraction, wit
 ## Consequences
 
 - Two provider backends to implement in `semantics/llm_provider.py`, not more, for v1.
-- API keys for both providers are required local/hosted configuration (see root `README.md` prerequisites).
+- Deployments require credentials only for providers they actually configure.
 - Revisit as a deliberate Phase 7+ stretch project once the pipeline and prompts are stable — at that point OSS models can be A/B'd against the same fixed prompts for a clean comparison.
+
+## Implementation note — Phase 2
+
+Phase 2 implemented the shared provider interface, `AnthropicProvider`, and the test-only `FakeLLMProvider`. The OpenAI production backend is still planned, so `OPENAI_API_KEY` is currently unused and not required. This is staged delivery of the accepted decision rather than a superseding architecture choice.

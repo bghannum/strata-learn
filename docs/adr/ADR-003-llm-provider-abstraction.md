@@ -4,7 +4,7 @@
 
 ## Context
 
-Layer B (semantic analysis, generation, grading fallback) calls LLMs for several distinct tasks with different reasoning demands (see `PROJECT_PLAN.md` §9.0). Calling vendor SDKs directly from feature code would couple every call site to a specific provider and make per-task model selection and prompt/model A/B testing harder.
+Layer B (semantic analysis, generation, grading fallback) calls LLMs for several distinct tasks with different reasoning demands (see `docs/design/original-project-plan.md` §9.0). Calling vendor SDKs directly from feature code would couple every call site to a specific provider and make per-task model selection and prompt/model A/B testing harder.
 
 ## Decision
 
@@ -25,5 +25,5 @@ All generation and semantic-analysis code calls this interface, never a vendor S
 ## Consequences
 
 - Model selection becomes a config/allocation concern (§9.0), not a code-level one.
-- Anthropic and OpenAI backends (ADR-009) can be swapped per-task without touching call sites.
+- Provider backends can be swapped per task without touching semantic-analysis call sites. Anthropic is the only production backend implemented through Phase 2; OpenAI remains planned under ADR-009.
 - Prompt quality and model quality can be varied independently when iterating.

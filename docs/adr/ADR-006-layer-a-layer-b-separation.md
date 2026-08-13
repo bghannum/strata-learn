@@ -18,5 +18,5 @@ Diagram edges are Layer A; the LLM only adds labels/grouping on top (ADR-004). T
 ## Consequences
 
 - When a diagram or claim looks wrong, it's immediately clear whether to debug the parser (Layer A) or the prompt (Layer B).
-- Every Layer B claim in a study guide or quiz carries a `Citation` back to specific source lines (see §7 data model, ground rule #3 in `PROJECT_PLAN.md`).
+- Every Layer B claim in a study guide or quiz carries a `Citation` back to specific source lines (see §7 data model, ground rule #3 in `docs/design/original-project-plan.md`).
 - This separation is a design constraint on code structure, not just documentation — it must stay visible in the module/table layout.
