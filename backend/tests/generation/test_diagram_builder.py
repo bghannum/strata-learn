@@ -87,3 +87,21 @@ async def test_build_component_diagram_sanitizes_unsafe_label_characters() -> No
     assert '["App Entry Point"]' in result.mermaid
     main_line = next(line for line in result.mermaid.splitlines() if "Entry" in line)
     assert main_line.count('"') == 2
+
+
+async def test_build_component_diagram_strips_embedded_newlines_from_labels() -> None:
+    # A structured LLM response isn't prevented from containing an embedded
+    # newline — left intact, it splits a Mermaid node declaration across
+    # lines, corrupting the diagram's syntax.
+    graph = _graph(
+        [{"id": "app/main.py", "kind": "file"}, {"id": "app/config.py", "kind": "file"}],
+        [{"source": "app/main.py", "target": "app/config.py", "kind": "imports"}],
+    )
+    llm = FakeLLMProvider([_label_response({"app/main.py": "App\nEntry\r\nPoint", "app/config.py": "Settings"})])
+
+    result = await build_component_diagram(llm, graph, {})
+
+    assert result is not None
+    assert '["App Entry Point"]' in result.mermaid
+    lines = result.mermaid.splitlines()
+    assert len(lines) == 1 + 2 + 1  # header + 2 nodes + 1 edge, no extra lines from a split label

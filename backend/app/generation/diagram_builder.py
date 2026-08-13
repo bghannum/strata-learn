@@ -25,6 +25,12 @@ MAX_DIAGRAM_NODES = 30
 MAX_DIAGRAM_EDGES = 60
 
 _UNSAFE_LABEL_CHARS = re.compile(r'["\[\]{}]')
+# A structured LLM response isn't prevented from containing an embedded
+# newline/tab in a label field — left intact, it splits a Mermaid node
+# declaration across lines, corrupting the diagram's syntax (found via
+# Codex's Phase 3 pre-push review). Collapsed to a single space before the
+# char-strip above runs.
+_WHITESPACE = re.compile(r"\s+")
 
 
 class DiagramLabelItem(BaseModel):
@@ -89,7 +95,9 @@ def _fallback_label(file_path: str) -> str:
 
 def _sanitize_label(label: str) -> str:
     # Mermaid node syntax is `id["label"]` — an unescaped quote or bracket in
-    # the label breaks the diagram's syntax, not just its readability.
+    # the label breaks the diagram's syntax, not just its readability, and so
+    # does an embedded newline splitting the declaration across lines.
+    label = _WHITESPACE.sub(" ", label)
     return _UNSAFE_LABEL_CHARS.sub("", label).strip() or "Unnamed"
 
 
