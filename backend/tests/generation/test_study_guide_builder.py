@@ -28,7 +28,7 @@ from app.db.models import (
 )
 from app.db.session import async_session_factory
 from app.generation.diagram_builder import DiagramLabelItem, DiagramLabelOutput
-from app.generation.study_guide_builder import run_study_guide_generation
+from app.generation.study_guide_builder import _whole_file_citation, run_study_guide_generation
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 
 _FILES = {
@@ -145,6 +145,22 @@ async def _get_guide_with_sections(snapshot_id: UUID) -> tuple[StudyGuide, list[
         return guide, sections
 
 
+def test_whole_file_citation_uses_real_line_count_when_no_code_unit(tmp_path: Path) -> None:
+    # package.json/Dockerfile entry points have no CodeUnit (tree-sitter only
+    # parses code files). A pretty-printed package.json's line 1 is just
+    # `{`, nowhere near an entry point's actual "main" field further down —
+    # the whole-file fallback must cover the real file, not a hardcoded
+    # line_end=1 that only ever points at the opening brace.
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "package.json").write_text('{\n  "name": "x",\n  "main": "index.js"\n}\n')
+
+    citation = _whole_file_citation({}, source_dir, "package.json", "claim")
+
+    assert citation.line_start == 1
+    assert citation.line_end == 4
+
+
 async def test_run_study_guide_generation_builds_all_five_sections(layer_a_ready_factory) -> None:
     repo_id, snapshot_id, source_dir = await layer_a_ready_factory(_FILES)
     await _seed_layer_b(snapshot_id)
@@ -203,6 +219,29 @@ async def test_run_study_guide_generation_persists_real_citation_snippets(layer_
     assert len(citations) == 1
     assert citations[0].file_path == "app/config.py"
     assert "settings" in citations[0].snippet_text
+    # claim_excerpt covers reasoning + cost too, not just the decision
+    # headline — evidence_refs ground the whole card, not only its title.
+    assert "single source of truth" in citations[0].claim_excerpt
+    assert "extra indirection" in citations[0].claim_excerpt
+
+    deep_dive_section = next(s for s in sections if s.section_type == SectionType.deep_dive)
+    async with async_session_factory() as session:
+        deep_dive_citations = list(
+            (await session.exec(select(Citation).where(Citation.section_id == deep_dive_section.id))).all()
+        )
+    main_citation = next(c for c in deep_dive_citations if c.file_path == "app/main.py")
+    # claim_excerpt covers role_in_system too, not just purpose.
+    assert "Runs the application" in main_citation.claim_excerpt
+    assert "Entry point that wires config" in main_citation.claim_excerpt
+
+    architecture_section = next(s for s in sections if s.section_type == SectionType.architecture)
+    async with async_session_factory() as session:
+        architecture_citations = list(
+            (await session.exec(select(Citation).where(Citation.section_id == architecture_section.id))).all()
+        )
+    # claim_excerpt covers the primary_pattern headline, not just the
+    # evidence item's own sentence.
+    assert any("modular monolith" in c.claim_excerpt for c in architecture_citations)
 
 
 async def test_run_study_guide_generation_is_idempotent_under_redelivery(layer_a_ready_factory) -> None:

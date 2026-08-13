@@ -104,6 +104,20 @@ async def index_repo(
                 pass
             return
 
+        # Phase 3's counterpart to the `ready` short-circuit above: a
+        # redelivery landing between run_layer_b's `generating` commit and
+        # persist_study_guide's `ready` commit (a hard worker crash — a
+        # graceful timeout/shutdown goes through the CancelledError handler
+        # below instead, which already fails+cleans up terminally, so this
+        # is specifically the "process died mid-flight" case) must not
+        # re-run Layer A/B from scratch just to redo the one step after them.
+        # Both are already persisted at this status (found via Codex's Phase
+        # 3 pre-push review); only source needs re-acquiring — the crashed
+        # attempt's temp workspace may or may not have survived, and citation
+        # snippet capture needs real files on disk regardless — and study
+        # guide generation needs to (re)run.
+        resuming_from_generating = existing is not None and existing.status == SnapshotStatus.generating
+
         # Constructed inside the try, not before it, for the same reason as the
         # comment below: a missing/invalid ANTHROPIC_API_KEY (AnthropicProvider
         # raises ValueError on a falsy one) needs to reach the same fail_snapshot
@@ -111,46 +125,52 @@ async def index_repo(
         # not crash the job before "parsing" is even recorded.
         llm = llm or AnthropicProvider(api_key=settings.anthropic_api_key)  # type: ignore[arg-type]
 
-        # Inside the try, not before it: if this specific publish is what
-        # fails (Redis hiccup right here), the snapshot's already committed
-        # "parsing" — leaving it unguarded would strand it there forever with
-        # no failure ever recorded, same class of bug as an uncaught
-        # exception later in the pipeline.
-        async with async_session_factory() as session:
-            await set_snapshot_status(session, snapshot_id, SnapshotStatus.parsing)
-        await publish(SnapshotStatus.parsing)
-
         # arq runs concurrent jobs on one event loop, same as the API process
-        # — clone_git_repo/extract_zip_upload/analyze_source are all blocking
-        # (subprocess + disk I/O + CPU-bound parsing). Run them in a thread so
-        # a slow clone or a big repo's parse can't stall every other queued
-        # job, progress publishing, and this worker's own liveness along with
-        # it. (The API's own pre-check bounds obviously-bad URLs before
-        # enqueueing, but a remote can still turn slow *after* that passes —
-        # this is a separate, later window it doesn't cover.)
-        if source_type == SourceType.git_url.value:
-            source_dir, commit_hash = await asyncio.to_thread(clone_git_repo, git_url, job_id)  # type: ignore[arg-type]
-        else:
+        # — clone_git_repo/extract_zip_upload are both blocking (subprocess +
+        # disk I/O). Run them in a thread so a slow clone can't stall every
+        # other queued job, progress publishing, and this worker's own
+        # liveness along with it. (The API's own pre-check bounds
+        # obviously-bad URLs before enqueueing, but a remote can still turn
+        # slow *after* that passes — this is a separate, later window it
+        # doesn't cover.) Shared by both the normal path and the
+        # resume-from-`generating` path below, which also needs source on
+        # disk but not a fresh commit_hash (already recorded).
+        async def _acquire_source():
+            if source_type == SourceType.git_url.value:
+                return await asyncio.to_thread(clone_git_repo, git_url, job_id)  # type: ignore[arg-type]
             zip_bytes = await redis.get(zip_redis_key)
             if zip_bytes is None:
                 raise SourcePreparationError("Uploaded zip is no longer available (expired or already consumed)")
-            source_dir = await asyncio.to_thread(extract_zip_upload, io.BytesIO(zip_bytes), job_id)
-            commit_hash = None
+            return await asyncio.to_thread(extract_zip_upload, io.BytesIO(zip_bytes), job_id), None
 
-        analysis = await asyncio.to_thread(analyze_source, source_dir)
+        if resuming_from_generating:
+            snapshot = existing
+            source_dir, _commit_hash = await _acquire_source()
+        else:
+            # Inside the try, not before it: if this specific publish is what
+            # fails (Redis hiccup right here), the snapshot's already committed
+            # "parsing" — leaving it unguarded would strand it there forever with
+            # no failure ever recorded, same class of bug as an uncaught
+            # exception later in the pipeline.
+            async with async_session_factory() as session:
+                await set_snapshot_status(session, snapshot_id, SnapshotStatus.parsing)
+            await publish(SnapshotStatus.parsing)
 
-        # final_status=analyzing (not the default `ready`): Layer B runs next,
-        # so this must be the only commit — otherwise `ready` briefly becomes
-        # externally visible to a poller or a WS client connecting in the gap
-        # before the follow-up transition below, and such a client disconnects
-        # immediately on `ready`, never seeing Layer B run or fail (found via
-        # Codex's Phase 2 pre-push review; see complete_snapshot's docstring).
-        async with async_session_factory() as session:
-            snapshot = await complete_snapshot(
-                session, snapshot_id, commit_hash, analysis, final_status=SnapshotStatus.analyzing
-            )
-        if snapshot is not None:
-            await publish(SnapshotStatus.analyzing)
+            source_dir, commit_hash = await _acquire_source()
+            analysis = await asyncio.to_thread(analyze_source, source_dir)
+
+            # final_status=analyzing (not the default `ready`): Layer B runs next,
+            # so this must be the only commit — otherwise `ready` briefly becomes
+            # externally visible to a poller or a WS client connecting in the gap
+            # before the follow-up transition below, and such a client disconnects
+            # immediately on `ready`, never seeing Layer B run or fail (found via
+            # Codex's Phase 2 pre-push review; see complete_snapshot's docstring).
+            async with async_session_factory() as session:
+                snapshot = await complete_snapshot(
+                    session, snapshot_id, commit_hash, analysis, final_status=SnapshotStatus.analyzing
+                )
+            if snapshot is not None:
+                await publish(SnapshotStatus.analyzing)
 
         # LAYER B — Phase 2, then study guide assembly — Phase 3. Still inside
         # the try: source_dir must still exist for both (the trade-off
@@ -160,12 +180,13 @@ async def index_repo(
         # until both finish. A vanished snapshot (see complete_snapshot's own
         # None-return case) skips both entirely — nothing left to attach them to.
         if snapshot is not None:
-            # run_layer_b sets `generating`, not `ready`, in the same commit
-            # as the Layer B rows — see its comment. It manages its own
-            # sessions internally (a short-lived read, then a short-lived
-            # write only after all LLM calls finish) — no session passed in.
-            await run_layer_b(llm, snapshot, source_dir)
-            await publish(SnapshotStatus.generating)
+            if not resuming_from_generating:
+                # run_layer_b sets `generating`, not `ready`, in the same commit
+                # as the Layer B rows — see its comment. It manages its own
+                # sessions internally (a short-lived read, then a short-lived
+                # write only after all LLM calls finish) — no session passed in.
+                await run_layer_b(llm, snapshot, source_dir)
+                await publish(SnapshotStatus.generating)
 
             # run_study_guide_generation sets the final "ready" status itself,
             # in the same commit as the study guide rows — same invariant,

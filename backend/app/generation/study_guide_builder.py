@@ -29,7 +29,7 @@ from app.db.models import (
     UnitType,
 )
 from app.db.session import async_session_factory
-from app.generation.citation import build_citation
+from app.generation.citation import read_snippet
 from app.generation.diagram_builder import build_component_diagram
 from app.semantics.llm_provider import LLMProvider
 
@@ -53,20 +53,33 @@ class SectionSpec:
     model: str | None = None
 
 
+def _file_line_count(source_dir: Path, file_path: str) -> int:
+    try:
+        text = (source_dir / file_path).read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return 1
+    return max(1, len(text.splitlines()))
+
+
 def _whole_file_citation(
-    module_units_by_path: dict[str, CodeUnit], file_path: str, claim_excerpt: str
+    module_units_by_path: dict[str, CodeUnit], source_dir: Path, file_path: str, claim_excerpt: str
 ) -> CitationSpec:
     # Not every cited file has a CodeUnit (tree-sitter only parses code files —
-    # an entry point like package.json or a Dockerfile won't). Anchoring to
-    # line 1 there is still a true, non-fabricated citation (it correctly
-    # identifies the file); it just can't claim a tighter range without
-    # re-reading the file here.
+    # an entry point like package.json or a Dockerfile won't). Citing the
+    # whole file there is still a true, non-fabricated citation — but the
+    # whole file means line 1 through the real last line, not a hardcoded
+    # line_end=1: for a typical pretty-printed package.json or Dockerfile,
+    # line 1 alone is just `{` or the first `FROM`, nowhere near the actual
+    # main/CMD content the claim describes (found via Codex's Phase 3
+    # pre-push review).
     unit = module_units_by_path.get(file_path)
-    line_end = unit.line_end if unit is not None else 1
+    line_end = unit.line_end if unit is not None else _file_line_count(source_dir, file_path)
     return CitationSpec(file_path=file_path, line_start=1, line_end=line_end, claim_excerpt=claim_excerpt)
 
 
-def _build_overview(snapshot: AnalysisSnapshot, module_units_by_path: dict[str, CodeUnit]) -> SectionSpec:
+def _build_overview(
+    snapshot: AnalysisSnapshot, module_units_by_path: dict[str, CodeUnit], source_dir: Path
+) -> SectionSpec:
     lang_line = ", ".join(f"{lang} ({count} files)" for lang, count in sorted(snapshot.language_summary.items()))
     lines = ["## Tech Stack", "", f"Languages: {lang_line or 'none detected'}.", "", "## Entry Points", ""]
 
@@ -74,7 +87,7 @@ def _build_overview(snapshot: AnalysisSnapshot, module_units_by_path: dict[str, 
     for ep in snapshot.entry_points:
         reason = ep.get("reason", "")
         lines.append(f"- **{ep['file']}** ({ep['kind']}): {reason}")
-        citations.append(_whole_file_citation(module_units_by_path, ep["file"], reason or ep["file"]))
+        citations.append(_whole_file_citation(module_units_by_path, source_dir, ep["file"], reason or ep["file"]))
 
     return SectionSpec(
         section_type=SectionType.overview,
@@ -98,6 +111,17 @@ def _build_architecture(
         if pattern_claim.caveats:
             lines += ["", pattern_claim.caveats]
         lines += ["", "**Evidence:**", ""]
+        # The rendered headline (primary_pattern + caveats) is the claim each
+        # evidence item's citations actually support — the LLM call that
+        # produced them evaluated the whole graph to reach that one claim,
+        # not just the item's own sentence. claim_excerpt names both so a
+        # citation lookup by claim_excerpt covers the full rendered prose,
+        # not only the bullet (found via Codex's Phase 3 pre-push review:
+        # citing only item['claim'] left primary_pattern/caveats with no
+        # citation of their own).
+        primary_claim_text = pattern_claim.primary_pattern
+        if pattern_claim.caveats:
+            primary_claim_text += f" {pattern_claim.caveats}"
         for item in pattern_claim.evidence:
             paths = ", ".join(f"`{p}`" for p in item.get("supporting_paths", []))
             lines.append(f"- {item['claim']} — {paths}")
@@ -107,7 +131,7 @@ def _build_architecture(
                         file_path=cite["file_path"],
                         line_start=cite["line_start"],
                         line_end=cite["line_end"],
-                        claim_excerpt=item["claim"],
+                        claim_excerpt=f"{primary_claim_text} — {item['claim']}",
                     )
                 )
 
@@ -141,13 +165,19 @@ def _build_tradeoffs(tradeoff_cards: list[TradeoffCard]) -> SectionSpec | None:
             f"**Confidence:** {card.confidence}",
             "",
         ]
+        # claim_excerpt covers decision + reasoning + cost, not just the
+        # decision headline — evidence_refs were validated against the same
+        # LLM call that produced all three together (tradeoff_extractor.py),
+        # so they ground the whole card, not only its title (found via
+        # Codex's Phase 3 pre-push review).
+        claim_excerpt = f"{card.decision} — {card.likely_reasoning} Trade-off: {card.tradeoff_cost}"
         for ref in card.evidence_refs:
             citations.append(
                 CitationSpec(
                     file_path=ref["file_path"],
                     line_start=ref["line_start"],
                     line_end=ref["line_end"],
-                    claim_excerpt=card.decision,
+                    claim_excerpt=claim_excerpt,
                 )
             )
 
@@ -206,12 +236,16 @@ def _build_deep_dives(module_summaries: list[ModuleSummary]) -> SectionSpec | No
             summary.role_in_system,
             "",
         ]
+        # Both rendered sentences, not just purpose — they come from the same
+        # LLM call grounded in the same line range, so both are covered by
+        # this one citation (found via Codex's Phase 3 pre-push review:
+        # citing only purpose left role_in_system with no citation).
         citations.append(
             CitationSpec(
                 file_path=summary.file_path,
                 line_start=summary.line_start,
                 line_end=summary.line_end,
-                claim_excerpt=summary.purpose,
+                claim_excerpt=f"{summary.purpose} {summary.role_in_system}",
             )
         )
 
@@ -227,6 +261,7 @@ async def build_sections(
     module_summaries: list[ModuleSummary],
     pattern_claim: PatternClaim | None,
     tradeoff_cards: list[TradeoffCard],
+    source_dir: Path,
 ) -> list[SectionSpec]:
     module_units_by_path = {u.file_path: u for u in code_units if u.unit_type == UnitType.module}
     module_purposes: dict[str, str] = {}
@@ -236,7 +271,7 @@ async def build_sections(
     diagram = await build_component_diagram(llm, snapshot.dependency_graph, module_purposes)
     diagram_citations = (
         [
-            _whole_file_citation(module_units_by_path, path, "Included in the architecture diagram")
+            _whole_file_citation(module_units_by_path, source_dir, path, "Included in the architecture diagram")
             for path in diagram.file_paths
         ]
         if diagram is not None
@@ -244,7 +279,7 @@ async def build_sections(
     )
 
     candidates = [
-        _build_overview(snapshot, module_units_by_path),
+        _build_overview(snapshot, module_units_by_path, source_dir),
         _build_architecture(
             pattern_claim,
             diagram.mermaid if diagram is not None else None,
@@ -289,6 +324,15 @@ async def persist_study_guide(snapshot: AnalysisSnapshot, sections: list[Section
         session.add(guide)
         await session.flush()  # assigns guide.id without committing yet
 
+        # Deep-dive and glossary citations both reuse a module's whole-file
+        # line range (every key_concept from one module cites the same
+        # range) — cached so that range is only read/decoded off disk once,
+        # not once per citation that happens to reuse it (found via Codex's
+        # Phase 3 pre-push review). MAX_SNIPPET_LINES (citation.py) is what
+        # actually bounds each entry's size; this cache only avoids redundant
+        # reads of the same range.
+        snippet_cache: dict[tuple[str, int, int], str] = {}
+
         for order, spec in enumerate(sections):
             section = Section(
                 study_guide_id=guide.id,
@@ -304,17 +348,17 @@ async def persist_study_guide(snapshot: AnalysisSnapshot, sections: list[Section
             await session.flush()  # assigns section.id
 
             for cite_spec in spec.citations:
-                cite = build_citation(
-                    source_dir, cite_spec.file_path, cite_spec.line_start, cite_spec.line_end, cite_spec.claim_excerpt
-                )
+                key = (cite_spec.file_path, cite_spec.line_start, cite_spec.line_end)
+                if key not in snippet_cache:
+                    snippet_cache[key] = read_snippet(source_dir, *key)
                 session.add(
                     Citation(
                         section_id=section.id,
-                        file_path=cite.file_path,
-                        line_start=cite.line_start,
-                        line_end=cite.line_end,
-                        claim_excerpt=cite.claim_excerpt,
-                        snippet_text=cite.snippet_text,
+                        file_path=cite_spec.file_path,
+                        line_start=cite_spec.line_start,
+                        line_end=cite_spec.line_end,
+                        claim_excerpt=cite_spec.claim_excerpt,
+                        snippet_text=snippet_cache[key],
                     )
                 )
 
@@ -346,5 +390,7 @@ async def run_study_guide_generation(llm: LLMProvider, snapshot: AnalysisSnapsho
             (await session.exec(select(TradeoffCard).where(TradeoffCard.snapshot_id == snapshot.id))).all()
         )
 
-    sections = await build_sections(llm, snapshot, code_units, module_summaries, pattern_claim, tradeoff_cards)
+    sections = await build_sections(
+        llm, snapshot, code_units, module_summaries, pattern_claim, tradeoff_cards, source_dir
+    )
     await persist_study_guide(snapshot, sections, source_dir)

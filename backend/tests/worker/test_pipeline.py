@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 import app.worker.pipeline as pipeline_module
+from app.analysis.snapshot import analyze_source, complete_snapshot
 from app.db.models import (
     AnalysisSnapshot,
     ModuleSummary,
@@ -39,6 +40,7 @@ from app.db.session import async_session_factory
 from app.ingestion.source import JOBS_ROOT
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse, Message
 from app.semantics.module_summarizer import ModuleSummaryOutput
+from app.semantics.orchestrator import run_layer_b
 from app.semantics.pattern_detector import PatternClaimOutput, PatternEvidenceItem
 from app.semantics.tradeoff_extractor import EvidenceRef, TradeoffCardOutput
 from app.worker.pipeline import index_repo, progress_channel
@@ -523,6 +525,65 @@ async def test_index_repo_short_circuits_when_snapshot_already_ready(
 
     snapshot = await _get_snapshot(snapshot_id)
     assert snapshot.status == SnapshotStatus.ready
+
+
+async def test_index_repo_resumes_from_generating_without_rerunning_layer_b(
+    redis_pool: ArqRedis, git_fixture_repo: Path, pending_repo_factory
+) -> None:
+    # Phase 3's counterpart to the "already ready" short-circuit above: a
+    # redelivery landing between run_layer_b's `generating` commit and
+    # persist_study_guide's `ready` commit (a hard worker crash — a graceful
+    # timeout/shutdown goes through the CancelledError path instead, which
+    # already fails+cleans up terminally) must not re-run Layer A/B a second
+    # time. Build that exact state by hand (Layer A + Layer B already done,
+    # status=generating) rather than via index_repo itself, then redeliver
+    # with a boom LLM to prove Layer B is skipped, not just idempotent.
+    git_url = git_fixture_repo.as_uri()
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
+
+    analysis = analyze_source(git_fixture_repo)
+    async with async_session_factory() as session:
+        snapshot = await complete_snapshot(
+            session, snapshot_id, None, analysis, final_status=SnapshotStatus.analyzing
+        )
+        assert snapshot is not None
+    await run_layer_b(_no_decision_point_llm(), snapshot, git_fixture_repo)
+
+    async with async_session_factory() as session:
+        pre = await session.get(AnalysisSnapshot, snapshot_id)
+        assert pre is not None
+        assert pre.status == SnapshotStatus.generating
+        pre_summaries = list(
+            (await session.exec(select(ModuleSummary).where(ModuleSummary.snapshot_id == snapshot_id))).all()
+        )
+    assert len(pre_summaries) == 1  # sanity: Layer B actually ran and persisted
+
+    async def run() -> None:
+        await index_repo(
+            {"redis": redis_pool},
+            snapshot_id=snapshot_id,
+            repo_id=repo_id,
+            source_type=SourceType.git_url.value,
+            git_url=git_url,
+            # Would raise if Layer B (or diagram_builder's label call) ran
+            # again — proving the resume path skips both, not just tolerates
+            # re-running them via existing delete-then-insert idempotency.
+            llm=_BoomLLMProvider(),
+        )
+
+    messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)
+    assert [m["status"] for m in messages] == [SnapshotStatus.ready.value]
+
+    snapshot = await _get_snapshot(snapshot_id)
+    assert snapshot.status == SnapshotStatus.ready
+
+    async with async_session_factory() as session:
+        post_summaries = list(
+            (await session.exec(select(ModuleSummary).where(ModuleSummary.snapshot_id == snapshot_id))).all()
+        )
+        guides = list((await session.exec(select(StudyGuide).where(StudyGuide.snapshot_id == snapshot_id))).all())
+    assert len(post_summaries) == 1  # unchanged — not re-run, not duplicated
+    assert len(guides) == 1
 
 
 async def test_index_repo_short_circuit_publish_failure_does_not_mark_failed(
