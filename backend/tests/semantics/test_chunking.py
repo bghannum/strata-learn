@@ -2,7 +2,7 @@ import uuid
 
 from app.db.models import CodeUnit, UnitType
 from app.semantics.chunking import (
-    MAX_FILES_PER_SNAPSHOT,
+    MAX_CHUNKS_PER_SNAPSHOT,
     MAX_UNITS_PER_CHUNK,
     chunk_by_module,
 )
@@ -59,19 +59,34 @@ def test_chunk_by_module_splits_oversized_file() -> None:
     assert len(chunks[1].units) == 10
 
 
-def test_chunk_by_module_caps_total_files_deterministically() -> None:
+def test_chunk_by_module_caps_total_chunks_across_many_files_deterministically() -> None:
     # Found via Codex's Phase 2 pre-push review: ingestion allows far more
     # files than Layer B should ever summarize sequentially (billed LLM
-    # calls). The chosen subset must also be deterministic — the same files
+    # calls). The chosen subset must also be deterministic — the same chunks
     # every time, not whatever order the caller happened to pass units in
     # (which, in production, comes from an unordered SELECT).
-    file_count = MAX_FILES_PER_SNAPSHOT + 10
+    file_count = MAX_CHUNKS_PER_SNAPSHOT + 10
     units = [_unit(f"file_{i:03d}.py", UnitType.module, f"file_{i:03d}.py", 1, 5) for i in range(file_count)]
 
     chunks = chunk_by_module(units)
 
-    assert len(chunks) == MAX_FILES_PER_SNAPSHOT
+    assert len(chunks) == MAX_CHUNKS_PER_SNAPSHOT
     selected = {c.file_path for c in chunks}
-    # deterministic: alphabetically-first MAX_FILES_PER_SNAPSHOT file names
-    expected = {f"file_{i:03d}.py" for i in range(MAX_FILES_PER_SNAPSHOT)}
+    # deterministic: alphabetically-first MAX_CHUNKS_PER_SNAPSHOT file names
+    expected = {f"file_{i:03d}.py" for i in range(MAX_CHUNKS_PER_SNAPSHOT)}
     assert selected == expected
+
+
+def test_chunk_by_module_caps_total_chunks_within_a_single_oversized_file() -> None:
+    # Found via Codex's Phase 2 pre-push review: a cap on distinct *files*
+    # alone doesn't bound billed LLM calls — a single valid file with enough
+    # units splits into many chunks via MAX_UNITS_PER_CHUNK and could blow
+    # the budget by itself. The cap must stop emission mid-file too.
+    unit_count = (MAX_CHUNKS_PER_SNAPSHOT + 5) * MAX_UNITS_PER_CHUNK
+    units = [_unit("huge.py", UnitType.module, "huge.py", 1, 100000)]
+    units += [_unit("huge.py", UnitType.function, f"fn_{i}", i, i + 1) for i in range(unit_count)]
+
+    chunks = chunk_by_module(units)
+
+    assert len(chunks) == MAX_CHUNKS_PER_SNAPSHOT
+    assert all(c.file_path == "huge.py" for c in chunks)

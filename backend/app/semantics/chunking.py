@@ -12,15 +12,21 @@ from app.db.models import CodeUnit, UnitType
 # multiple sub-chunks, each still carrying the module_unit for context.
 MAX_UNITS_PER_CHUNK = 60
 
-# A hard cap on how many files get a module summary per snapshot. Each chunk
-# is one real, sequential, billed LLM call — but ingestion has no matching
-# cap (zip allows up to 5,000 files; git clone has none at all), so an
-# unbounded loop could make thousands of paid calls before inevitably hitting
-# WorkerSettings.job_timeout anyway, with nothing persisted to show for it
-# (found via Codex's Phase 2 pre-push review). This is a stopgap, not a
-# scaling solution — bounded concurrency/batching is the real fix once it's
-# actually needed (see orchestrator.py's docstring).
-MAX_FILES_PER_SNAPSHOT = 200
+# A hard cap on the TOTAL number of chunks emitted per snapshot — each chunk
+# is one real, sequential, billed LLM call, so this is what actually bounds
+# call count, unlike a per-file cap (found via Codex's Phase 2 pre-push
+# review: a first version of this capped distinct *files*, but a single
+# file with enough units still splits into many chunks via
+# MAX_UNITS_PER_CHUNK, so a file count cap alone doesn't bound calls — a
+# valid sub-1MiB file with thousands of tiny one-line functions could still
+# blow the budget by itself). Ingestion has no matching cap of its own (zip
+# allows up to 5,000 files; git clone has none at all), so without this an
+# unbounded loop could make thousands of paid calls before inevitably
+# hitting WorkerSettings.job_timeout anyway, with nothing persisted to show
+# for it. This is a stopgap, not a scaling solution — bounded concurrency/
+# batching is the real fix once it's actually needed (see orchestrator.py's
+# docstring).
+MAX_CHUNKS_PER_SNAPSHOT = 200
 
 
 @dataclass(frozen=True)
@@ -35,14 +41,15 @@ def chunk_by_module(units: list[CodeUnit]) -> list[ModuleChunk]:
     for unit in units:
         by_file.setdefault(unit.file_path, []).append(unit)
 
-    # A deterministic subset when over the cap — the same files every time,
+    # Deterministic order when over the cap — the same chunks every time,
     # including on arq redelivery, not whatever order the DB happens to
     # return CodeUnit rows in (a plain SELECT has no ordering guarantee
     # without an explicit ORDER BY).
-    selected_file_paths = sorted(by_file)[:MAX_FILES_PER_SNAPSHOT]
-
     chunks: list[ModuleChunk] = []
-    for file_path in selected_file_paths:
+    for file_path in sorted(by_file):
+        if len(chunks) >= MAX_CHUNKS_PER_SNAPSHOT:
+            break
+
         file_units = by_file[file_path]
         module_unit = next((u for u in file_units if u.unit_type == UnitType.module), None)
         if module_unit is None:
@@ -55,6 +62,10 @@ def chunk_by_module(units: list[CodeUnit]) -> list[ModuleChunk]:
             continue
 
         for i in range(0, len(other_units), MAX_UNITS_PER_CHUNK):
+            if len(chunks) >= MAX_CHUNKS_PER_SNAPSHOT:
+                # Stop mid-file too, not just between files — a single file
+                # with enough units could otherwise blow the budget alone.
+                break
             chunks.append(
                 ModuleChunk(
                     file_path=file_path,

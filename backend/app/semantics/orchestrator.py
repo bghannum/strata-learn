@@ -19,6 +19,7 @@ from app.db.models import (
     Confidence,
     ModuleSummary,
     PatternClaim,
+    SnapshotStatus,
     TradeoffCard,
 )
 from app.semantics.chunking import chunk_by_module
@@ -90,5 +91,20 @@ async def run_layer_b(session: AsyncSession, llm: LLMProvider, snapshot: Analysi
                 model=card.model,
             )
         )
+
+    # Set the final `ready` status in this same commit, not a later separate
+    # one — found via Codex's Phase 2 pre-push review: a worker crash between
+    # a separate status commit and this one left a window where Layer B's
+    # data was fully persisted but the snapshot still read "analyzing", so a
+    # redelivery in that window bypassed index_repo's "already ready"
+    # short-circuit and repeated every billed LLM call for nothing. snapshot
+    # was loaded in an earlier, different session (pipeline.py's
+    # complete_snapshot call) — re-fetch it in *this* session rather than
+    # mutating the detached object; a vanished target (repo deleted mid-job)
+    # is tolerated the same way set_snapshot_status already tolerates it.
+    current = await session.get(AnalysisSnapshot, snapshot.id)
+    if current is not None:
+        current.status = SnapshotStatus.ready
+        session.add(current)
 
     await session.commit()

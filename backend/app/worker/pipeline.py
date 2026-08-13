@@ -157,11 +157,11 @@ async def index_repo(
         # vanished snapshot (see complete_snapshot's own None-return case)
         # skips Layer B entirely — nothing left to attach it to.
         if snapshot is not None:
+            # run_layer_b sets the final "ready" status itself, in the same
+            # commit as the Layer B rows — see its docstring/comment for why
+            # a separate, later status commit is unsafe.
             async with async_session_factory() as session:
                 await run_layer_b(session, llm, snapshot, source_dir)
-
-            async with async_session_factory() as session:
-                await set_snapshot_status(session, snapshot_id, SnapshotStatus.ready)
     except SourcePreparationError as exc:
         async with async_session_factory() as session:
             await fail_snapshot(session, snapshot_id)
