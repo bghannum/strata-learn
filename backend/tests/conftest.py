@@ -25,6 +25,10 @@ REGISTRATION_SECRET = settings.registration_secret
 async def _clean_db() -> None:
     async with async_session_factory() as session:
         await session.exec(text("UPDATE repo SET latest_snapshot_id = NULL"))
+        await session.exec(text("DELETE FROM answersubmission"))
+        await session.exec(text("DELETE FROM attempt"))
+        await session.exec(text("DELETE FROM question"))
+        await session.exec(text("DELETE FROM quiz"))
         await session.exec(text("DELETE FROM citation"))
         await session.exec(text("DELETE FROM section"))
         await session.exec(text("DELETE FROM studyguide"))

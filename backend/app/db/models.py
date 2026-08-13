@@ -58,6 +58,27 @@ class SectionType(str, Enum):
     deep_dive = "deep_dive"
 
 
+class QuizStatus(str, Enum):
+    generating = "generating"
+    ready = "ready"
+    failed = "failed"
+
+
+class QuestionType(str, Enum):
+    mcq = "mcq"
+    fill_blank = "fill_blank"
+
+
+class FillBlankMode(str, Enum):
+    code = "code"
+    concept = "concept"
+
+
+class AttemptStatus(str, Enum):
+    in_progress = "in_progress"
+    completed = "completed"
+
+
 def _by_value(enum_cls: type[Enum]) -> SAEnum:
     # SQLAlchemy's Enum type persists a Python Enum's *name* by default. UnitType.class_'s
     # name ("class_") isn't the string we want stored — values_callable makes it persist
@@ -221,3 +242,72 @@ class Citation(SQLModel, table=True):
     line_end: int
     claim_excerpt: str  # the sentence/claim in content_md this citation supports
     snippet_text: str  # actual source lines, captured now — source_dir is deleted right after (§8)
+
+
+# --- Quizzes (Phase 5) — generated from already-persisted Section/Citation rows,
+# not the raw repo checkout, which is long gone by the time a user asks for a quiz
+# (ADR-008; see quizzing/generation.py's module docstring) ---
+
+
+class Quiz(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    repo_id: uuid.UUID = Field(foreign_key="repo.id", index=True)
+    study_guide_id: uuid.UUID = Field(foreign_key="studyguide.id", index=True)
+    status: QuizStatus = Field(default=QuizStatus.generating, sa_column=Column(_by_value(QuizStatus), nullable=False))
+    created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
+
+
+class Question(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    quiz_id: uuid.UUID = Field(foreign_key="quiz.id", index=True)
+    question_type: QuestionType = Field(sa_column=Column(_by_value(QuestionType), nullable=False))
+    order: int
+    # mcq: the question text. fill_blank: the blanked_text, "___" marking the blank.
+    prompt: str
+    choices: list | None = Field(default=None, sa_column=Column(JSON))  # mcq only
+    correct_index: int | None = None  # mcq only
+    fill_blank_mode: FillBlankMode | None = Field(
+        default=None, sa_column=Column(_by_value(FillBlankMode), nullable=True)
+    )
+    correct_answer: str | None = None  # fill_blank only
+    acceptable_alternatives: list = Field(default_factory=list, sa_column=Column(JSON))  # fill_blank only
+    explanation: str | None = None  # mcq only — why the correct choice is correct (§9.4); fill_blank has none
+    # Singular, not a list like TradeoffCard.evidence_refs — each question is
+    # grounded in exactly one source Citation (the seed it was generated
+    # from), never synthesized across several the way a trade-off claim is.
+    file_path: str
+    line_start: int
+    line_end: int
+    prompt_version: str
+    model: str
+    created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
+
+
+class Attempt(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    quiz_id: uuid.UUID = Field(foreign_key="quiz.id", index=True)
+    # Required, unlike Repo.user_id — the original plan's Phase-1-era note
+    # called for a nullable FK to keep auth "additive" before it existed.
+    # Auth is mandatory now (Phase 4b, #28: every router already requires
+    # get_current_user), so there's no pre-auth data to stay compatible with.
+    user_id: uuid.UUID = Field(foreign_key="user.id", index=True)
+    status: AttemptStatus = Field(
+        default=AttemptStatus.in_progress, sa_column=Column(_by_value(AttemptStatus), nullable=False)
+    )
+    started_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
+    completed_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    score: float | None = None  # fraction correct across all questions, set on completion
+
+
+class AnswerSubmission(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    attempt_id: uuid.UUID = Field(foreign_key="attempt.id", index=True)
+    question_id: uuid.UUID = Field(foreign_key="question.id", index=True)
+    selected_index: int | None = None  # mcq
+    answer_text: str | None = None  # fill_blank
+    # Graded immediately on submission (§10.1/§10.2), not deferred to
+    # POST /attempts/{id}/complete — null only in the instant between insert
+    # and the grading call within the same request.
+    score: float | None = None
+    feedback: str | None = None
+    submitted_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())

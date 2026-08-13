@@ -1,19 +1,20 @@
 # Strata Learn
 
-Strata Learn ingests a repository from a Git URL or zip upload, extracts its structure, and uses citation-grounded semantic analysis to help a developer understand the codebase. The eventual product adds generated study guides and quizzes; the current implementation covers ingestion plus structural and semantic analysis.
+Strata Learn ingests a repository from a Git URL or zip upload, extracts its structure, uses citation-grounded semantic analysis to help a developer understand the codebase, and generates a study guide plus a quiz to verify that understanding.
 
 ## Current status
 
-Phases 0 through 3, plus the core of Phase 4, are complete:
+Phases 0 through 5 are complete:
 
 - project scaffolding and local Docker environment;
 - repository ingestion and deterministic Layer A analysis;
 - Redis/arq background processing and WebSocket progress;
 - Anthropic-backed Layer B module summaries, architecture-pattern detection, and trade-off extraction;
 - citation-grounded study guide generation (Overview, Architecture, Trade-offs, Glossary, Deep-Dives) plus a Mermaid architecture diagram, served via `GET /repos/{id}/study-guide`;
-- a working frontend: add a repo, watch it index live, and read the generated study guide with inline diagrams and clickable citations.
+- a working frontend: register/log in, add a repo, watch it index live, and read the generated study guide with inline diagrams and clickable citations, all scoped to the logged-in user via cookie-based sessions;
+- quiz generation (MCQ + fill-in-the-blank, grounded in the study guide's own citations) and taking, with immediate per-answer grading/feedback and a results view.
 
-What's left of Phase 4 is session authentication (login/register UI + backend session handling) — the app is currently single-tenant with no login wall, by design for this stage. Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
+Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
 
 See the [documentation index](docs/README.md) for current architecture, development workflow, decisions, planned UX, and historical design material.
 

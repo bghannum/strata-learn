@@ -2,11 +2,14 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   ApiError,
+  generateQuiz,
   getRepo,
   getRepoStudyGuide,
   getSnapshot,
+  pollQuiz,
   useIndexingProgress,
   type AnalysisSnapshot,
+  type Quiz,
   type Repo,
   type SnapshotStatus,
   type StudyGuide,
@@ -26,6 +29,9 @@ function RepoDetail() {
   const [showRaw, setShowRaw] = useState(false)
   const [guide, setGuide] = useState<StudyGuide | null>(null)
   const [guideError, setGuideError] = useState<string | null>(null)
+  const [quiz, setQuiz] = useState<Quiz | null>(null)
+  const [quizPending, setQuizPending] = useState(false)
+  const [quizError, setQuizError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!repoId) return
@@ -51,6 +57,17 @@ function RepoDetail() {
       .then(setGuide)
       .catch((err) => setGuideError(err instanceof ApiError ? err.message : 'Could not load the study guide.'))
   }, [status, repoId])
+
+  function handleGenerateQuiz() {
+    if (!repoId) return
+    setQuizPending(true)
+    setQuizError(null)
+    generateQuiz(repoId)
+      .then((created) => pollQuiz(created.id))
+      .then(setQuiz)
+      .catch((err) => setQuizError(err instanceof ApiError ? err.message : 'Could not generate a quiz.'))
+      .finally(() => setQuizPending(false))
+  }
 
   if (!loaded) {
     return (
@@ -88,7 +105,7 @@ function RepoDetail() {
       </div>
 
       {status === 'ready' && (
-        <div className="mt-6">
+        <div className="mt-6 flex flex-wrap items-center gap-3">
           {guide && (
             <Link
               to={`/study-guides/${guide.id}`}
@@ -100,6 +117,38 @@ function RepoDetail() {
           {guideError && (
             <p className="rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">
               {guideError}
+            </p>
+          )}
+
+          {guide && !quiz && (
+            <button
+              type="button"
+              onClick={handleGenerateQuiz}
+              disabled={quizPending}
+              className="inline-block rounded-md border border-blue-600 px-4 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50 dark:hover:bg-blue-950"
+            >
+              {quizPending ? 'Generating quiz…' : 'Generate Quiz'}
+            </button>
+          )}
+          {quiz?.status === 'ready' && (
+            <Link
+              to={`/quizzes/${quiz.id}`}
+              className="inline-block rounded-md border border-blue-600 px-4 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950"
+            >
+              Take Quiz
+            </Link>
+          )}
+          {quiz?.status === 'failed' && (
+            <p className="rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">
+              Quiz generation failed.{' '}
+              <button type="button" onClick={handleGenerateQuiz} className="underline">
+                Try again
+              </button>
+            </p>
+          )}
+          {quizError && (
+            <p className="rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">
+              {quizError}
             </p>
           )}
         </div>
