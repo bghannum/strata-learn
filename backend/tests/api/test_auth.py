@@ -22,6 +22,18 @@ def test_register_duplicate_email_returns_409() -> None:
     assert response.status_code == 409
 
 
+def test_register_rejects_a_second_distinct_account() -> None:
+    # ADR-007: single-tenant by design — an open registration endpoint would
+    # let anyone who can reach the API create accounts that each enqueue
+    # real, paid indexing/LLM work. Only the first account ever created is
+    # allowed; a second, genuinely different email is rejected outright
+    # (distinct from the 409 case above, which is the *same* email).
+    with TestClient(app) as client:
+        client.post("/auth/register", json={"email": "first@example.com", "password": "a-real-password"})
+        response = client.post("/auth/register", json={"email": "second@example.com", "password": "a-real-password"})
+    assert response.status_code == 403
+
+
 def test_register_rejects_invalid_email() -> None:
     with TestClient(app) as client:
         response = client.post("/auth/register", json={"email": "not-an-email", "password": "a-real-password"})

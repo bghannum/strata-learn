@@ -48,6 +48,34 @@ def register_test_user(client: TestClient) -> dict:
     return response.json()
 
 
+async def login_as_new_user(client: TestClient, email: str | None = None) -> dict:
+    """For tests that need a *second* account to verify cross-user isolation:
+    POST /auth/register only ever allows the first account ever created
+    (ADR-007's single-tenant design — found via Codex's Phase 4b pre-push
+    review), so a second real account can't come from the HTTP endpoint.
+    Creates the User + Session directly via the same helpers the real login
+    flow uses (app/auth/session.py), then sets the resulting cookie on the
+    client exactly as a real login response would — arguably more realistic
+    than going through registration anyway, since any actual second account
+    in this single-tenant app would come from a different provisioning path,
+    not self-registration."""
+    from app.api.auth import SESSION_COOKIE_NAME
+    from app.auth.security import hash_password
+    from app.auth.session import create_session
+    from app.db.models import User
+
+    user_email = email or f"test-{uuid.uuid4()}@example.com"
+    async with async_session_factory() as session:
+        user = User(email=user_email, password_hash=hash_password("test-password-123"))
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        raw_token = await create_session(session, user.id)
+
+    client.cookies.set(SESSION_COOKIE_NAME, raw_token)
+    return {"id": str(user.id), "email": user.email}
+
+
 @pytest.fixture(autouse=True)
 async def clean_db() -> AsyncIterator[None]:
     """Hits the real Postgres via docker compose (no mocking — consistent with

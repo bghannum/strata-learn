@@ -63,9 +63,25 @@ def _set_session_cookie(response: Response, raw_token: str) -> None:
 async def register(
     body: RegisterRequest, response: Response, session: AsyncSession = Depends(get_session)
 ) -> User:
+    # Checked first, before the single-tenant lockout below: if the caller's
+    # own email is the one already registered, "an account already exists"
+    # is more useful than a generic lockout message — it points at logging
+    # in instead. A truly new email past this point means the caller isn't
+    # the account holder, so the lockout applies to it.
     existing = (await session.exec(select(User).where(User.email == body.email))).first()
     if existing is not None:
         raise HTTPException(409, "An account with this email already exists")
+
+    # ADR-007: this is a single-tenant app by design, not a general-purpose
+    # signup surface — an unrestricted register endpoint would let anyone who
+    # can reach the API create accounts that each enqueue real, paid
+    # indexing/LLM work, which is a real exposure once this is ever deployed
+    # beyond localhost (the original plan's own Phase 7 goal). The first
+    # account ever created is the only one allowed; found via Codex's Phase
+    # 4b pre-push review.
+    any_existing_user = (await session.exec(select(User.id).limit(1))).first()
+    if any_existing_user is not None:
+        raise HTTPException(403, "Registration is closed — this app supports a single account")
     try:
         password_hash = hash_password(body.password)
     except ValueError as exc:

@@ -22,7 +22,7 @@ from app.db.models import SourceType, StudyGuide
 from app.db.session import async_session_factory
 from app.main import app
 from app.redis_pool import get_redis_pool
-from tests.conftest import register_test_user
+from tests.conftest import login_as_new_user, register_test_user
 
 
 def test_create_repo_from_git_url(git_fixture_repo: Path) -> None:
@@ -187,7 +187,7 @@ def test_list_and_get_repo(git_fixture_repo: Path) -> None:
         assert detail.json()["id"] == created["id"]
 
 
-def test_list_repos_only_returns_the_current_users_own(git_fixture_repo: Path) -> None:
+async def test_list_repos_only_returns_the_current_users_own(git_fixture_repo: Path) -> None:
     with TestClient(app) as client_a:
         register_test_user(client_a)
         created = client_a.post(
@@ -195,8 +195,11 @@ def test_list_repos_only_returns_the_current_users_own(git_fixture_repo: Path) -
             data={"source_type": "git_url", "git_url": git_fixture_repo.as_uri()},
         ).json()
 
+    # A second account can't come from POST /auth/register (only the first
+    # account ever created is allowed — ADR-007's single-tenant design), so
+    # this uses login_as_new_user's DB-level bypass instead.
     with TestClient(app) as client_b:
-        register_test_user(client_b)
+        await login_as_new_user(client_b)
         listed_b = client_b.get("/repos").json()
         assert listed_b == []  # a second account sees none of the first account's repos
 

@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from app.db.models import Citation, Section, SectionType, SourceType, StudyGuide
 from app.db.session import async_session_factory
 from app.main import app
-from tests.conftest import register_test_user
+from tests.conftest import login_as_new_user, register_test_user
 
 
 def test_get_study_guide_404_for_unknown_id() -> None:
@@ -83,8 +83,11 @@ async def test_get_study_guide_404_for_another_users_guide(pending_repo_factory)
             await session.commit()
             guide_id = guide.id
 
+    # A second account can't come from POST /auth/register (only the first
+    # account ever created is allowed — ADR-007's single-tenant design), so
+    # this uses login_as_new_user's DB-level bypass instead.
     with TestClient(app) as client_b:
-        register_test_user(client_b)
+        await login_as_new_user(client_b)
         response = client_b.get(f"/study-guides/{guide_id}")
 
     assert response.status_code == 404
