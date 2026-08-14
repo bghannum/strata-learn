@@ -200,22 +200,15 @@ function RepoDetail() {
       <p className="font-mono text-xs opacity-55">{repo.source_uri}</p>
 
       <div className="mt-5.5 rounded-[32px] bg-organic-surface p-7">
-        <h2 className="mb-4.5 text-lg font-semibold">Indexing</h2>
         <IndexingProgress
           status={status}
           lastNonTerminalStatus={lastNonTerminalStatus}
           error={liveError}
           variant="stepper"
+          onRetry={handleRetry}
+          retrying={reindexing}
+          retryError={reindexError}
         />
-
-        {status === 'failed' && (
-          <div className="mt-5.5 flex flex-wrap items-center gap-3">
-            <Button onClick={handleRetry} disabled={reindexing}>
-              {reindexing ? 'Retrying…' : 'Retry'}
-            </Button>
-            {reindexError && <p className="text-[12.5px] text-organic-danger">{reindexError}</p>}
-          </div>
-        )}
       </div>
 
       {status === 'ready' && (
