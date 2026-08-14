@@ -44,6 +44,25 @@ describe('pollQuiz', () => {
     await assertion
   })
 
+  it('enforces the deadline independently even when a single request never settles', async () => {
+    // Found via Codex's PR #43 review: the deadline was previously only
+    // checked inside the success callback, so a hung (or merely slow)
+    // getQuiz call meant nothing ever timed out — polling wasn't actually
+    // bounded. A hung fetch here proves the deadline fires on its own.
+    const fetchMock = vi.fn().mockReturnValue(new Promise<Response>(() => {}))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const promise = pollQuiz('quiz-1', { timeoutMs: 3000 })
+    const assertion = expect(promise).rejects.toBeInstanceOf(PollTimeoutError)
+    await vi.advanceTimersByTimeAsync(3000)
+    await assertion
+
+    // The hung request's own signal must be aborted so the browser actually
+    // cancels it, not just so pollQuiz discards whatever it eventually returns.
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect((init.signal as AbortSignal).aborted).toBe(true)
+  })
+
   it('stops polling and rejects when the signal aborts', async () => {
     const fetchMock = vi.fn().mockResolvedValue(quizResponse('generating'))
     vi.stubGlobal('fetch', fetchMock)

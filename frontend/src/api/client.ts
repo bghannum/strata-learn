@@ -208,8 +208,11 @@ export function generateQuiz(repoId: string): Promise<Quiz> {
   return request(`/quizzes/${repoId}/generate`, { method: 'POST' })
 }
 
-export function getQuiz(quizId: string): Promise<Quiz> {
-  return request(`/quizzes/${quizId}`)
+// Optional signal lets pollQuiz actually cancel an in-flight/hung request
+// once its deadline or an abort fires, instead of just discarding the
+// eventual result.
+export function getQuiz(quizId: string, signal?: AbortSignal): Promise<Quiz> {
+  return request(`/quizzes/${quizId}`, { signal })
 }
 
 // GET /repos/{id}/quiz redirects to GET /quizzes/{id} — mirrors
@@ -319,12 +322,20 @@ export function pollQuiz(quizId: string, options: PollQuizOptions = {}): Promise
   const { intervalMs = 2000, timeoutMs = 5 * 60 * 1000, signal } = options
 
   return new Promise((resolve, reject) => {
-    const deadline = Date.now() + timeoutMs
-    let timer: ReturnType<typeof setTimeout> | undefined
+    let settled = false
+    let intervalTimer: ReturnType<typeof setTimeout> | undefined
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+    // A fetch's own AbortController, distinct from the caller's `signal` —
+    // this is what actually cancels an in-flight/hung request once the
+    // deadline or an abort fires, rather than just ignoring its result.
+    const fetchController = new AbortController()
 
     function cleanup() {
-      if (timer !== undefined) clearTimeout(timer)
+      settled = true
+      if (intervalTimer !== undefined) clearTimeout(intervalTimer)
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
       signal?.removeEventListener('abort', onAbort)
+      fetchController.abort()
     }
     function onAbort() {
       cleanup()
@@ -338,25 +349,33 @@ export function pollQuiz(quizId: string, options: PollQuizOptions = {}): Promise
       signal.addEventListener('abort', onAbort)
     }
 
+    // Found via Codex's PR #43 review: the deadline was previously only
+    // checked inside the success callback, so it never fired if a single
+    // getQuiz call hung or simply took longer than timeoutMs to settle —
+    // polling wasn't actually bounded. An independent timer enforces it
+    // regardless of what the in-flight request is doing, and aborts that
+    // request via fetchController so it stops consuming a connection.
+    deadlineTimer = setTimeout(() => {
+      cleanup()
+      reject(new PollTimeoutError(`Quiz ${quizId} did not finish generating within ${timeoutMs}ms`))
+    }, timeoutMs)
+
     function tick() {
-      getQuiz(quizId)
+      getQuiz(quizId, fetchController.signal)
         .then((quiz) => {
-          // An in-flight fetch can resolve after abort already settled the
-          // promise via onAbort — without this check, it would schedule
-          // another timer for a poll nothing is listening to anymore.
-          if (signal?.aborted) return
+          // Deadline/abort can settle the promise while this fetch was
+          // in flight — without this check, a late-arriving response would
+          // still schedule another timer for a poll nothing awaits anymore.
+          if (settled) return
           if (quiz.status === 'ready' || quiz.status === 'failed') {
             cleanup()
             resolve(quiz)
-          } else if (Date.now() >= deadline) {
-            cleanup()
-            reject(new PollTimeoutError(`Quiz ${quizId} did not finish generating within ${timeoutMs}ms`))
           } else {
-            timer = setTimeout(tick, intervalMs)
+            intervalTimer = setTimeout(tick, intervalMs)
           }
         })
         .catch((err) => {
-          if (signal?.aborted) return
+          if (settled) return
           cleanup()
           reject(err)
         })
@@ -395,6 +414,7 @@ export async function createRepo(
     form.set('git_url', input.gitUrl)
     const response = await fetch(`${API_BASE_URL}/repos`, { method: 'POST', body: form, credentials: 'include' })
     if (!response.ok) {
+      if (response.status === 401) notifyUnauthorized()
       throw new ApiError(response.status, await parseErrorDetail(response))
     }
     return response.json()

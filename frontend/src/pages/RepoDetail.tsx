@@ -9,6 +9,7 @@ import {
   getSnapshot,
   isAbortError,
   pollQuiz,
+  PollTimeoutError,
   useIndexingProgress,
   type AnalysisSnapshot,
   type Quiz,
@@ -16,6 +17,8 @@ import {
   type SnapshotStatus,
   type StudyGuide,
 } from '../api/client'
+
+const QUIZ_TIMEOUT_MESSAGE = 'Quiz generation is taking longer than expected. Refresh the page to check its status.'
 import IndexingProgress from '../components/IndexingProgress'
 
 function isTerminal(status: SnapshotStatus | undefined): boolean {
@@ -72,11 +75,26 @@ function RepoDetail() {
   useEffect(() => {
     if (!guide || !repoId) return
     const controller = new AbortController()
+    let foundQuiz: Quiz | null = null
     getRepoQuiz(repoId)
-      .then((found) => (found.status === 'generating' ? pollQuiz(found.id, { signal: controller.signal }) : found))
+      .then((found) => {
+        foundQuiz = found
+        return found.status === 'generating' ? pollQuiz(found.id, { signal: controller.signal }) : found
+      })
       .then(setQuiz)
       .catch((err) => {
         if (isAbortError(err)) return
+        if (err instanceof PollTimeoutError) {
+          // Retain the (still-generating) quiz reference rather than
+          // leaving `quiz` unset — otherwise the !quiz guard below lets
+          // "Generate Quiz" render again and enqueue a duplicate paid job
+          // for a job that may still be running server-side (found via
+          // Codex's PR #43 review). A page refresh re-runs this effect and
+          // fetches the real status via getRepoQuiz.
+          if (foundQuiz) setQuiz(foundQuiz)
+          setQuizError(QUIZ_TIMEOUT_MESSAGE)
+          return
+        }
         if (!(err instanceof ApiError && err.status === 404)) {
           setQuizError(err instanceof ApiError ? err.message : 'Could not check for an existing quiz.')
         }
@@ -100,11 +118,24 @@ function RepoDetail() {
     setQuizError(null)
     const controller = new AbortController()
     pollControllerRef.current = controller
+    let createdQuiz: Quiz | null = null
     generateQuiz(repoId)
-      .then((created) => pollQuiz(created.id, { signal: controller.signal }))
+      .then((created) => {
+        createdQuiz = created
+        return pollQuiz(created.id, { signal: controller.signal })
+      })
       .then(setQuiz)
       .catch((err) => {
         if (isAbortError(err)) return
+        if (err instanceof PollTimeoutError) {
+          // Same reasoning as the recovery effect above: retain the
+          // still-generating quiz so !quiz doesn't let this button
+          // reappear and enqueue a second paid job on top of one that may
+          // still finish server-side (found via Codex's PR #43 review).
+          if (createdQuiz) setQuiz(createdQuiz)
+          setQuizError(QUIZ_TIMEOUT_MESSAGE)
+          return
+        }
         setQuizError(err instanceof ApiError ? err.message : 'Could not generate a quiz.')
       })
       .finally(() => {
