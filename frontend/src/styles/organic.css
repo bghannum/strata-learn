@@ -1,0 +1,93 @@
+/* Organic design-system tokens, ported from the checked-in
+ * `Strata-Learn UI mockups.zip` (Phase 5.5, docs/design/original-project-plan.md
+ * §12). Values are copied by hand from the zip's `_ds/organic-.../styles.css`
+ * :root block — the app never loads the zip's assets (including its runtime
+ * support.js templating engine) at runtime.
+ *
+ * Every token is prefixed `organic-` so this file is purely additive: it
+ * introduces new Tailwind utilities (bg-organic-accent, rounded-organic-lg,
+ * font-organic-heading, ...) alongside Tailwind's existing defaults without
+ * overriding any of them (Tailwind v4 utilities reference their theme
+ * variable by name at render time, so reusing an unprefixed name like
+ * --radius-lg would have silently changed every existing rounded-lg use).
+ * Screens are ported to these tokens incrementally in later Phase 5.5 work,
+ * not by this file.
+ *
+ * Dark mode: Organic ships no dark-mode tokens (no `prefers-color-scheme`
+ * or `[data-theme]` block anywhere in the source stylesheet) — this is a
+ * deliberate light-only design system, not an omission to fill in.
+ */
+
+@import "@fontsource/caprasimo";
+@import "@fontsource/figtree/400.css";
+@import "@fontsource/figtree/500.css";
+@import "@fontsource/figtree/600.css";
+@import "@fontsource/figtree/700.css";
+
+@theme {
+  --color-organic-bg: #f5ead8;
+  --color-organic-surface: #ebddc5;
+  --color-organic-text: #201e1d;
+  --color-organic-accent: #c67139;
+  --color-organic-accent-2: #7a8a5e;
+
+  /* Tonal ramps — generated in OKLCH on one shared lightness scale in the
+   * source system, so the same step of any role matches visual weight
+   * across roles. Use 100-300 for tinted fills/hovers/subtle borders, 500
+   * as the role's base, 700-900 for text on tinted fills and pressed
+   * states. */
+  --color-organic-neutral-100: #f9f4ed;
+  --color-organic-neutral-200: #eee7db;
+  --color-organic-neutral-300: #dcd3c4;
+  --color-organic-neutral-400: #c0b6a5;
+  --color-organic-neutral-500: #a19786;
+  --color-organic-neutral-600: #82796a;
+  --color-organic-neutral-700: #645c50;
+  --color-organic-neutral-800: #474238;
+  --color-organic-neutral-900: #2e2b25;
+
+  --color-organic-accent-100: #fff2eb;
+  --color-organic-accent-200: #ffe1d0;
+  --color-organic-accent-300: #ffc6a5;
+  --color-organic-accent-400: #f6a06b;
+  --color-organic-accent-500: #d67f48;
+  --color-organic-accent-600: #b2622d;
+  --color-organic-accent-700: #8c491a;
+  --color-organic-accent-800: #643312;
+  --color-organic-accent-900: #402310;
+
+  --color-organic-accent-2-100: #f0fae1;
+  --color-organic-accent-2-200: #e1eecc;
+  --color-organic-accent-2-300: #ccdbb2;
+  --color-organic-accent-2-400: #aebf92;
+  --color-organic-accent-2-500: #8fa073;
+  --color-organic-accent-2-600: #728157;
+  --color-organic-accent-2-700: #56633f;
+  --color-organic-accent-2-800: #3d472b;
+  --color-organic-accent-2-900: #272e1b;
+
+  --color-organic-divider: color-mix(in srgb, #201e1d 16%, transparent);
+
+  --font-organic-heading: "Caprasimo", system-ui, sans-serif;
+  --font-organic-body: "Figtree", system-ui, sans-serif;
+
+  /* Spacing kept as named steps (organic-1..organic-8, skipping 5 and 7 to
+   * match the source scale exactly) rather than overriding Tailwind's
+   * global --spacing multiplier, which would have rescaled every existing
+   * padding, margin, and gap utility already in use across the app. */
+  --spacing-organic-1: 4.4px;
+  --spacing-organic-2: 8.8px;
+  --spacing-organic-3: 13.2px;
+  --spacing-organic-4: 17.6px;
+  --spacing-organic-6: 26.4px;
+  --spacing-organic-8: 35.2px;
+
+  --radius-organic-sm: 8px;
+  --radius-organic-md: 16px;
+  --radius-organic-lg: 28px;
+
+  /* Elevation — ink-tinted shadows tuned to the organic-bg ground. */
+  --shadow-organic-sm: 0 1px 2px color-mix(in srgb, #2e2b25 14%, transparent);
+  --shadow-organic-md: 0 3px 10px color-mix(in srgb, #2e2b25 16%, transparent);
+  --shadow-organic-lg: 0 12px 32px color-mix(in srgb, #2e2b25 22%, transparent);
+}
