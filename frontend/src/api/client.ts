@@ -93,12 +93,26 @@ async function parseErrorDetail(response: Response): Promise<string> {
   return `Request failed: ${response.status}`
 }
 
+// AuthProvider's initial GET /auth/me 401 is handled locally (a fresh visit
+// just means "no user yet"), but nothing previously cleared auth state after
+// a *runtime* 401 — a session expiring mid-use left the UI still showing the
+// logged-in chrome against a dead cookie. request() is the one chokepoint
+// every authenticated call passes through, so it's the natural place to
+// detect this; a DOM event (rather than a direct import) keeps this API
+// module independent of React/AuthContext.
+export const UNAUTHORIZED_EVENT = 'strata:unauthorized'
+
+function notifyUnauthorized(): void {
+  window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // credentials: 'include' — every endpoint requires the session cookie as
   // of Phase 4b, and the API runs on a different port than the frontend
   // dev server, so the browser won't attach it without being told to.
   const response = await fetch(`${API_BASE_URL}${path}`, { ...init, credentials: 'include' })
   if (!response.ok) {
+    if (response.status === 401) notifyUnauthorized()
     throw new ApiError(response.status, await parseErrorDetail(response))
   }
   return response.json()
@@ -131,6 +145,7 @@ export function login(email: string, password: string): Promise<User> {
 export async function logout(): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/auth/logout`, { method: 'POST', credentials: 'include' })
   if (!response.ok) {
+    if (response.status === 401) notifyUnauthorized()
     throw new ApiError(response.status, await parseErrorDetail(response))
   }
 }
@@ -193,8 +208,11 @@ export function generateQuiz(repoId: string): Promise<Quiz> {
   return request(`/quizzes/${repoId}/generate`, { method: 'POST' })
 }
 
-export function getQuiz(quizId: string): Promise<Quiz> {
-  return request(`/quizzes/${quizId}`)
+// Optional signal lets pollQuiz actually cancel an in-flight/hung request
+// once its deadline or an abort fires, instead of just discarding the
+// eventual result.
+export function getQuiz(quizId: string, signal?: AbortSignal): Promise<Quiz> {
+  return request(`/quizzes/${quizId}`, { signal })
 }
 
 // GET /repos/{id}/quiz redirects to GET /quizzes/{id} — mirrors
@@ -274,22 +292,93 @@ export function getAttempt(attemptId: string): Promise<AttemptResults> {
   return request(`/attempts/${attemptId}`)
 }
 
+export class PollTimeoutError extends Error {}
+
+export function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError'
+}
+
+export interface PollQuizOptions {
+  intervalMs?: number
+  /** Caller-supplied ceiling on total wait — rejects with PollTimeoutError
+   * past this point rather than polling forever if the quiz never reaches a
+   * terminal status. */
+  timeoutMs?: number
+  /** Lets a caller stop the loop (component unmount, a newer poll
+   * superseding an older one) without waiting for the next tick. */
+  signal?: AbortSignal
+}
+
 /** Polls GET /quizzes/{id} until status is terminal (ready/failed) — no
  * progress WebSocket for quiz generation (see worker/quiz_pipeline.py's
  * docstring): a bounded handful of cheap-tier LLM calls finishes fast
- * enough that polling is simpler and good enough. */
-export function pollQuiz(quizId: string, intervalMs = 2000): Promise<Quiz> {
+ * enough that polling is simpler and good enough.
+ *
+ * Found via issue #38: the original recursive setTimeout had no
+ * cancellation, deadline, or unmount cleanup — a component unmounting
+ * mid-poll left the timer chain running and calling setState on nothing,
+ * and a quiz stuck in "generating" would poll forever. */
+export function pollQuiz(quizId: string, options: PollQuizOptions = {}): Promise<Quiz> {
+  const { intervalMs = 2000, timeoutMs = 5 * 60 * 1000, signal } = options
+
   return new Promise((resolve, reject) => {
-    const tick = () => {
-      getQuiz(quizId)
+    let settled = false
+    let intervalTimer: ReturnType<typeof setTimeout> | undefined
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+    // A fetch's own AbortController, distinct from the caller's `signal` —
+    // this is what actually cancels an in-flight/hung request once the
+    // deadline or an abort fires, rather than just ignoring its result.
+    const fetchController = new AbortController()
+
+    function cleanup() {
+      settled = true
+      if (intervalTimer !== undefined) clearTimeout(intervalTimer)
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+      signal?.removeEventListener('abort', onAbort)
+      fetchController.abort()
+    }
+    function onAbort() {
+      cleanup()
+      reject(new DOMException('Poll aborted', 'AbortError'))
+    }
+    if (signal) {
+      if (signal.aborted) {
+        onAbort()
+        return
+      }
+      signal.addEventListener('abort', onAbort)
+    }
+
+    // Found via Codex's PR #43 review: the deadline was previously only
+    // checked inside the success callback, so it never fired if a single
+    // getQuiz call hung or simply took longer than timeoutMs to settle —
+    // polling wasn't actually bounded. An independent timer enforces it
+    // regardless of what the in-flight request is doing, and aborts that
+    // request via fetchController so it stops consuming a connection.
+    deadlineTimer = setTimeout(() => {
+      cleanup()
+      reject(new PollTimeoutError(`Quiz ${quizId} did not finish generating within ${timeoutMs}ms`))
+    }, timeoutMs)
+
+    function tick() {
+      getQuiz(quizId, fetchController.signal)
         .then((quiz) => {
+          // Deadline/abort can settle the promise while this fetch was
+          // in flight — without this check, a late-arriving response would
+          // still schedule another timer for a poll nothing awaits anymore.
+          if (settled) return
           if (quiz.status === 'ready' || quiz.status === 'failed') {
+            cleanup()
             resolve(quiz)
           } else {
-            setTimeout(tick, intervalMs)
+            intervalTimer = setTimeout(tick, intervalMs)
           }
         })
-        .catch(reject)
+        .catch((err) => {
+          if (settled) return
+          cleanup()
+          reject(err)
+        })
     }
     tick()
   })
@@ -325,6 +414,7 @@ export async function createRepo(
     form.set('git_url', input.gitUrl)
     const response = await fetch(`${API_BASE_URL}/repos`, { method: 'POST', body: form, credentials: 'include' })
     if (!response.ok) {
+      if (response.status === 401) notifyUnauthorized()
       throw new ApiError(response.status, await parseErrorDetail(response))
     }
     return response.json()
@@ -348,6 +438,7 @@ export async function createRepo(
         resolve(JSON.parse(xhr.responseText))
         return
       }
+      if (xhr.status === 401) notifyUnauthorized()
       let detail = `Request failed: ${xhr.status}`
       try {
         const body = JSON.parse(xhr.responseText)
