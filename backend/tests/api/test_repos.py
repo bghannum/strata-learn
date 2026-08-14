@@ -18,11 +18,20 @@ from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.config import settings
-from app.db.models import SourceType, StudyGuide
+from app.db.models import AnalysisSnapshot, Repo, SnapshotStatus, SourceType, StudyGuide
 from app.db.session import async_session_factory
 from app.main import app
 from app.redis_pool import get_redis_pool
 from tests.conftest import login_as_new_user, register_test_user
+
+
+async def _fail_snapshot(snapshot_id: UUID) -> None:
+    async with async_session_factory() as session:
+        snapshot = await session.get(AnalysisSnapshot, snapshot_id)
+        assert snapshot is not None
+        snapshot.status = SnapshotStatus.failed
+        session.add(snapshot)
+        await session.commit()
 
 
 def test_create_repo_from_git_url(git_fixture_repo: Path) -> None:
@@ -264,4 +273,94 @@ def test_get_snapshot_for_repo_without_one_is_unreachable() -> None:
     with TestClient(app) as client:
         register_test_user(client)
         response = client.get("/repos/00000000-0000-0000-0000-000000000000/snapshot")
+    assert response.status_code == 404
+
+
+async def test_reindex_failed_git_repo_creates_new_pending_snapshot(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, old_snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=UUID(user["id"])
+        )
+        await _fail_snapshot(old_snapshot_id)
+
+        response = client.post(f"/repos/{repo_id}/reindex")
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["latest_snapshot_id"] != str(old_snapshot_id)
+
+    async with async_session_factory() as session:
+        new_snapshot = await session.get(AnalysisSnapshot, UUID(body["latest_snapshot_id"]))
+        assert new_snapshot is not None
+        assert new_snapshot.status == SnapshotStatus.pending
+
+
+async def test_reindex_failed_zip_repo_copies_bytes_to_new_snapshot_key(pending_repo_factory, redis_pool) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, old_snapshot_id = await pending_repo_factory(
+            SourceType.zip_upload, "upload.zip", user_id=UUID(user["id"])
+        )
+        await _fail_snapshot(old_snapshot_id)
+        await redis_pool.set(f"zip-upload:{old_snapshot_id}", b"fake zip bytes", ex=3600)
+
+        response = client.post(f"/repos/{repo_id}/reindex")
+
+    assert response.status_code == 202
+    new_snapshot_id = response.json()["latest_snapshot_id"]
+    copied = await redis_pool.get(f"zip-upload:{new_snapshot_id}")
+    assert copied == b"fake zip bytes"
+
+
+async def test_reindex_failed_zip_repo_with_expired_bytes_returns_410(pending_repo_factory) -> None:
+    # No zip-upload:{old_snapshot_id} key set — simulates the 24h TTL having
+    # expired before the person came back to retry.
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, old_snapshot_id = await pending_repo_factory(
+            SourceType.zip_upload, "upload.zip", user_id=UUID(user["id"])
+        )
+        await _fail_snapshot(old_snapshot_id)
+
+        response = client.post(f"/repos/{repo_id}/reindex")
+
+    assert response.status_code == 410
+    # Nothing new committed — the repo's latest_snapshot_id is unchanged.
+    async with async_session_factory() as session:
+        repo = await session.get(Repo, repo_id)
+        assert repo is not None
+        assert repo.latest_snapshot_id == old_snapshot_id
+
+
+async def test_reindex_non_failed_snapshot_returns_409(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, _snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=UUID(user["id"])
+        )
+        # Still "pending" — never marked failed.
+        response = client.post(f"/repos/{repo_id}/reindex")
+
+    assert response.status_code == 409
+
+
+def test_reindex_unknown_repo_returns_404() -> None:
+    with TestClient(app) as client:
+        register_test_user(client)
+        response = client.post("/repos/00000000-0000-0000-0000-000000000000/reindex")
+    assert response.status_code == 404
+
+
+async def test_reindex_another_users_repo_returns_404(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        owner = register_test_user(client)
+        repo_id, snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=UUID(owner["id"])
+        )
+        await _fail_snapshot(snapshot_id)
+
+        await login_as_new_user(client)
+        response = client.post(f"/repos/{repo_id}/reindex")
+
     assert response.status_code == 404

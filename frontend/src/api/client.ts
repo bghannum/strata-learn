@@ -164,6 +164,12 @@ export function getRepo(repoId: string): Promise<Repo> {
   return request(`/repos/${repoId}`)
 }
 
+// Only valid when the repo's latest snapshot is `failed` (backend 409s
+// otherwise) — retries indexing from scratch, not a resume from checkpoint.
+export function reindexRepo(repoId: string): Promise<Repo> {
+  return request(`/repos/${repoId}/reindex`, { method: 'POST' })
+}
+
 export function getSnapshot(repoId: string): Promise<AnalysisSnapshot> {
   return request(`/repos/${repoId}/snapshot`)
 }
