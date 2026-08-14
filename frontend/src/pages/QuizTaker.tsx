@@ -69,7 +69,13 @@ function QuizTaker() {
         // resume the same in-progress attempt rather than starting a fresh
         // one. Skip past whatever's already been graded so a resume doesn't
         // re-ask (and doesn't lose) already-answered questions.
-        const answeredIds = new Set(results.questions.filter((q) => q.score !== null).map((q) => q.question_id))
+        //
+        // q.answered, not q.score !== null — found via Codex's PR #50
+        // review: in end_of_quiz mode the backend now withholds score
+        // entirely pre-completion (#37), so score alone can no longer tell
+        // "answered" from "unanswered". answered is a separate signal for
+        // exactly this.
+        const answeredIds = new Set(results.questions.filter((q) => q.answered).map((q) => q.question_id))
         let resumeIndex = 0
         while (resumeIndex < fetchedQuiz.questions.length && answeredIds.has(fetchedQuiz.questions[resumeIndex].id)) {
           resumeIndex += 1
@@ -284,13 +290,19 @@ function QuizTaker() {
           </div>
         )}
 
+        {/* showingResult implies isImmediate, which server-side means the
+        backend actually revealed score/feedback (see AnswerResult's client.ts
+        comment) — score is never really null here, ?? 0 is just for
+        TypeScript's benefit since it can't see that server-side guarantee. */}
         {showingResult && result && (
           <div className="mt-5.5 rounded-2xl bg-organic-bg p-4.5">
-            <p className={`text-sm font-semibold ${result.score > 0 ? 'text-organic-accent-2-700' : 'text-organic-danger'}`}>
-              {result.score >= 1 ? 'Correct' : result.score > 0 ? 'Partially correct' : 'Incorrect'}
+            <p
+              className={`text-sm font-semibold ${(result.score ?? 0) > 0 ? 'text-organic-accent-2-700' : 'text-organic-danger'}`}
+            >
+              {(result.score ?? 0) >= 1 ? 'Correct' : (result.score ?? 0) > 0 ? 'Partially correct' : 'Incorrect'}
             </p>
             <p className="mt-1 text-sm opacity-80">{result.feedback}</p>
-            {result.correct_answer && result.score < 1 && (
+            {result.correct_answer && (result.score ?? 0) < 1 && (
               <p className="mt-1 text-sm opacity-60">
                 Correct answer: <span className="font-medium">{result.correct_answer}</span>
               </p>

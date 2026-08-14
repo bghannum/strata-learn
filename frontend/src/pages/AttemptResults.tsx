@@ -1,6 +1,15 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ApiError, generateQuiz, getAttempt, getQuiz, type AttemptResults, type Quiz } from '../api/client'
+import {
+  ApiError,
+  generateQuiz,
+  getAttempt,
+  getQuiz,
+  isAbortError,
+  pollQuiz,
+  type AttemptResults,
+  type Quiz,
+} from '../api/client'
 import Button from '../components/ui/Button'
 import Tag from '../components/ui/Tag'
 
@@ -25,6 +34,11 @@ function AttemptResultsPage() {
   const [error, setError] = useState<string | null>(null)
   const [retaking, setRetaking] = useState(false)
   const [retakeError, setRetakeError] = useState<string | null>(null)
+  const pollControllerRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    return () => pollControllerRef.current?.abort()
+  }, [])
 
   useEffect(() => {
     if (!attemptId) return
@@ -41,14 +55,31 @@ function AttemptResultsPage() {
   // #36: a fresh quiz from the same study guide (new question selection,
   // not a review of the same one) — POST /quizzes/{repo_id}/generate is the
   // same call RepoDetail.tsx's "Generate Quiz" button already makes.
+  //
+  // Polls until ready before navigating — found via Codex's PR #50 review:
+  // generateQuiz's response is a `generating` quiz with no questions yet
+  // (the worker hasn't run), and QuizTaker.tsx rejects any non-ready quiz
+  // outright with no polling of its own. Navigating immediately landed on
+  // "This quiz is not ready yet" while the paid job kept running in the
+  // background. Same pollQuiz + AbortController-on-unmount pattern
+  // RepoDetail.tsx already uses for this exact situation.
   function handleRetake() {
     if (!quiz) return
     setRetaking(true)
     setRetakeError(null)
+    const controller = new AbortController()
+    pollControllerRef.current = controller
     generateQuiz(quiz.repo_id)
-      .then((newQuiz) => navigate(`/quizzes/${newQuiz.id}`))
+      .then((newQuiz) => pollQuiz(newQuiz.id, { signal: controller.signal }))
+      .then((readyQuiz) => {
+        if (readyQuiz.status === 'failed') {
+          throw new Error('Quiz generation failed.')
+        }
+        navigate(`/quizzes/${readyQuiz.id}`)
+      })
       .catch((err) => {
-        setRetakeError(err instanceof ApiError ? err.message : 'Could not start a new quiz.')
+        if (isAbortError(err)) return
+        setRetakeError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Could not start a new quiz.')
         setRetaking(false)
       })
   }

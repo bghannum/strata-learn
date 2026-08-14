@@ -254,8 +254,12 @@ export interface Attempt {
 
 export interface AnswerResult {
   question_id: string
-  score: number
-  feedback: string
+  // #37: null in end_of_quiz mode — the backend withholds these entirely
+  // rather than grading-but-hiding client-side, since inspecting the network
+  // response would otherwise reveal correctness immediately regardless of
+  // what the UI chooses to render.
+  score: number | null
+  feedback: string | null
   correct_index: number | null
   correct_answer: string | null
 }
@@ -264,6 +268,10 @@ export interface QuestionResult {
   question_id: string
   question_type: QuestionType
   prompt: string
+  // #37: true whenever a submission exists, independent of whether score
+  // below is currently revealed — use this, not `score !== null`, to know
+  // whether a question has already been answered.
+  answered: boolean
   score: number | null
   feedback: string | null
   file_path: string

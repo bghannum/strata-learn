@@ -13,6 +13,7 @@ import {
   reindexRepo,
   useIndexingProgress,
   type AnalysisSnapshot,
+  type FeedbackMode,
   type Quiz,
   type Repo,
   type SnapshotStatus,
@@ -20,6 +21,7 @@ import {
 } from '../api/client'
 import IndexingProgress from '../components/IndexingProgress'
 import Button from '../components/ui/Button'
+import { cn } from '../components/ui/cn'
 
 const QUIZ_TIMEOUT_MESSAGE = 'Quiz generation is taking longer than expected. Refresh the page to check its status.'
 
@@ -40,6 +42,11 @@ function RepoDetail() {
   const [quizChecked, setQuizChecked] = useState(false)
   const [quizPending, setQuizPending] = useState(false)
   const [quizError, setQuizError] = useState<string | null>(null)
+  // #37: end_of_quiz is ui-spec.md §6.5's own stated default ("closer to
+  // genuine self-assessment") — found via Codex's PR #50 review: the field
+  // existed end-to-end but nothing ever let a caller choose 'immediate', so
+  // no quiz generated through the app could actually use it.
+  const [feedbackMode, setFeedbackMode] = useState<FeedbackMode>('end_of_quiz')
   const [reindexing, setReindexing] = useState(false)
   const [reindexError, setReindexError] = useState<string | null>(null)
 
@@ -123,7 +130,7 @@ function RepoDetail() {
     const controller = new AbortController()
     pollControllerRef.current = controller
     let createdQuiz: Quiz | null = null
-    generateQuiz(repoId)
+    generateQuiz(repoId, feedbackMode)
       .then((created) => {
         createdQuiz = created
         return pollQuiz(created.id, { signal: controller.signal })
@@ -225,9 +232,33 @@ function RepoDetail() {
           )}
 
           {guide && quizChecked && !quiz && (
-            <Button variant="secondary" onClick={handleGenerateQuiz} disabled={quizPending}>
-              {quizPending ? 'Generating quiz…' : 'Generate Quiz'}
-            </Button>
+            <>
+              {/* Same has-[:checked]: segmented-control pattern as AddRepo.tsx's
+              Git URL/Upload zip toggle. */}
+              <div className="inline-flex overflow-hidden rounded-full border border-organic-divider">
+                {(['end_of_quiz', 'immediate'] as const).map((mode, index) => (
+                  <label
+                    key={mode}
+                    className={cn(
+                      'cursor-pointer px-3 py-1.5 text-xs has-[:checked]:bg-organic-accent-700 has-[:checked]:text-organic-bg',
+                      index > 0 && 'border-l border-organic-divider',
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="feedbackMode"
+                      className="sr-only"
+                      checked={feedbackMode === mode}
+                      onChange={() => setFeedbackMode(mode)}
+                    />
+                    {mode === 'end_of_quiz' ? 'End of quiz' : 'As I go'}
+                  </label>
+                ))}
+              </div>
+              <Button variant="secondary" onClick={handleGenerateQuiz} disabled={quizPending}>
+                {quizPending ? 'Generating quiz…' : 'Generate Quiz'}
+              </Button>
+            </>
           )}
           {quiz?.status === 'ready' && (
             <Link to={`/quizzes/${quiz.id}`}>

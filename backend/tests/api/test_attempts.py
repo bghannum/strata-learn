@@ -14,6 +14,7 @@ from app.db.models import (
     AnswerSubmission,
     Attempt,
     Citation,
+    FeedbackMode,
     FillBlankMode,
     Question,
     QuestionType,
@@ -31,13 +32,20 @@ from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 from tests.conftest import login_as_new_user, register_test_user
 
 
-async def _make_quiz_with_questions(pending_repo_factory, user_id: uuid.UUID) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+async def _make_quiz_with_questions(
+    pending_repo_factory, user_id: uuid.UUID, feedback_mode: FeedbackMode = FeedbackMode.immediate
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    # Defaults to immediate — most existing tests here are about grading
+    # correctness (is MCQ graded right, does exact-match avoid an LLM call),
+    # not feedback-timing policy, so they want score/feedback revealed via
+    # the PATCH response exactly as before #37 introduced feedback_mode.
+    # Tests of the withholding behavior itself pass end_of_quiz explicitly.
     repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, "https://example.com/repo.git", user_id=user_id)
     async with async_session_factory() as session:
         guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=1)
         session.add(guide)
         await session.flush()
-        quiz = Quiz(repo_id=repo_id, study_guide_id=guide.id, status=QuizStatus.ready)
+        quiz = Quiz(repo_id=repo_id, study_guide_id=guide.id, status=QuizStatus.ready, feedback_mode=feedback_mode)
         session.add(quiz)
         await session.flush()
 
@@ -144,7 +152,9 @@ async def test_submit_fill_blank_concept_mode_miss_uses_llm_judge(pending_repo_f
                 guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=1)
                 session.add(guide)
                 await session.flush()
-                quiz = Quiz(repo_id=repo_id, study_guide_id=guide.id, status=QuizStatus.ready)
+                quiz = Quiz(
+                    repo_id=repo_id, study_guide_id=guide.id, status=QuizStatus.ready, feedback_mode=FeedbackMode.immediate
+                )
                 session.add(quiz)
                 await session.flush()
                 fb = Question(
@@ -242,6 +252,69 @@ async def test_get_attempt_withholds_answers_while_in_progress(pending_repo_fact
     assert answered["score"] == 1.0  # already graded and visible via the PATCH response...
     assert answered["submitted_answer"] is None  # ...but not through this bulk endpoint pre-completion
     assert answered["correct_answer"] is None
+
+
+async def test_submit_answer_withholds_score_in_end_of_quiz_mode(pending_repo_factory) -> None:
+    # #37, found via Codex's PR #50 review: the *response itself* must not
+    # reveal correctness in end_of_quiz mode — score alone implies it, even
+    # without feedback/correct_answer. The answer is still graded and
+    # persisted (verified via the completed-attempt fetch below), just not
+    # echoed back at submit time.
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        quiz_id, mcq_id, _fb_id = await _make_quiz_with_questions(
+            pending_repo_factory, uuid.UUID(user["id"]), feedback_mode=FeedbackMode.end_of_quiz
+        )
+        attempt = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+
+        response = client.patch(f"/attempts/{attempt['id']}/answers/{mcq_id}", json={"selected_index": 1})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["score"] is None
+    assert body["feedback"] is None
+    assert body["correct_index"] is None
+    assert body["correct_answer"] is None
+
+
+async def test_submit_answer_identical_retry_still_withholds_in_end_of_quiz_mode(pending_repo_factory) -> None:
+    # The identical-resubmission short-circuit (a separate code path from a
+    # genuine regrade) needs the same gating — easy to miss since it builds
+    # its response from the existing AnswerSubmission row, not a fresh grade.
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        quiz_id, mcq_id, _fb_id = await _make_quiz_with_questions(
+            pending_repo_factory, uuid.UUID(user["id"]), feedback_mode=FeedbackMode.end_of_quiz
+        )
+        attempt = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+        client.patch(f"/attempts/{attempt['id']}/answers/{mcq_id}", json={"selected_index": 1})
+
+        response = client.patch(f"/attempts/{attempt['id']}/answers/{mcq_id}", json={"selected_index": 1})
+
+    assert response.status_code == 200
+    assert response.json()["score"] is None
+
+
+async def test_get_attempt_withholds_score_in_end_of_quiz_mode_until_completed(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        quiz_id, mcq_id, _fb_id = await _make_quiz_with_questions(
+            pending_repo_factory, uuid.UUID(user["id"]), feedback_mode=FeedbackMode.end_of_quiz
+        )
+        attempt = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+        client.patch(f"/attempts/{attempt['id']}/answers/{mcq_id}", json={"selected_index": 1})
+
+        while_in_progress = client.get(f"/attempts/{attempt['id']}")
+        assert while_in_progress.json()["status"] == "in_progress"
+        answered = next(q for q in while_in_progress.json()["questions"] if q["question_id"] == str(mcq_id))
+        assert answered["answered"] is True  # QuizTaker.tsx's resume logic still works...
+        assert answered["score"] is None  # ...without needing the (withheld) score to know that
+
+        client.post(f"/attempts/{attempt['id']}/complete")
+        after_completion = client.get(f"/attempts/{attempt['id']}")
+
+    completed_answer = next(q for q in after_completion.json()["questions"] if q["question_id"] == str(mcq_id))
+    assert completed_answer["score"] == 1.0  # revealed once the whole attempt is done
 
 
 async def test_complete_attempt_includes_submitted_and_correct_answer_text(pending_repo_factory) -> None:

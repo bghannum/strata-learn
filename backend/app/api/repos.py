@@ -156,7 +156,14 @@ async def reindex_repo(
     `failed` latest snapshot is eligible — reindexing a `ready` repo to pick
     up new commits is the Phase 7 diffing feature, out of scope here.
     """
-    repo = await session.get(Repo, repo_id)
+    # SELECT ... FOR UPDATE, not session.get — found via Codex's PR #50
+    # review: without a lock, two concurrent retries can both read the same
+    # failed snapshot before either updates latest_snapshot_id, so both
+    # create and enqueue a fresh snapshot (two full pipelines, including
+    # paid Layer B calls, with one snapshot silently orphaned). This
+    # serializes concurrent reindex calls on the same repo row — same
+    # pattern as attempts.py's _owned_attempt_for_update.
+    repo = (await session.exec(select(Repo).where(Repo.id == repo_id).with_for_update())).first()
     if repo is None or repo.user_id != current_user.id:
         raise HTTPException(404, "repo not found")
     if repo.latest_snapshot_id is None:
