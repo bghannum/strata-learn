@@ -1,6 +1,10 @@
 import { useState, type DragEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ApiError, createRepo, MAX_ZIP_UPLOAD_BYTES } from '../api/client'
+import Button from '../components/ui/Button'
+import { buttonClasses } from '../components/ui/buttonVariants'
+import { cn } from '../components/ui/cn'
+import { Field, Input } from '../components/ui/Field'
 
 type Tab = 'git_url' | 'zip_upload'
 
@@ -84,45 +88,45 @@ function AddRepo() {
   }
 
   return (
-    <main className="mx-auto max-w-lg p-6">
-      <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Add a repository</h1>
+    <main className="mx-auto max-w-xl p-7">
+      <h1 className="mb-1.5 text-[34px] leading-tight">Add a repo</h1>
+      <p className="mb-5.5 text-[14.5px] leading-relaxed opacity-70">
+        Indexing usually takes a few minutes. You don't have to sit and watch it.
+      </p>
 
-      <div className="mt-4 flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-gray-800">
-        {(['git_url', 'zip_upload'] as const).map((t) => (
-          <button
+      {/* Organic's segmented control (.seg/.seg-opt), translated with
+      has-[:checked]: rather than a raw --color-organic-accent glow to match
+      the source's `:has(input:checked)` treatment. */}
+      <div className="mb-5 inline-flex overflow-hidden rounded-full border border-organic-divider">
+        {(['git_url', 'zip_upload'] as const).map((t, index) => (
+          <label
             key={t}
-            type="button"
-            onClick={() => setTab(t)}
-            className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-              tab === t
-                ? 'bg-white text-gray-900 shadow dark:bg-gray-700 dark:text-gray-100'
-                : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
-            }`}
+            className={cn(
+              'cursor-pointer px-3.5 py-2 text-[13px] has-[:checked]:bg-organic-accent-700 has-[:checked]:text-organic-bg has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-organic-accent',
+              index > 0 && 'border-l border-organic-divider',
+            )}
           >
-            {t === 'git_url' ? 'Git URL' : 'Upload Zip'}
-          </button>
+            <input type="radio" name="source" className="sr-only" checked={tab === t} onChange={() => setTab(t)} />
+            {t === 'git_url' ? 'Git URL' : 'Upload zip'}
+          </label>
         ))}
       </div>
 
-      <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4.5 rounded-[32px] bg-organic-surface p-6">
         {tab === 'git_url' ? (
-          <div>
-            <label htmlFor="git-url" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-              Repository URL
-            </label>
-            <input
+          <Field label="Repository URL" htmlFor="git-url">
+            <Input
               id="git-url"
               type="text"
               value={gitUrl}
               onChange={(e) => setGitUrl(e.target.value)}
               onBlur={() => setGitUrlTouched(true)}
               placeholder="https://github.com/owner/repo.git"
-              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800"
             />
             {gitUrlTouched && gitUrl.length > 0 && !gitUrlValid && (
-              <p className="mt-1 text-sm text-red-600 dark:text-red-400">Enter a valid http(s) URL.</p>
+              <p className="mt-2 text-[12.5px] text-organic-accent-700">Enter a valid http(s) URL.</p>
             )}
-          </div>
+          </Field>
         ) : (
           <div>
             <div
@@ -132,63 +136,55 @@ function AddRepo() {
               }}
               onDragLeave={() => setIsDragging(false)}
               onDrop={handleDrop}
-              className={`rounded-lg border-2 border-dashed p-6 text-center transition-colors ${
-                isDragging ? 'border-blue-500 bg-blue-50 dark:bg-blue-950' : 'border-gray-300 dark:border-gray-600'
-              }`}
+              className={cn(
+                'flex flex-col items-center gap-2.5 rounded-[28px] border-2 border-dashed p-9 text-center transition-colors',
+                isDragging ? 'border-organic-accent bg-organic-accent-100' : 'border-organic-neutral-400',
+              )}
             >
+              <div className="grid size-14 place-items-center rounded-full bg-organic-accent-2-200 text-xl text-organic-accent-2-700">
+                ↓
+              </div>
               {file ? (
-                <p className="text-sm text-gray-700 dark:text-gray-300">
-                  {file.name} <span className="text-gray-400">({formatBytes(file.size)})</span>
+                <p className="font-mono text-[12.5px]">
+                  {file.name} <span className="opacity-60">({formatBytes(file.size)})</span>
                 </p>
               ) : (
-                <p className="text-sm text-gray-500 dark:text-gray-400">Drag a .zip file here, or</p>
+                <p className="text-sm font-semibold">Drop a .zip here</p>
               )}
-              <label className="mt-2 inline-block cursor-pointer text-sm font-medium text-blue-600 hover:underline dark:text-blue-400">
-                choose a file
-                <input
-                  type="file"
-                  accept=".zip"
-                  className="hidden"
-                  onChange={(e) => selectFile(e.target.files?.[0])}
-                />
+              {/* buttonClasses() is a <button>-oriented style, applied here to a
+              <span> so the actual interactive element stays a native
+              <label>+file <input>, keeping keyboard/native file-picker
+              behavior. */}
+              <label>
+                <span className={buttonClasses('secondary')}>Choose a file</span>
+                <input type="file" accept=".zip" className="sr-only" onChange={(e) => selectFile(e.target.files?.[0])} />
               </label>
             </div>
-            {fileSizeError && <p className="mt-1 text-sm text-red-600 dark:text-red-400">{fileSizeError}</p>}
+            {fileSizeError && <p className="mt-2 text-[12.5px] text-organic-danger">{fileSizeError}</p>}
             {uploadProgress !== null && (
-              <div className="mt-2">
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
-                  <div className="h-full bg-blue-600 transition-all" style={{ width: `${uploadProgress}%` }} />
+              <div className="mt-2.5 flex items-center gap-3 rounded-2xl bg-organic-neutral-100 px-4 py-3">
+                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-organic-neutral-300">
+                  <div className="h-full rounded-full bg-organic-accent-700 transition-all" style={{ width: `${uploadProgress}%` }} />
                 </div>
-                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Uploading… {uploadProgress}%</p>
+                <p className="text-xs opacity-70">{uploadProgress}%</p>
               </div>
             )}
           </div>
         )}
 
-        <div>
-          <label htmlFor="display-name" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-            Display name <span className="text-gray-400">(optional)</span>
-          </label>
-          <input
-            id="display-name"
-            type="text"
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
-            className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800"
-          />
-        </div>
+        <Field label="Display name" htmlFor="display-name">
+          <Input id="display-name" type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+        </Field>
 
         {error && (
-          <p className="rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">{error}</p>
+          <div className="rounded-2xl bg-organic-danger-bg p-3.5">
+            <p className="text-sm text-organic-danger">{error}</p>
+          </div>
         )}
 
-        <button
-          type="submit"
-          disabled={!canSubmit || submitting}
-          className="w-full rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
+        <Button type="submit" block disabled={!canSubmit || submitting}>
           {submitting ? 'Adding…' : 'Add repository'}
-        </button>
+        </Button>
       </form>
     </main>
   )
