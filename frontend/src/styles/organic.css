@@ -71,6 +71,17 @@
   --font-organic-heading: "Caprasimo", system-ui, sans-serif;
   --font-organic-body: "Figtree", system-ui, sans-serif;
 
+  /* The source system pairs --font-heading with --font-heading-weight: 400
+   * — no separate token is added for it here since it's already exactly
+   * Tailwind's built-in font-normal (--font-weight-normal: 400), and a new
+   * organic-prefixed weight token would collide with the family utility
+   * above under Tailwind's naming (--font-weight-organic-heading would
+   * also generate the class .font-organic-heading, identical to the family
+   * utility's own class name). Found via Codex's PR #45 review: Caprasimo
+   * only has this one weight, so headings using font-organic-heading must
+   * pair it with font-normal, never font-semibold/font-bold — those would
+   * synthesize an unsupported weight and diverge from the mockup. */
+
   /* Spacing kept as named steps (organic-1..organic-8, skipping 5 and 7 to
    * match the source scale exactly) rather than overriding Tailwind's
    * global --spacing multiplier, which would have rescaled every existing
