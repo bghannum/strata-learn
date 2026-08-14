@@ -11,6 +11,22 @@ import {
   type Attempt,
   type Quiz,
 } from '../api/client'
+import Button from '../components/ui/Button'
+import { Input } from '../components/ui/Field'
+import Tag from '../components/ui/Tag'
+
+// #35: the earlier-answered question's own submission + graded result,
+// cached client-side as the user moves forward — GET /attempts/{id}
+// deliberately withholds correct_index/correct_answer for an in_progress
+// attempt (so a savvy user can't fetch upcoming answers before reaching
+// them), so a "Previous" action can't just re-fetch this from the backend.
+// Scoped to *this session's* forward progress: a question answered before a
+// reload isn't recoverable this way either, for the same reason.
+interface CachedAnswer {
+  result: AnswerResult
+  selectedIndex: number | null
+  answerText: string
+}
 
 function QuizTaker() {
   const { quizId } = useParams<{ quizId: string }>()
@@ -28,6 +44,7 @@ function QuizTaker() {
   const [result, setResult] = useState<AnswerResult | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [finishing, setFinishing] = useState(false)
+  const [answeredCache, setAnsweredCache] = useState<Record<string, CachedAnswer>>({})
 
   useEffect(() => {
     if (!quizId) return
@@ -75,43 +92,92 @@ function QuizTaker() {
 
   if (loading) {
     return (
-      <main className="mx-auto max-w-2xl p-6">
-        <p className="text-sm text-gray-500 dark:text-gray-400">Loading…</p>
+      <main className="mx-auto max-w-2xl p-7">
+        <p className="text-sm opacity-70">Loading…</p>
       </main>
     )
   }
 
   if (error || !quiz || !attempt) {
     return (
-      <main className="mx-auto max-w-2xl p-6">
-        <p className="rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">
-          {error ?? 'Quiz not found.'}
-        </p>
+      <main className="mx-auto max-w-2xl p-7">
+        <div className="rounded-2xl bg-organic-danger-bg p-3.5">
+          <p className="text-sm text-organic-danger">{error ?? 'Quiz not found.'}</p>
+        </div>
       </main>
     )
   }
 
+  const isImmediate = quiz.feedback_mode === 'immediate'
+
+  function handleFinish() {
+    if (!attempt) return
+    setFinishing(true)
+    completeAttempt(attempt.id)
+      .then(() => navigate(`/attempts/${attempt.id}`))
+      .catch((err) => {
+        setError(err instanceof ApiError ? err.message : 'Could not finish this quiz.')
+        setFinishing(false)
+      })
+  }
+
   if (readyToFinish) {
     return (
-      <main className="mx-auto max-w-2xl p-6">
-        <p className="text-sm text-gray-500 dark:text-gray-400">You've already answered every question.</p>
+      <main className="mx-auto max-w-2xl p-7">
+        <p className="text-sm opacity-70">You've already answered every question.</p>
         {error && (
-          <p className="mt-3 rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">{error}</p>
+          <div className="mt-3 rounded-2xl bg-organic-danger-bg p-3.5">
+            <p className="text-sm text-organic-danger">{error}</p>
+          </div>
         )}
-        <button
-          type="button"
-          onClick={handleFinish}
-          disabled={finishing}
-          className="mt-4 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-        >
+        <Button className="mt-4" onClick={handleFinish} disabled={finishing}>
           {finishing ? 'Finishing…' : 'Finish Quiz'}
-        </button>
+        </Button>
       </main>
     )
   }
 
   const question = quiz.questions[index]
   const isLast = index === quiz.questions.length - 1
+
+  function goToIndex(targetIndex: number) {
+    setIndex(targetIndex)
+    const targetQuestion = quiz!.questions[targetIndex]
+    const cached = targetQuestion ? answeredCache[targetQuestion.id] : undefined
+    setSelectedIndex(cached?.selectedIndex ?? null)
+    setAnswerText(cached?.answerText ?? '')
+    // end_of_quiz mode never reveals a per-question result, even one
+    // reached again via Previous — only immediate mode restores it.
+    setResult(isImmediate ? (cached?.result ?? null) : null)
+  }
+
+  function handlePrevious() {
+    if (index === 0) return
+    goToIndex(index - 1)
+  }
+
+  function handleNext() {
+    goToIndex(index + 1)
+  }
+
+  function afterGraded(res: AnswerResult, chosenSelectedIndex: number | null, chosenAnswerText: string) {
+    setAnsweredCache((cache) => ({
+      ...cache,
+      [question.id]: { result: res, selectedIndex: chosenSelectedIndex, answerText: chosenAnswerText },
+    }))
+    if (isImmediate) {
+      setResult(res)
+      return
+    }
+    // #37, end_of_quiz mode: submit doubles as "advance" since there's no
+    // per-question result to review in between — straight to Finish on the
+    // last question rather than bouncing through the readyToFinish prompt.
+    if (isLast) {
+      handleFinish()
+    } else {
+      goToIndex(index + 1)
+    }
+  }
 
   function handleSubmit() {
     if (!attempt || !question) return
@@ -128,118 +194,122 @@ function QuizTaker() {
     setSubmitting(true)
     setError(null)
     submitAnswer(attempt.id, question.id, answer)
-      .then(setResult)
+      .then((res) => afterGraded(res, selectedIndex, answerText))
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not submit that answer.'))
       .finally(() => setSubmitting(false))
   }
 
-  function handleNext() {
-    setIndex((i) => i + 1)
-    setSelectedIndex(null)
-    setAnswerText('')
-    setResult(null)
-  }
+  const canSubmit = question.question_type === 'mcq' ? selectedIndex !== null : !!answerText.trim()
+  const showingResult = isImmediate && !!result
+  const primaryLabel = showingResult
+    ? isLast
+      ? 'Finish Quiz'
+      : 'Next Question'
+    : submitting || finishing
+      ? isImmediate
+        ? 'Submitting…'
+        : isLast
+          ? 'Finishing…'
+          : 'Submitting…'
+      : isImmediate
+        ? 'Submit Answer'
+        : isLast
+          ? 'Finish Quiz'
+          : 'Next Question'
 
-  function handleFinish() {
-    if (!attempt) return
-    setFinishing(true)
-    completeAttempt(attempt.id)
-      .then(() => navigate(`/attempts/${attempt.id}`))
-      .catch((err) => {
-        setError(err instanceof ApiError ? err.message : 'Could not finish this quiz.')
-        setFinishing(false)
-      })
+  function handlePrimaryAction() {
+    if (showingResult) {
+      if (isLast) handleFinish()
+      else handleNext()
+    } else {
+      handleSubmit()
+    }
   }
 
   return (
-    <main className="mx-auto max-w-2xl p-6">
-      <p className="text-sm text-gray-500 dark:text-gray-400">
-        Question {index + 1} of {quiz.questions.length}
-      </p>
-      <h1 className="mt-1 text-lg font-semibold whitespace-pre-wrap text-gray-900 dark:text-gray-100">
-        {question.prompt}
-      </h1>
+    <main className="mx-auto max-w-2xl p-7">
+      <div className="mb-2.5 flex items-center gap-3.5">
+        <p className="text-[13px] opacity-60">
+          Question {index + 1} of {quiz.questions.length}
+        </p>
+        <Tag variant="neutral" className="ml-auto">
+          {isImmediate ? 'As I go' : 'End of quiz'}
+        </Tag>
+      </div>
+      <div className="mb-6.5 h-1.5 overflow-hidden rounded-full bg-organic-neutral-300">
+        <div
+          className="h-full rounded-full bg-organic-accent-700 transition-all"
+          style={{ width: `${((index + 1) / quiz.questions.length) * 100}%` }}
+        />
+      </div>
 
-      {question.question_type === 'mcq' && question.choices && (
-        <fieldset className="mt-4 space-y-2" disabled={!!result}>
-          {question.choices.map((choice, choiceIndex) => (
-            <label
-              key={choiceIndex}
-              className="flex cursor-pointer items-start gap-2 rounded-md border border-gray-200 p-3 text-sm text-gray-800 has-checked:border-blue-500 has-checked:bg-blue-50 dark:border-gray-700 dark:text-gray-200 dark:has-checked:bg-blue-950"
-            >
-              <input
-                type="radio"
-                name="choice"
-                checked={selectedIndex === choiceIndex}
-                onChange={() => setSelectedIndex(choiceIndex)}
-                className="mt-0.5"
-              />
-              {choice}
-            </label>
-          ))}
-        </fieldset>
-      )}
+      <div className="rounded-[32px] bg-organic-surface p-7.5">
+        <h1 className="text-xl leading-snug font-semibold whitespace-pre-wrap">{question.prompt}</h1>
 
-      {question.question_type === 'fill_blank' && (
-        <div className="mt-4">
-          <input
-            type="text"
-            value={answerText}
-            onChange={(event) => setAnswerText(event.target.value)}
-            disabled={!!result}
-            placeholder="Your answer"
-            className="w-full rounded-md border border-gray-300 p-2 text-sm text-gray-900 disabled:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
-          />
-        </div>
-      )}
+        {question.question_type === 'mcq' && question.choices && (
+          <fieldset className="mt-4.5 flex flex-col gap-2.5" disabled={!!result}>
+            {question.choices.map((choice, choiceIndex) => (
+              <label
+                key={choiceIndex}
+                className="flex cursor-pointer items-start gap-2.5 rounded-2xl border border-organic-divider p-3.5 text-sm has-[:checked]:border-organic-accent-700 has-[:checked]:bg-organic-accent-100"
+              >
+                <input
+                  type="radio"
+                  name="choice"
+                  checked={selectedIndex === choiceIndex}
+                  onChange={() => setSelectedIndex(choiceIndex)}
+                  className="mt-0.5"
+                />
+                {choice}
+              </label>
+            ))}
+          </fieldset>
+        )}
 
-      {error && (
-        <p className="mt-3 rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">{error}</p>
-      )}
+        {question.question_type === 'fill_blank' && (
+          <div className="mt-4.5">
+            <Input
+              type="text"
+              value={answerText}
+              onChange={(event) => setAnswerText(event.target.value)}
+              disabled={!!result}
+              placeholder="Your answer"
+            />
+          </div>
+        )}
 
-      {!result && (
-        <button
-          type="button"
-          onClick={handleSubmit}
-          disabled={submitting || (question.question_type === 'mcq' ? selectedIndex === null : !answerText.trim())}
-          className="mt-6 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-        >
-          {submitting ? 'Submitting…' : 'Submit Answer'}
-        </button>
-      )}
+        {error && (
+          <div className="mt-3.5 rounded-2xl bg-organic-danger-bg p-3.5">
+            <p className="text-sm text-organic-danger">{error}</p>
+          </div>
+        )}
 
-      {result && (
-        <div className="mt-6 rounded-md border border-gray-200 p-4 dark:border-gray-700">
-          <p className={`text-sm font-medium ${result.score > 0 ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}`}>
-            {result.score >= 1 ? 'Correct' : result.score > 0 ? 'Partially correct' : 'Incorrect'}
-          </p>
-          <p className="mt-1 text-sm text-gray-700 dark:text-gray-300">{result.feedback}</p>
-          {result.correct_answer && result.score < 1 && (
-            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Correct answer: <span className="font-medium">{result.correct_answer}</span>
+        {showingResult && result && (
+          <div className="mt-5.5 rounded-2xl bg-organic-bg p-4.5">
+            <p className={`text-sm font-semibold ${result.score > 0 ? 'text-organic-accent-2-700' : 'text-organic-danger'}`}>
+              {result.score >= 1 ? 'Correct' : result.score > 0 ? 'Partially correct' : 'Incorrect'}
             </p>
-          )}
+            <p className="mt-1 text-sm opacity-80">{result.feedback}</p>
+            {result.correct_answer && result.score < 1 && (
+              <p className="mt-1 text-sm opacity-60">
+                Correct answer: <span className="font-medium">{result.correct_answer}</span>
+              </p>
+            )}
+          </div>
+        )}
+      </div>
 
-          {isLast ? (
-            <button
-              type="button"
-              onClick={handleFinish}
-              disabled={finishing}
-              className="mt-4 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-            >
-              {finishing ? 'Finishing…' : 'Finish Quiz'}
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={handleNext}
-              className="mt-4 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-            >
-              Next Question
-            </button>
-          )}
+      <div className="mt-5.5 flex items-center gap-3">
+        <Button variant="secondary" onClick={handlePrevious} disabled={index === 0 || submitting || finishing}>
+          Previous
+        </Button>
+        <span className="text-[12.5px] opacity-55">Answers save as you go</span>
+        <div className="ml-auto">
+          <Button onClick={handlePrimaryAction} disabled={!showingResult && (submitting || finishing || !canSubmit)}>
+            {primaryLabel}
+          </Button>
         </div>
-      )}
+      </div>
     </main>
   )
 }

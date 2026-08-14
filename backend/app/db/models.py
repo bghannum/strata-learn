@@ -74,6 +74,16 @@ class FillBlankMode(str, Enum):
     concept = "concept"
 
 
+class FeedbackMode(str, Enum):
+    # Phase 5.5, #37: ui-spec.md §6.5's per-quiz "Show answers as I go" /
+    # "Show results at the end" toggle — Phase 5 always graded and showed
+    # feedback immediately (a deliberate scope cut, not an oversight).
+    # end_of_quiz is the default, per the spec's own reasoning ("closer to
+    # genuine self-assessment").
+    immediate = "immediate"
+    end_of_quiz = "end_of_quiz"
+
+
 class AttemptStatus(str, Enum):
     in_progress = "in_progress"
     completed = "completed"
@@ -271,6 +281,9 @@ class Quiz(SQLModel, table=True):
     repo_id: uuid.UUID = Field(foreign_key="repo.id", index=True)
     study_guide_id: uuid.UUID = Field(foreign_key="studyguide.id", index=True)
     status: QuizStatus = Field(default=QuizStatus.generating, sa_column=Column(_by_value(QuizStatus), nullable=False))
+    feedback_mode: FeedbackMode = Field(
+        default=FeedbackMode.end_of_quiz, sa_column=Column(_by_value(FeedbackMode), nullable=False)
+    )
     created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
 
 

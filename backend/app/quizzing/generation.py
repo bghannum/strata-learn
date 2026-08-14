@@ -22,7 +22,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import delete, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.db.models import Citation, FillBlankMode, Question, QuestionType, Quiz, QuizStatus, Section, SectionType
+from app.db.models import (
+    Citation,
+    FeedbackMode,
+    FillBlankMode,
+    Question,
+    QuestionType,
+    Quiz,
+    QuizStatus,
+    Section,
+    SectionType,
+)
 from app.db.session import async_session_factory
 from app.quizzing.fill_blank_generator import FillBlankResult, generate_fill_blank_questions
 from app.quizzing.mcq_generator import MCQResult, generate_mcq_questions
@@ -95,24 +105,28 @@ async def _find_generating_quiz(session: AsyncSession, study_guide_id: UUID) -> 
     ).first()
 
 
-async def create_pending_quiz(session: AsyncSession, repo_id: UUID, study_guide_id: UUID) -> tuple[Quiz, bool]:
+async def create_pending_quiz(
+    session: AsyncSession, repo_id: UUID, study_guide_id: UUID, feedback_mode: FeedbackMode = FeedbackMode.end_of_quiz
+) -> tuple[Quiz, bool]:
     """The API creates this synchronously, before enqueueing the generation
     job, so POST /quizzes/{repo_id}/generate has an id to return immediately —
     same pattern as create_pending_snapshot (analysis/snapshot.py).
 
     Returns (quiz, created) — `created` is False when an already-`generating`
-    quiz for this study guide is reused instead of starting a second one.
-    The initial check below isn't itself race-free (two concurrent calls can
-    both pass it before either commits — a double-click, a retry, two tabs),
-    so Quiz's partial unique index (db/models.py) is the real guarantee: a
-    losing insert's IntegrityError is caught and turned into "reuse the
-    winner's row" rather than a 500 (found via the Phase 5 Codex review,
-    second pass)."""
+    quiz for this study guide is reused instead of starting a second one
+    (`feedback_mode` is then whatever the reused quiz was already created
+    with, not this call's argument — it's the same generation job, not a new
+    one). The initial check below isn't itself race-free (two concurrent
+    calls can both pass it before either commits — a double-click, a retry,
+    two tabs), so Quiz's partial unique index (db/models.py) is the real
+    guarantee: a losing insert's IntegrityError is caught and turned into
+    "reuse the winner's row" rather than a 500 (found via the Phase 5 Codex
+    review, second pass)."""
     existing = await _find_generating_quiz(session, study_guide_id)
     if existing is not None:
         return existing, False
 
-    quiz = Quiz(repo_id=repo_id, study_guide_id=study_guide_id, status=QuizStatus.generating)
+    quiz = Quiz(repo_id=repo_id, study_guide_id=study_guide_id, status=QuizStatus.generating, feedback_mode=feedback_mode)
     session.add(quiz)
     try:
         await session.commit()

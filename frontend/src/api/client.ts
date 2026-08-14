@@ -202,16 +202,27 @@ export interface Question {
   fill_blank_mode: FillBlankMode | null
 }
 
+export type FeedbackMode = 'immediate' | 'end_of_quiz'
+
 export interface Quiz {
   id: string
   repo_id: string
   study_guide_id: string
   status: QuizStatus
+  feedback_mode: FeedbackMode
   questions: Question[]
 }
 
-export function generateQuiz(repoId: string): Promise<Quiz> {
-  return request(`/quizzes/${repoId}/generate`, { method: 'POST' })
+// feedback_mode defaults server-side to 'end_of_quiz' (ui-spec.md §6.5) if
+// omitted. If an already-`generating` quiz exists for this study guide, the
+// backend reuses it and returns *that* quiz's feedback_mode, not this call's
+// argument — it's the same generation job, not a new one.
+export function generateQuiz(repoId: string, feedbackMode?: FeedbackMode): Promise<Quiz> {
+  return request(`/quizzes/${repoId}/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ feedback_mode: feedbackMode }),
+  })
 }
 
 // Optional signal lets pollQuiz actually cancel an in-flight/hung request
