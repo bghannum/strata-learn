@@ -4,9 +4,11 @@ from pathlib import Path
 from app.db.models import CodeUnit, UnitType
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 from app.semantics.tradeoff_extractor import (
+    MAX_SNIPPET_CHARS,
     EvidenceRef,
     TradeoffCardOutput,
     _read_snippet,
+    _valid_ref,
     extract_tradeoffs,
     identify_decision_points,
 )
@@ -205,6 +207,96 @@ async def test_extract_tradeoffs_drops_card_with_no_validated_refs(tmp_path: Pat
     assert results == []
 
 
+def test_valid_ref_rejects_citation_past_the_visible_snippet() -> None:
+    # Found via Codex's PR #42 review: the char-based truncation in
+    # _read_snippet wasn't threaded into ref validation, so a hallucinated
+    # reference into the omitted suffix of a truncated file could validate
+    # against the module's full line_end and be persisted as grounded.
+    code_units = [_module_unit("big.py", 1000)]
+    module_units_by_path = {u.file_path: u for u in code_units}
+
+    in_visible_range = EvidenceRef(file_path="big.py", line_start=1, line_end=50)
+    past_visible_range = EvidenceRef(file_path="big.py", line_start=1, line_end=200)
+
+    assert _valid_ref(in_visible_range, "big.py", module_units_by_path, max_visible_line=100) is True
+    assert _valid_ref(past_visible_range, "big.py", module_units_by_path, max_visible_line=100) is False
+
+
+async def test_extract_tradeoffs_rejects_hallucinated_ref_into_truncated_content(tmp_path: Path) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    oversized = "import arq\n" + ("x = 1\n" * (MAX_SNIPPET_CHARS // 2))
+    (source_dir / "big.py").write_text(oversized)
+    line_count = oversized.count("\n")
+
+    code_units = [_module_unit("big.py", line_count)]
+    candidates = identify_decision_points(
+        {
+            "nodes": [{"id": "big.py", "kind": "file", "language": "python"}],
+            "edges": [{"source": "big.py", "target": "external:arq", "kind": "imports_external"}],
+        },
+        code_units,
+        entry_points=[],
+    )
+    assert len(candidates) == 1
+
+    llm = FakeLLMProvider(
+        [
+            LLMResponse(
+                text="",
+                parsed=TradeoffCardOutput(
+                    decision="use arq",
+                    alternatives_considered=["celery"],
+                    likely_reasoning="lighter weight",
+                    tradeoff_cost="another moving part",
+                    confidence="medium",
+                    # Line 1 was actually shown; line_count is real for the
+                    # module but far past what _read_snippet truncated to.
+                    evidence_refs=[EvidenceRef(file_path="big.py", line_start=1, line_end=line_count)],
+                ),
+                model="fake-model",
+                stop_reason="end_turn",
+                usage={},
+            )
+        ]
+    )
+
+    results = await extract_tradeoffs(llm, candidates, source_dir, {"edges": []}, code_units)
+
+    # No LLM-validated ref survives, and the seed-only card is dropped —
+    # same policy as test_extract_tradeoffs_drops_card_with_no_validated_refs.
+    assert results == []
+
+
+def test_read_snippet_truncates_oversized_files(tmp_path: Path) -> None:
+    # A candidate's line_start..line_end is the module unit's full line
+    # range — i.e. the whole file — so this was only bounded indirectly by
+    # Layer A's 1 MiB max_file_size_bytes, a cap sized for parsing, not LLM
+    # context limits (found via Codex's PR #17 review, #20).
+    oversized = "x = 1\n" * (MAX_SNIPPET_CHARS // 2)
+    (tmp_path / "big.py").write_text(oversized)
+    line_count = oversized.count("\n")
+
+    snippet = _read_snippet(tmp_path, "big.py", 1, line_count)
+
+    assert len(snippet.text) <= MAX_SNIPPET_CHARS + 100
+    assert "truncated" in snippet.text
+    # last_visible_line must be a real, fully-shown line — not the file's
+    # true end (found via Codex's PR #42 review: a citation past this point
+    # was never in the model's context, no matter how it compares to the
+    # module's real line_end).
+    assert snippet.last_visible_line < line_count
+
+
+def test_read_snippet_reports_the_full_range_when_untruncated(tmp_path: Path) -> None:
+    (tmp_path / "small.py").write_text("x = 1\ny = 2\n")
+
+    snippet = _read_snippet(tmp_path, "small.py", 1, 2)
+
+    assert snippet.last_visible_line == 2
+    assert "truncated" not in snippet.text
+
+
 def test_read_snippet_tolerates_non_utf8_bytes(tmp_path: Path) -> None:
     # Found via Codex's Phase 2 pre-push review: parser.py parses on raw bytes
     # and never raises on non-UTF-8 source, so a Latin-1-encoded file that
@@ -213,5 +305,5 @@ def test_read_snippet_tolerates_non_utf8_bytes(tmp_path: Path) -> None:
 
     snippet = _read_snippet(tmp_path, "latin1.py", 1, 2)
 
-    assert "x = 1" in snippet  # doesn't raise UnicodeDecodeError
-    assert "�" in snippet  # the non-UTF-8 byte decodes to a replacement char
+    assert "x = 1" in snippet.text  # doesn't raise UnicodeDecodeError
+    assert "�" in snippet.text  # the non-UTF-8 byte decodes to a replacement char

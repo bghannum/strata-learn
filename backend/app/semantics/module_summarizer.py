@@ -37,14 +37,29 @@ def _import_list(file_path: str, dependency_graph: dict) -> list[str]:
     return [edge["target"] for edge in dependency_graph.get("edges", []) if edge["source"] == file_path]
 
 
+# Each chunk embeds every unit's full signature/docstring, up to
+# MAX_UNITS_PER_CHUNK (chunking.py) units per call — unlike pattern_detector's
+# graph and tradeoff_extractor's file reads, neither field had a size bound of
+# its own (found via Codex's PR #17 review, #20). Milder in practice since
+# tree-sitter signatures/docstrings are usually short, but an unusually large
+# docstring (e.g. an embedded changelog) could still skew a chunk's budget.
+MAX_FIELD_CHARS = 2_000
+
+
+def _truncate(text: str | None) -> str | None:
+    if text is None or len(text) <= MAX_FIELD_CHARS:
+        return text
+    return text[:MAX_FIELD_CHARS] + f"... [truncated: exceeds {MAX_FIELD_CHARS} chars]"
+
+
 def _unit_dict(unit: CodeUnit) -> dict:
     return {
         "name": unit.name,
         "unit_type": unit.unit_type.value,
         "line_start": unit.line_start,
         "line_end": unit.line_end,
-        "signature": unit.signature,
-        "docstring": unit.docstring,
+        "signature": _truncate(unit.signature),
+        "docstring": _truncate(unit.docstring),
     }
 
 

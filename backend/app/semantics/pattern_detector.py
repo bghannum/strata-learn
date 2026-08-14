@@ -28,6 +28,14 @@ from app.semantics.prompts import load_prompt
 MAX_GRAPH_NODES = 500
 MAX_GRAPH_EDGES = 1000
 
+# A matching cap on entry_points — found via Codex's Phase 2 pre-push review
+# round 10 (#19): detect_entry_points can emit several entries per matching
+# file, and unlike the graph above this list wasn't bounded at all, so it
+# could still blow the request past the model's context limit even with the
+# graph itself capped. Sorted by (file, kind) for determinism, same pattern
+# as _bound_graph's edge ordering.
+MAX_ENTRY_POINTS = 200
+
 
 class PatternEvidenceItem(BaseModel):
     claim: str
@@ -97,6 +105,22 @@ def _bound_graph(dependency_graph: dict) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
+def _bound_entry_points(entry_points: list[dict], kept_file_ids: set[str], all_file_ids: set[str]) -> list[dict]:
+    # Drop an entry point only if its file was an actual graph node that got
+    # cut by _bound_graph — otherwise the model sees an entry point for a
+    # file it has no other context about, the same internal-consistency
+    # problem _bound_graph already solves for edges (found via Codex's Phase
+    # 2 pre-push review round 10, #19). Entry points from config files like
+    # package.json/Dockerfile were never graph nodes to begin with
+    # (dependency_graph.py only creates file nodes for parsed source files —
+    # see entry_points.py) and must still pass through unfiltered, subject
+    # only to the overall cap below (found via Codex's PR #42 review: the
+    # first version of this filter dropped those entry points unconditionally,
+    # even in small repos where nothing was actually truncated).
+    in_scope = [ep for ep in entry_points if ep.get("file") not in all_file_ids or ep.get("file") in kept_file_ids]
+    return sorted(in_scope, key=lambda ep: (ep["file"], ep["kind"]))[:MAX_ENTRY_POINTS]
+
+
 def _render_directory_tree(file_paths: list[str]) -> str:
     tree: dict = {}
     for path in file_paths:
@@ -123,13 +147,14 @@ async def detect_pattern(
     # graph — otherwise it could list files the model's own graph view no
     # longer includes, and the two payloads would disagree with each other.
     file_paths = [node["id"] for node in bounded_graph["nodes"] if node.get("kind") == "file"]
+    all_file_ids = {n["id"] for n in dependency_graph.get("nodes", []) if n.get("kind") == "file"}
     module_units_by_path = {u.file_path: u for u in code_units if u.unit_type == UnitType.module}
 
     template = load_prompt("pattern_detector")
     input_text = template.render_input(
         dependency_graph_json=json.dumps(bounded_graph),
         directory_tree=_render_directory_tree(file_paths),
-        entry_points_json=json.dumps(entry_points),
+        entry_points_json=json.dumps(_bound_entry_points(entry_points, set(file_paths), all_file_ids)),
     )
     response = await llm.complete(
         system=template.system,
