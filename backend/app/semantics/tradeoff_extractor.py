@@ -128,7 +128,20 @@ class TradeoffCardResult:
 MAX_SNIPPET_CHARS = 20_000
 
 
-def _read_snippet(source_dir: Path, file_path: str, line_start: int, line_end: int) -> str:
+@dataclass(frozen=True)
+class SourceSnippet:
+    text: str
+    # The last absolute line number actually shown to the model. Equals the
+    # requested line_end when untruncated; a citation past this line was
+    # never in the model's context no matter how it compares to the
+    # module's real line_end (found via Codex's PR #42 review: the
+    # char-based truncation below wasn't threaded into _valid_ref, so a
+    # hallucinated reference into the omitted suffix could still validate
+    # against the module's full range and be persisted as grounded).
+    last_visible_line: int
+
+
+def _read_snippet(source_dir: Path, file_path: str, line_start: int, line_end: int) -> SourceSnippet:
     # errors="replace", matching parser.py's decoding policy exactly: Layer A
     # parses on raw bytes and never raises on non-UTF-8 source, so a file that
     # parsed successfully must not fail Layer B just because Path.read_text()'s
@@ -136,10 +149,19 @@ def _read_snippet(source_dir: Path, file_path: str, line_start: int, line_end: i
     # Phase 2 pre-push review).
     text = (source_dir / file_path).read_bytes().decode("utf-8", errors="replace")
     lines = text.splitlines()
-    snippet = "\n".join(lines[line_start - 1 : line_end])
-    if len(snippet) > MAX_SNIPPET_CHARS:
-        snippet = snippet[:MAX_SNIPPET_CHARS] + f"\n... [truncated: file exceeds {MAX_SNIPPET_CHARS} chars]"
-    return snippet
+    selected = lines[line_start - 1 : line_end]
+    joined = "\n".join(selected)
+    if len(joined) <= MAX_SNIPPET_CHARS:
+        return SourceSnippet(text=joined, last_visible_line=line_end)
+
+    truncated = joined[:MAX_SNIPPET_CHARS]
+    # Only count lines fully included before the cut — a line the truncation
+    # sliced through wasn't completely shown, so it doesn't count as visible
+    # either, keeping this conservative.
+    complete_lines_shown = truncated.count("\n")
+    last_visible_line = line_start + complete_lines_shown - 1
+    snippet_text = truncated + f"\n... [truncated: file exceeds {MAX_SNIPPET_CHARS} chars]"
+    return SourceSnippet(text=snippet_text, last_visible_line=last_visible_line)
 
 
 def _context_snippet(file_path: str, dependency_graph: dict) -> str:
@@ -155,7 +177,9 @@ def _context_snippet(file_path: str, dependency_graph: dict) -> str:
     return "\n".join(lines) if lines else "(no other repo files import or are imported by this file)"
 
 
-def _valid_ref(ref: EvidenceRef, candidate_file_path: str, module_units_by_path: dict[str, CodeUnit]) -> bool:
+def _valid_ref(
+    ref: EvidenceRef, candidate_file_path: str, module_units_by_path: dict[str, CodeUnit], max_visible_line: int
+) -> bool:
     if ref.file_path != candidate_file_path:
         # The model only ever sees the *candidate's own* file content
         # (code_snippet) — importer/imported files named in context_snippet
@@ -167,7 +191,10 @@ def _valid_ref(ref: EvidenceRef, candidate_file_path: str, module_units_by_path:
     module_unit = module_units_by_path.get(ref.file_path)
     if module_unit is None:
         return False
-    return 1 <= ref.line_start <= ref.line_end <= module_unit.line_end
+    # max_visible_line caps this at whatever _read_snippet actually showed
+    # the model — module_unit.line_end alone isn't enough once a snippet can
+    # be truncated (found via Codex's PR #42 review, see SourceSnippet).
+    return 1 <= ref.line_start <= ref.line_end <= min(module_unit.line_end, max_visible_line)
 
 
 async def extract_tradeoffs(
@@ -182,9 +209,10 @@ async def extract_tradeoffs(
     results: list[TradeoffCardResult] = []
 
     for candidate in candidates:
+        snippet = _read_snippet(source_dir, candidate.file_path, candidate.line_start, candidate.line_end)
         input_text = template.render_input(
             decision_description=f"{candidate.label} ({candidate.rationale})",
-            code_snippet=_read_snippet(source_dir, candidate.file_path, candidate.line_start, candidate.line_end),
+            code_snippet=snippet.text,
             context_snippet=_context_snippet(candidate.file_path, dependency_graph),
         )
         response = await llm.complete(
@@ -198,7 +226,7 @@ async def extract_tradeoffs(
         validated_refs = [
             ref.model_dump()
             for ref in output.evidence_refs
-            if _valid_ref(ref, candidate.file_path, module_units_by_path)
+            if _valid_ref(ref, candidate.file_path, module_units_by_path, snippet.last_visible_line)
         ]
         if not validated_refs:
             # The seed citation only explains *why* this file was flagged as a

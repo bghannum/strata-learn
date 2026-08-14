@@ -110,18 +110,38 @@ def test_bound_graph_caps_edges() -> None:
     assert len(bounded["edges"]) == MAX_GRAPH_EDGES
 
 
-def test_bound_entry_points_drops_files_outside_bounded_graph() -> None:
+def test_bound_entry_points_drops_files_cut_by_graph_bounding() -> None:
     # An entry point for a file that _bound_graph already dropped would give
     # the model an entry point it has no other context about (found via
-    # Codex's Phase 2 pre-push review round 10, #19).
+    # Codex's Phase 2 pre-push review round 10, #19). "cut" here means the
+    # file was a real graph node but didn't survive bounding — it's in
+    # all_file_ids but not kept_file_ids.
     entry_points = [
         {"file": "app/main.py", "kind": "http", "reason": "instantiates FastAPI()"},
-        {"file": "app/dropped.py", "kind": "cli", "reason": "..."},
+        {"file": "app/cut.py", "kind": "cli", "reason": "..."},
     ]
 
-    bounded = _bound_entry_points(entry_points, kept_file_ids={"app/main.py"})
+    bounded = _bound_entry_points(entry_points, kept_file_ids={"app/main.py"}, all_file_ids={"app/main.py", "app/cut.py"})
 
     assert bounded == [{"file": "app/main.py", "kind": "http", "reason": "instantiates FastAPI()"}]
+
+
+def test_bound_entry_points_keeps_files_that_were_never_graph_nodes() -> None:
+    # Found via Codex's PR #42 review: dependency_graph.py only creates file
+    # nodes for parsed source files (see entry_points.py's module docstring)
+    # — package.json and Dockerfile entry points are never graph nodes at
+    # all, in a small repo or a large one. The first version of this filter
+    # dropped them unconditionally by requiring graph membership; they must
+    # pass through untouched, subject only to the count cap.
+    entry_points = [
+        {"file": "app/main.py", "kind": "http", "reason": "instantiates FastAPI()"},
+        {"file": "package.json", "kind": "cli", "reason": 'package.json "main": "index.js"'},
+        {"file": "Dockerfile", "kind": "http", "reason": "Dockerfile CMD uvicorn"},
+    ]
+
+    bounded = _bound_entry_points(entry_points, kept_file_ids={"app/main.py"}, all_file_ids={"app/main.py"})
+
+    assert {ep["file"] for ep in bounded} == {"app/main.py", "package.json", "Dockerfile"}
 
 
 def test_bound_entry_points_caps_and_sorts_deterministically() -> None:
@@ -130,17 +150,28 @@ def test_bound_entry_points_caps_and_sorts_deterministically() -> None:
     ]
     kept_file_ids = {ep["file"] for ep in entry_points}
 
-    bounded = _bound_entry_points(entry_points, kept_file_ids)
+    bounded = _bound_entry_points(entry_points, kept_file_ids, all_file_ids=kept_file_ids)
 
     assert len(bounded) == MAX_ENTRY_POINTS
     assert [ep["file"] for ep in bounded] == sorted(ep["file"] for ep in entry_points)[:MAX_ENTRY_POINTS]
 
 
-async def test_detect_pattern_bounds_entry_points_reaching_the_llm() -> None:
-    code_units = [_module_unit("app/api.py", 30)]
-    dependency_graph = {"nodes": [{"id": "app/api.py", "kind": "file", "language": "python"}], "edges": []}
-    entry_points = [{"file": "app/api.py", "kind": "http", "reason": "instantiates FastAPI()"}] + [
-        {"file": f"app/dropped_{i:04d}.py", "kind": "cli", "reason": "..."} for i in range(3)
+async def test_detect_pattern_bounds_entry_points_cut_by_graph_bounding() -> None:
+    # A large repo whose file-node cap truncates the graph must also drop
+    # entry points pointing at files the model no longer has any context
+    # for, while an entry point for a config file (never a graph node to
+    # begin with) still reaches the model.
+    code_units = [_module_unit(f"app/file_{i:04d}.py", 10) for i in range(MAX_GRAPH_NODES + 1)]
+    dependency_graph = {
+        "nodes": [{"id": f"app/file_{i:04d}.py", "kind": "file", "language": "python"} for i in range(MAX_GRAPH_NODES + 1)],
+        "edges": [],
+    }
+    # file_0000.py sorts first and survives bounding; the last one is cut.
+    cut_file = f"app/file_{MAX_GRAPH_NODES:04d}.py"
+    entry_points = [
+        {"file": "app/file_0000.py", "kind": "http", "reason": "instantiates FastAPI()"},
+        {"file": cut_file, "kind": "cli", "reason": "..."},
+        {"file": "package.json", "kind": "cli", "reason": 'package.json "main": "index.js"'},
     ]
     llm = FakeLLMProvider(
         [
@@ -149,7 +180,7 @@ async def test_detect_pattern_bounds_entry_points_reaching_the_llm() -> None:
                 parsed=PatternClaimOutput(
                     primary_pattern="layered",
                     confidence="high",
-                    evidence=[PatternEvidenceItem(claim="c", supporting_paths=["app/api.py"])],
+                    evidence=[PatternEvidenceItem(claim="c", supporting_paths=["app/file_0000.py"])],
                     caveats=None,
                 ),
                 model="fake-model",
@@ -162,9 +193,9 @@ async def test_detect_pattern_bounds_entry_points_reaching_the_llm() -> None:
     await detect_pattern(llm, dependency_graph, code_units, entry_points=entry_points)
 
     sent_input = llm.calls[0].messages[0].content
-    assert "app/api.py" in sent_input
-    for i in range(3):
-        assert f"app/dropped_{i:04d}.py" not in sent_input
+    assert "app/file_0000.py" in sent_input
+    assert "package.json" in sent_input
+    assert cut_file not in sent_input
 
 
 async def test_detect_pattern_resolves_and_drops_citations() -> None:
