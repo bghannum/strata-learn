@@ -33,7 +33,7 @@ from app.analysis.snapshot import create_pending_snapshot, fail_snapshot
 from app.api.auth import get_current_user
 from app.auth.session import get_user_from_token
 from app.config import settings
-from app.db.models import AnalysisSnapshot, Repo, SnapshotStatus, SourceType, StudyGuide, User
+from app.db.models import AnalysisSnapshot, Quiz, Repo, SnapshotStatus, SourceType, StudyGuide, User
 from app.db.session import get_session
 from app.ingestion.source import (
     SourcePreparationError,
@@ -198,6 +198,28 @@ async def get_repo_study_guide(
     if guide is None:
         raise HTTPException(404, "study guide not ready yet")
     return RedirectResponse(f"/study-guides/{guide.id}")
+
+
+@router.get("/{repo_id}/quiz")
+async def get_repo_quiz(
+    repo_id: UUID, session: AsyncSession = Depends(get_session), current_user: User = Depends(get_current_user)
+) -> RedirectResponse:
+    """The most recently generated quiz for this repo, whatever its status
+    (generating/ready/failed) — RepoDetail.tsx calls this on mount so a page
+    reload, a second tab, or navigating away and back can recover an
+    already-enqueued or already-ready quiz instead of only ever offering
+    "Generate Quiz" again, which would enqueue a second paid generation job
+    on top of one that may already be running or done (found via the Phase 5
+    Codex review). Same redirect-to-canonical-resource shape as
+    get_repo_study_guide above.
+    """
+    repo = await session.get(Repo, repo_id)
+    if repo is None or repo.user_id != current_user.id:
+        raise HTTPException(404, "repo not found")
+    quiz = (await session.exec(select(Quiz).where(Quiz.repo_id == repo_id).order_by(Quiz.created_at.desc()))).first()
+    if quiz is None:
+        raise HTTPException(404, "no quiz generated yet")
+    return RedirectResponse(f"/quizzes/{quiz.id}")
 
 
 @router.websocket("/{repo_id}/progress")

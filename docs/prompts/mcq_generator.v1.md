@@ -16,8 +16,7 @@ OUTPUT (JSON):
   "prompt": "the question text",
   "choices": ["choice A", "choice B", "choice C", "choice D"],
   "correct_index": 0,
-  "explanation": "why the correct answer is correct and others are not",
-  "source_refs": [{"file_path": "...", "line_start": N, "line_end": N}]
+  "explanation": "why the correct answer is correct and others are not"
 }
 ```
 
@@ -27,3 +26,7 @@ OUTPUT (JSON):
 Concept/fact to test: {source_fact}
 Source code context: {code_snippet}
 ```
+
+## Note
+
+No `source_refs` in the output — see `fill_blank_generator.v1.md`'s note; same reasoning applies here.

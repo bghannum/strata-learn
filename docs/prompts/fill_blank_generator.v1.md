@@ -20,7 +20,17 @@ OUTPUT (JSON):
   "mode": "code | concept",
   "blanked_text": "text with ___ marking the blank",
   "correct_answer": "the answer",
-  "acceptable_alternatives": ["synonym or close-answer 1", "..."],
-  "source_refs": [{"file_path": "...", "line_start": N, "line_end": N}]
+  "acceptable_alternatives": ["synonym or close-answer 1", "..."]
 }
 ```
+
+## Input template
+
+```
+Concept/fact to test: {source_fact}
+Source code context: {code_snippet}
+```
+
+## Note
+
+No `source_refs` in the output, unlike the original plan sketch (`docs/design/original-project-plan.md` §9.5). Each question is generated from exactly one already-persisted `Citation` (see `backend/app/quizzing/generation.py`) — that citation's own `file_path`/`line_start`/`line_end` is the grounding, attached deterministically by the caller, not self-reported by the model. There's nothing to validate a free-form LLM citation against here (no `CodeUnit` line-span check like `tradeoff_extractor.py` has), so asking for one would just add an untrusted field. Same reasoning applies to `mcq_generator.v1.md`.

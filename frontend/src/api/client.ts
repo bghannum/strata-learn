@@ -163,6 +163,138 @@ export function getStudyGuide(studyGuideId: string): Promise<StudyGuide> {
   return request(`/study-guides/${studyGuideId}`)
 }
 
+// --- Quizzes ---
+
+export type QuizStatus = 'generating' | 'ready' | 'failed'
+export type QuestionType = 'mcq' | 'fill_blank'
+export type FillBlankMode = 'code' | 'concept'
+
+// No answer key here (correct_index, correct_answer, explanation) — see
+// backend/app/api/quizzes.py's module docstring for why: it only appears in
+// submitAnswer's response, after the student has answered that question.
+export interface Question {
+  id: string
+  question_type: QuestionType
+  order: number
+  prompt: string
+  choices: string[] | null
+  fill_blank_mode: FillBlankMode | null
+}
+
+export interface Quiz {
+  id: string
+  repo_id: string
+  study_guide_id: string
+  status: QuizStatus
+  questions: Question[]
+}
+
+export function generateQuiz(repoId: string): Promise<Quiz> {
+  return request(`/quizzes/${repoId}/generate`, { method: 'POST' })
+}
+
+export function getQuiz(quizId: string): Promise<Quiz> {
+  return request(`/quizzes/${quizId}`)
+}
+
+// GET /repos/{id}/quiz redirects to GET /quizzes/{id} — mirrors
+// getRepoStudyGuide. Lets RepoDetail recover an already-enqueued or
+// already-ready quiz after a reload instead of only offering "Generate
+// Quiz" again (which would enqueue a second paid job). Throws ApiError(404)
+// if this repo has no quiz yet — callers should treat that as "none exists".
+export function getRepoQuiz(repoId: string): Promise<Quiz> {
+  return request(`/repos/${repoId}/quiz`)
+}
+
+// --- Attempts ---
+
+export type AttemptStatus = 'in_progress' | 'completed'
+
+export interface Attempt {
+  id: string
+  quiz_id: string
+  status: AttemptStatus
+  score: number | null
+}
+
+export interface AnswerResult {
+  question_id: string
+  score: number
+  feedback: string
+  correct_index: number | null
+  correct_answer: string | null
+}
+
+export interface QuestionResult {
+  question_id: string
+  question_type: QuestionType
+  prompt: string
+  score: number | null
+  feedback: string | null
+  file_path: string
+  line_start: number
+  line_end: number
+  citation_claim_excerpt: string | null
+  citation_snippet_text: string | null
+}
+
+export interface AttemptResults {
+  id: string
+  quiz_id: string
+  status: AttemptStatus
+  score: number | null
+  questions: QuestionResult[]
+}
+
+export function createAttempt(quizId: string): Promise<Attempt> {
+  return request('/attempts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ quiz_id: quizId }),
+  })
+}
+
+export function submitAnswer(
+  attemptId: string,
+  questionId: string,
+  answer: { selected_index: number } | { answer_text: string },
+): Promise<AnswerResult> {
+  return request(`/attempts/${attemptId}/answers/${questionId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(answer),
+  })
+}
+
+export function completeAttempt(attemptId: string): Promise<AttemptResults> {
+  return request(`/attempts/${attemptId}/complete`, { method: 'POST' })
+}
+
+export function getAttempt(attemptId: string): Promise<AttemptResults> {
+  return request(`/attempts/${attemptId}`)
+}
+
+/** Polls GET /quizzes/{id} until status is terminal (ready/failed) — no
+ * progress WebSocket for quiz generation (see worker/quiz_pipeline.py's
+ * docstring): a bounded handful of cheap-tier LLM calls finishes fast
+ * enough that polling is simpler and good enough. */
+export function pollQuiz(quizId: string, intervalMs = 2000): Promise<Quiz> {
+  return new Promise((resolve, reject) => {
+    const tick = () => {
+      getQuiz(quizId)
+        .then((quiz) => {
+          if (quiz.status === 'ready' || quiz.status === 'failed') {
+            resolve(quiz)
+          } else {
+            setTimeout(tick, intervalMs)
+          }
+        })
+        .catch(reject)
+    }
+    tick()
+  })
+}
+
 export interface CreateRepoFromGitUrl {
   sourceType: 'git_url'
   gitUrl: string

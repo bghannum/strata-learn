@@ -4,6 +4,7 @@ from arq.connections import RedisSettings
 
 from app.config import settings
 from app.worker.pipeline import index_repo
+from app.worker.quiz_pipeline import generate_quiz
 
 
 async def health_check(ctx: dict) -> str:
@@ -11,7 +12,7 @@ async def health_check(ctx: dict) -> str:
 
 
 class WorkerSettings:
-    functions: ClassVar = [health_check, index_repo]
+    functions: ClassVar = [health_check, index_repo, generate_quiz]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     # arq's default (300s) was fine for Phase 1's clone+parse-only pipeline,
     # but Phase 2's Layer B makes one real LLM call per module sequentially
