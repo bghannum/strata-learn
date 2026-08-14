@@ -31,6 +31,14 @@
   --color-organic-accent: #c67139;
   --color-organic-accent-2: #7a8a5e;
 
+  /* Not in the source styles.css — Organic ships no error/danger role at
+   * all. Added deliberately and scoped narrowly (failed-status chip, form
+   * error banners, destructive-action text only); everything else stays on
+   * the mockup's warm palette. Confirmed with the user rather than reusing
+   * a dark accent step, which read as "dark orange" instead of alarming. */
+  --color-organic-danger: #b3261e;
+  --color-organic-danger-bg: #fdecea;
+
   /* Tonal ramps — generated in OKLCH on one shared lightness scale in the
    * source system, so the same step of any role matches visual weight
    * across roles. Use 100-300 for tinted fills/hovers/subtle borders, 500

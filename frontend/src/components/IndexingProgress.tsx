@@ -1,4 +1,5 @@
 import type { SnapshotStatus } from '../api/client'
+import Tag from './ui/Tag'
 
 // The backend's `parsing` status covers both cloning/extracting the source
 // AND running Layer A structural analysis as one atomic phase (no separate
@@ -21,11 +22,16 @@ function stageState(stageIndex: number, currentIndex: number, isReady: boolean):
   return 'not-started'
 }
 
+// Same color/icon language everywhere this renders (Dashboard.tsx's chip and
+// RepoDetail.tsx's stepper) per ui-spec.md §8 — accent-2 (sage) reads as the
+// system's positive/complete voice since Organic has no dedicated success
+// color, and organic-danger is the one deliberately added non-mockup color
+// (see organic.css), used only for this failed state.
 const DOT_CLASSES: Record<StageState, string> = {
-  'not-started': 'bg-gray-300 dark:bg-gray-600',
-  'in-progress': 'bg-blue-500 animate-pulse',
-  complete: 'bg-green-500',
-  failed: 'bg-red-500',
+  'not-started': 'bg-organic-neutral-400',
+  'in-progress': 'bg-organic-accent animate-pulse',
+  complete: 'bg-organic-accent-2',
+  failed: 'bg-organic-danger',
 }
 
 interface IndexingProgressProps {
@@ -47,10 +53,10 @@ function IndexingProgress({ status, lastNonTerminalStatus, error, variant }: Ind
 
     if (variant === 'chip') {
       return (
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:bg-red-950 dark:text-red-300">
-          <span className="h-2 w-2 rounded-full bg-red-500" />
+        <Tag variant="danger" className="gap-1.5">
+          <span className="h-2 w-2 rounded-full bg-organic-danger" />
           Failed
-        </span>
+        </Tag>
       )
     }
 
@@ -65,18 +71,18 @@ function IndexingProgress({ status, lastNonTerminalStatus, error, variant }: Ind
                 <span
                   className={
                     state === 'not-started'
-                      ? 'text-sm text-gray-400 dark:text-gray-500'
-                      : 'text-sm font-medium text-gray-900 dark:text-gray-100'
+                      ? 'text-sm text-organic-text opacity-45'
+                      : 'text-sm font-medium text-organic-text'
                   }
                 >
                   {stage.label}
                 </span>
-                {index < STAGES.length - 1 && <span className="mx-1 h-px w-6 bg-gray-300 dark:bg-gray-600" />}
+                {index < STAGES.length - 1 && <span className="mx-1 h-px w-6 bg-organic-divider" />}
               </li>
             )
           })}
         </ol>
-        <div className="mt-3 rounded-md border border-red-300 bg-red-50 p-4 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
+        <div className="mt-3 rounded-organic-md border border-organic-danger/30 bg-organic-danger-bg p-4 text-organic-danger">
           <p className="font-medium">
             Indexing failed{failedStageLabel ? ` during ${failedStageLabel}` : ''}
           </p>
@@ -98,10 +104,10 @@ function IndexingProgress({ status, lastNonTerminalStatus, error, variant }: Ind
     const stage = currentIndex >= 0 ? STAGES[currentIndex] : undefined
     const state = currentIndex >= 0 ? stageState(currentIndex, currentIndex, isReady) : 'not-started'
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-700 dark:bg-gray-800 dark:text-gray-300">
+      <Tag variant="neutral" className="gap-1.5">
         <span className={`h-2 w-2 rounded-full ${DOT_CLASSES[state]}`} />
         {stage?.label ?? 'Queued'}
-      </span>
+      </Tag>
     )
   }
 
@@ -114,14 +120,12 @@ function IndexingProgress({ status, lastNonTerminalStatus, error, variant }: Ind
             <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${DOT_CLASSES[state]}`} />
             <span
               className={
-                state === 'not-started'
-                  ? 'text-sm text-gray-400 dark:text-gray-500'
-                  : 'text-sm font-medium text-gray-900 dark:text-gray-100'
+                state === 'not-started' ? 'text-sm text-organic-text opacity-45' : 'text-sm font-medium text-organic-text'
               }
             >
               {stage.label}
             </span>
-            {index < STAGES.length - 1 && <span className="mx-1 h-px w-6 bg-gray-300 dark:bg-gray-600" />}
+            {index < STAGES.length - 1 && <span className="mx-1 h-px w-6 bg-organic-divider" />}
           </li>
         )
       })}
