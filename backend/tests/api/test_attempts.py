@@ -224,6 +224,68 @@ async def test_get_attempt_reflects_completed_state(pending_repo_factory) -> Non
     assert body["score"] == 0.5
 
 
+async def test_get_attempt_withholds_answers_while_in_progress(pending_repo_factory) -> None:
+    # #34: even for a question that's *already been answered*, the answer
+    # key must stay hidden until the whole attempt completes — otherwise a
+    # mid-quiz GET /attempts/{id} could reveal correct_answer for questions
+    # not yet reached.
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        quiz_id, mcq_id, _fb_id = await _make_quiz_with_questions(pending_repo_factory, uuid.UUID(user["id"]))
+        attempt = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+        client.patch(f"/attempts/{attempt['id']}/answers/{mcq_id}", json={"selected_index": 1})
+
+        response = client.get(f"/attempts/{attempt['id']}")
+
+    assert response.status_code == 200
+    answered = next(q for q in response.json()["questions"] if q["question_id"] == str(mcq_id))
+    assert answered["score"] == 1.0  # already graded and visible via the PATCH response...
+    assert answered["submitted_answer"] is None  # ...but not through this bulk endpoint pre-completion
+    assert answered["correct_answer"] is None
+
+
+async def test_complete_attempt_includes_submitted_and_correct_answer_text(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        quiz_id, mcq_id, fb_id = await _make_quiz_with_questions(pending_repo_factory, uuid.UUID(user["id"]))
+        attempt = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+        # Deliberately wrong mcq choice (index 0, correct is index 1) and a
+        # correct fill_blank answer, to prove both fields resolve
+        # independently of whether the submission was right.
+        client.patch(f"/attempts/{attempt['id']}/answers/{mcq_id}", json={"selected_index": 0})
+        client.patch(f"/attempts/{attempt['id']}/answers/{fb_id}", json={"answer_text": "arq"})
+
+        response = client.post(f"/attempts/{attempt['id']}/complete")
+
+    assert response.status_code == 200
+    questions = {q["question_id"]: q for q in response.json()["questions"]}
+
+    mcq_result = questions[str(mcq_id)]
+    assert mcq_result["submitted_answer"] == "a"  # choices[0], what was actually selected
+    assert mcq_result["correct_answer"] == "b"  # choices[1], correct_index
+
+    fb_result = questions[str(fb_id)]
+    assert fb_result["submitted_answer"] == "arq"
+    assert fb_result["correct_answer"] == "arq"
+
+
+async def test_complete_attempt_answer_text_null_for_unanswered_question(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        quiz_id, mcq_id, fb_id = await _make_quiz_with_questions(pending_repo_factory, uuid.UUID(user["id"]))
+        attempt = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+        client.patch(f"/attempts/{attempt['id']}/answers/{mcq_id}", json={"selected_index": 1})
+
+        response = client.post(f"/attempts/{attempt['id']}/complete")
+
+    assert response.status_code == 200
+    unanswered = next(q for q in response.json()["questions"] if q["question_id"] == str(fb_id))
+    assert unanswered["submitted_answer"] is None
+    # The correct answer is still safe to reveal once the whole attempt is
+    # done — nothing is "upcoming" anymore at that point.
+    assert unanswered["correct_answer"] == "arq"
+
+
 async def test_create_attempt_is_idempotent_for_in_progress_attempt(pending_repo_factory) -> None:
     # StrictMode's double mount-effect invocation, a reload, or a second tab
     # must all resume the same attempt rather than minting a fresh one and

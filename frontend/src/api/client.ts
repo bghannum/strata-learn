@@ -271,6 +271,12 @@ export interface QuestionResult {
   line_end: number
   citation_claim_excerpt: string | null
   citation_snippet_text: string | null
+  // #34: display text (an mcq choice's own text, not its index) — both null
+  // until the attempt is completed, regardless of whether this particular
+  // question has already been answered (see the backend's QuestionResultOut
+  // for why: revealing this mid-quiz could leak upcoming correct answers).
+  submitted_answer: string | null
+  correct_answer: string | null
 }
 
 export interface AttemptResults {

@@ -99,6 +99,17 @@ class QuestionResultOut(BaseModel):
     # this link). Null only if the source Citation has since been deleted.
     citation_claim_excerpt: str | None
     citation_snippet_text: str | None
+    # #34, ui-spec.md §6.7: the student's own answer and the correct one, as
+    # display text (an mcq choice's text, not its bare index — resolved here
+    # so the frontend doesn't need question.choices just to render this).
+    # Both null while the attempt is still in_progress, regardless of
+    # whether a given question has already been answered — GET
+    # /attempts/{id} must never let a mid-quiz fetch reveal the correct
+    # answer to a question the student hasn't reached yet, and gating
+    # uniformly by attempt status keeps that contract simple to reason
+    # about rather than leaking it question-by-question.
+    submitted_answer: str | None = None
+    correct_answer: str | None = None
 
 
 class AttemptResultsOut(BaseModel):
@@ -133,6 +144,27 @@ async def _owned_attempt_for_update(session: AsyncSession, attempt_id: UUID, cur
     return attempt
 
 
+def _answer_display_text(question: Question, selected_index: int | None, answer_text: str | None) -> str | None:
+    """Resolves a stored submission to display text — an mcq choice's text,
+    not its bare index, so QuestionResultOut doesn't need to also carry
+    question.choices just for the frontend to look this up itself."""
+    if question.question_type == QuestionType.mcq:
+        if selected_index is None or question.choices is None or not (0 <= selected_index < len(question.choices)):
+            return None
+        return question.choices[selected_index]
+    return answer_text
+
+
+def _correct_answer_display_text(question: Question) -> str | None:
+    if question.question_type == QuestionType.mcq:
+        if question.correct_index is None or question.choices is None or not (
+            0 <= question.correct_index < len(question.choices)
+        ):
+            return None
+        return question.choices[question.correct_index]
+    return question.correct_answer
+
+
 async def _build_results(session: AsyncSession, attempt: Attempt) -> AttemptResultsOut:
     questions = list(
         (await session.exec(select(Question).where(Question.quiz_id == attempt.quiz_id).order_by(Question.order))).all()
@@ -147,6 +179,10 @@ async def _build_results(session: AsyncSession, attempt: Attempt) -> AttemptResu
     if citation_ids:
         citations = (await session.exec(select(Citation).where(Citation.id.in_(citation_ids)))).all()
         citation_by_id = {c.id: c for c in citations}
+
+    # #34: only once the attempt is completed — see QuestionResultOut's
+    # comment for why this is gated uniformly rather than per-question.
+    is_completed = attempt.status == AttemptStatus.completed
 
     return AttemptResultsOut(
         id=attempt.id,
@@ -169,6 +205,12 @@ async def _build_results(session: AsyncSession, attempt: Attempt) -> AttemptResu
                 citation_snippet_text=citation_by_id[q.source_citation_id].snippet_text
                 if q.source_citation_id in citation_by_id
                 else None,
+                submitted_answer=_answer_display_text(
+                    q, submission_by_question[q.id].selected_index, submission_by_question[q.id].answer_text
+                )
+                if is_completed and q.id in submission_by_question
+                else None,
+                correct_answer=_correct_answer_display_text(q) if is_completed else None,
             )
             for q in questions
         ],
