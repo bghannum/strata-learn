@@ -14,6 +14,8 @@ Phases 0 through 5 are complete:
 - a working frontend: register/log in, add a repo, watch it index live, and read the generated study guide with inline diagrams and clickable citations, all scoped to the logged-in user via cookie-based sessions;
 - quiz generation (MCQ + fill-in-the-blank, grounded in the study guide's own citations) and taking, with immediate per-answer grading/feedback and a results view.
 
+Remaining roadmap phases first integrate the checked-in UI mockup across the existing browser flow (Phase 5.5), then add drawing questions (Phase 6), versioning/diffing/hosting polish (Phase 7), and voice learning through read-aloud content plus spoken quiz answers (Phase 8).
+
 Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
 
 See the [documentation index](docs/README.md) for current architecture, development workflow, decisions, planned UX, and historical design material.
@@ -34,7 +36,8 @@ OpenAI support remains part of the provider-abstraction plan, but only the Anthr
 
 ```bash
 cp .env.example .env
-# Set ANTHROPIC_API_KEY in .env before indexing a repository.
+# Set ANTHROPIC_API_KEY before indexing, and replace the default
+# REGISTRATION_SECRET before creating the single account.
 docker compose up --build
 ```
 
@@ -48,6 +51,8 @@ open http://localhost:5173
 ```
 
 Add a repository from the Dashboard, watch it index, and open the generated study guide once it's ready. Interactive API documentation is available at `http://localhost:8000/docs`.
+
+On the first visit, register the app's single account using the `REGISTRATION_SECRET` from `.env`. Registration closes permanently after that account is created; later visits use the normal login flow.
 
 Stop the stack with `docker compose down`. Add `-v` only when you intentionally want to delete the local PostgreSQL volume.
 
@@ -121,7 +126,7 @@ alembic revision --autogenerate -m "message"
 ```text
 strata-learn/
 ├── backend/             FastAPI, analysis pipeline, arq worker, and tests
-├── frontend/            React/Vite app: add a repo, watch progress, read the study guide
+├── frontend/            React/Vite app: ingest repos, read guides, and take quizzes
 ├── docs/
 │   ├── adr/             Architecture decision records
 │   ├── design/          Planned and historical design documents

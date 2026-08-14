@@ -30,7 +30,7 @@ from app.db.models import (
     User,
 )
 from app.db.session import get_session
-from app.quizzing.grading.fill_blank_grader import grade_fill_blank
+from app.quizzing.grading.fill_blank_grader import FillBlankLLMUnavailableError, grade_fill_blank
 from app.quizzing.grading.mcq_grader import grade_mcq
 from app.semantics.llm_provider import AnthropicProvider, LLMProvider
 
@@ -44,13 +44,19 @@ router = APIRouter(prefix="/attempts", tags=["attempts"])
 MAX_ANSWER_TEXT_CHARS = 2000
 
 
-def get_llm_provider() -> LLMProvider:
+def get_llm_provider() -> LLMProvider | None:
     # A plain function dependency (not a class/singleton) so tests can swap
     # it via app.dependency_overrides for a FakeLLMProvider, the same
     # injection seam semantics/*.py's own tests use — just wired through
     # FastAPI's DI instead of a direct call argument, since this is invoked
     # from request handlers, not other application code.
-    return AnthropicProvider(api_key=settings.anthropic_api_key)  # type: ignore[arg-type]
+    # Most answer submissions are deterministic. Do not construct a paid
+    # provider merely because FastAPI resolves dependencies before the route
+    # knows the question type; credential-free MCQ, exact-match, and code-mode
+    # grading must keep working in CI and in a partially configured app.
+    if not settings.anthropic_api_key:
+        return None
+    return AnthropicProvider(api_key=settings.anthropic_api_key)
 
 
 class CreateAttemptIn(BaseModel):
@@ -242,7 +248,7 @@ async def submit_answer(
     body: AnswerIn,
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
-    llm: LLMProvider = Depends(get_llm_provider),
+    llm: LLMProvider | None = Depends(get_llm_provider),
 ) -> AnswerResultOut:
     attempt = await _owned_attempt_for_update(session, attempt_id, current_user)
     if attempt.status != AttemptStatus.in_progress:
@@ -282,7 +288,10 @@ async def submit_answer(
             raise HTTPException(422, "answer_text is required for a fill_blank question")
         if len(body.answer_text) > MAX_ANSWER_TEXT_CHARS:
             raise HTTPException(422, f"answer_text exceeds the {MAX_ANSWER_TEXT_CHARS}-character limit")
-        score, feedback = await grade_fill_blank(llm, question, body.answer_text)
+        try:
+            score, feedback = await grade_fill_blank(llm, question, body.answer_text)
+        except FillBlankLLMUnavailableError as exc:
+            raise HTTPException(503, "concept-mode grading is unavailable until an LLM provider is configured") from exc
 
     submission = existing or AnswerSubmission(attempt_id=attempt_id, question_id=question_id)
     submission.selected_index = body.selected_index

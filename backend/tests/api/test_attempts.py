@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from app.api.attempts import MAX_ANSWER_TEXT_CHARS, get_llm_provider
+from app.config import settings
 from app.db.models import (
     AnswerSubmission,
     Attempt,
@@ -67,7 +68,10 @@ async def test_create_attempt_404_for_another_users_quiz(pending_repo_factory) -
     assert response.status_code == 404
 
 
-async def test_submit_mcq_answer_grades_immediately(pending_repo_factory) -> None:
+async def test_submit_mcq_answer_grades_immediately_without_llm_credentials(
+    pending_repo_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "anthropic_api_key", None)
     with TestClient(app) as client:
         user = register_test_user(client)
         quiz_id, mcq_id, _fb_id = await _make_quiz_with_questions(pending_repo_factory, uuid.UUID(user["id"]))
@@ -82,20 +86,42 @@ async def test_submit_mcq_answer_grades_immediately(pending_repo_factory) -> Non
     assert body["correct_index"] == 1
 
 
-async def test_submit_fill_blank_exact_match_never_calls_llm(pending_repo_factory) -> None:
-    app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider([])
-    try:
-        with TestClient(app) as client:
-            user = register_test_user(client)
-            quiz_id, _mcq_id, fb_id = await _make_quiz_with_questions(pending_repo_factory, uuid.UUID(user["id"]))
-            attempt = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+async def test_submit_fill_blank_exact_match_never_calls_llm(
+    pending_repo_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "anthropic_api_key", None)
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        quiz_id, _mcq_id, fb_id = await _make_quiz_with_questions(pending_repo_factory, uuid.UUID(user["id"]))
+        attempt = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
 
-            response = client.patch(f"/attempts/{attempt['id']}/answers/{fb_id}", json={"answer_text": "arq"})
+        response = client.patch(f"/attempts/{attempt['id']}/answers/{fb_id}", json={"answer_text": "arq"})
 
-        assert response.status_code == 200
-        assert response.json()["score"] == 1.0
-    finally:
-        app.dependency_overrides.pop(get_llm_provider, None)
+    assert response.status_code == 200
+    assert response.json()["score"] == 1.0
+
+
+async def test_submit_fill_blank_concept_miss_returns_503_without_llm_credentials(
+    pending_repo_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "anthropic_api_key", None)
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        quiz_id, _mcq_id, fb_id = await _make_quiz_with_questions(pending_repo_factory, uuid.UUID(user["id"]))
+        async with async_session_factory() as session:
+            question = await session.get(Question, fb_id)
+            assert question is not None
+            question.fill_blank_mode = FillBlankMode.concept
+            session.add(question)
+            await session.commit()
+        attempt = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+
+        response = client.patch(
+            f"/attempts/{attempt['id']}/answers/{fb_id}", json={"answer_text": "some queueing thing"}
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "concept-mode grading is unavailable until an LLM provider is configured"
 
 
 async def test_submit_fill_blank_concept_mode_miss_uses_llm_judge(pending_repo_factory) -> None:

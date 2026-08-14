@@ -4,7 +4,11 @@ import pytest
 from pydantic import ValidationError
 
 from app.db.models import FillBlankMode, Question, QuestionType
-from app.quizzing.grading.fill_blank_grader import FillBlankGradeOutput, grade_fill_blank
+from app.quizzing.grading.fill_blank_grader import (
+    FillBlankGradeOutput,
+    FillBlankLLMUnavailableError,
+    grade_fill_blank,
+)
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 
 
@@ -44,6 +48,19 @@ async def test_grade_fill_blank_code_mode_miss_never_calls_llm() -> None:
     assert score == 0.0
     assert "arq" in feedback
     assert llm.calls == []
+
+
+async def test_grade_fill_blank_deterministic_paths_accept_no_provider() -> None:
+    exact_score, _ = await grade_fill_blank(None, _question(FillBlankMode.concept), "arq")
+    code_miss_score, _ = await grade_fill_blank(None, _question(FillBlankMode.code), "celery")
+
+    assert exact_score == 1.0
+    assert code_miss_score == 0.0
+
+
+async def test_grade_fill_blank_concept_miss_requires_provider() -> None:
+    with pytest.raises(FillBlankLLMUnavailableError):
+        await grade_fill_blank(None, _question(FillBlankMode.concept), "some background job thing")
 
 
 async def test_grade_fill_blank_concept_mode_miss_falls_back_to_llm_judge() -> None:

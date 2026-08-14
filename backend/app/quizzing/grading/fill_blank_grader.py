@@ -26,6 +26,10 @@ class FillBlankGradeOutput(BaseModel):
     feedback: str
 
 
+class FillBlankLLMUnavailableError(RuntimeError):
+    """Raised only when a concept-mode miss needs an unavailable LLM."""
+
+
 def _normalize(text: str) -> str:
     return " ".join(text.strip().casefold().split())
 
@@ -36,12 +40,15 @@ def _matches_answer_key(question: Question, answer_text: str) -> bool:
     return _normalize(answer_text) in candidates
 
 
-async def grade_fill_blank(llm: LLMProvider, question: Question, answer_text: str) -> tuple[float, str]:
+async def grade_fill_blank(llm: LLMProvider | None, question: Question, answer_text: str) -> tuple[float, str]:
     if _matches_answer_key(question, answer_text):
         return 1.0, "Correct."
 
     if question.fill_blank_mode == FillBlankMode.code:
         return 0.0, f'Incorrect. The expected answer was "{question.correct_answer}".'
+
+    if llm is None:
+        raise FillBlankLLMUnavailableError("concept-mode grading requires a configured LLM provider")
 
     template = load_prompt("fill_blank_concept_grader")
     input_text = template.render_input(
