@@ -6,9 +6,9 @@
 
 | | |
 |---|---|
-| **Status** | Historical design blueprint; Phases 0–2 have since been implemented |
-| **Version** | 2.1 |
-| **Last updated** | 2026-08-09 |
+| **Status** | Historical design blueprint; implementation is current through Phase 5, with Phases 5.5 and 8 added as future extensions |
+| **Version** | 2.3 |
+| **Last updated** | 2026-08-13 |
 | **Owner** | Solo builder (primary user + developer) |
 | **Intended reader** | Claude Code (as build context) + the builder |
 
@@ -728,6 +728,20 @@ GET    /attempts/{id}                  # attempt detail with per-question feedba
 - [ ] `QuizTaker.tsx`, `AttemptResults.tsx` frontend
 - [ ] **Checkpoint:** Generate a quiz from a real study guide, take it in the UI, get accurate scoring and feedback with working citations back to the study guide.
 
+### Phase 5.5 — UI Design Integration — 1-2 weeks
+
+**Scope:** Apply the interactive prototype and Organic design system in the checked-in [`Strata-Learn UI mockups.zip`](../../Strata-Learn%20UI%20mockups.zip) to the working Phase 4–5 React application before expanding the interaction surface with drawing questions. The archive is the visual reference; the real APIs, authorization rules, persisted state, and behavior documented in the UI spec remain canonical.
+
+- [ ] Extract the mockup's color, typography, spacing, radius, elevation, and interaction tokens into version-controlled frontend styles. Do not make the production app depend on loading assets from the zip at runtime.
+- [ ] Add the required font and icon dependencies deliberately, with local/system fallbacks and no silent dependency on the prototype's support script.
+- [ ] Refactor shared primitives and `AppLayout.tsx` so navigation, buttons, fields, cards, tags, dialogs, tables, and focus treatment consistently use the Organic system instead of page-specific approximations.
+- [ ] Implement the prototype treatment across login/register, signed-out, dashboard, add-repository, repository/indexing, study-guide, quiz, and results screens while preserving real loading, empty, failure, permission, and long-content behavior.
+- [ ] Resolve the design/behavior gaps tracked for runtime auth expiry, repository retry, result answer detail, previous-question navigation, retakes, feedback timing, and bounded quiz polling; do not reproduce prototype-only fake state where it conflicts with the application contract.
+- [ ] Make the result responsive enough for supported desktop and narrow layouts, and verify semantic headings, labels, contrast, reduced-motion behavior, keyboard navigation, and visible focus.
+- [ ] Add a frontend test runner and interaction coverage for the shared primitives and critical auth/repository/quiz flows before Phase 6 adds canvas state.
+- [ ] Capture visual-regression references for every route and major state at representative wide and narrow viewports. Document any intentional deviations from the mockup in the UI spec.
+- [ ] **Checkpoint:** Complete the real register/login → add repo → indexing → study guide → quiz → results flow using the integrated design, with automated frontend checks passing and a manual keyboard/responsive/visual comparison against the prototype.
+
 ### Phase 6 — Drawing Questions — 1-2 weeks (isolate, hardest phase)
 - [ ] `quizzing/drawing_generator.py`: implement prompt 9.6 + deterministic subgraph extraction
 - [ ] `DrawingCanvas.tsx`: tldraw integration constrained to box + labeled-arrow shapes only; export to `{nodes, edges}` JSON on submit
@@ -743,6 +757,26 @@ GET    /attempts/{id}                  # attempt detail with per-question feedba
 - [ ] **Checkpoint:** Re-index a repo after making a real code change, confirm the diff view accurately reflects what changed.
 - [ ] Work through the VPS migration checklist in §13
 - [ ] **Checkpoint:** Full flow works against the hosted instance over HTTPS with real auth cookies.
+
+### Phase 8 — Voice Learning (Read-Aloud + Spoken Quiz Answers) — 1-2 weeks
+
+**Scope:** Extend the existing text-first learning flows with a chained, request-based audio layer. The persisted study-guide text, citations, learner-confirmed transcript, and existing grading endpoints remain canonical; audio is an input/output convenience, not a parallel source of truth.
+
+- [ ] Record the audio architecture and retention decisions in an ADR: separate transcription and speech provider boundaries, hosted OpenAI services initially, no raw-audio persistence, and explicit cost/size limits.
+- [ ] Add `TranscriptionProvider` and `SpeechProvider` protocols plus deterministic fake implementations for automated tests. Keep these separate from the text-oriented `LLMProvider` interface.
+- [ ] Add environment-driven audio configuration (`OPENAI_API_KEY`, transcription model, speech model/voice, request-size and duration limits) without requiring OpenAI credentials for non-audio features.
+- [ ] **Read aloud:** add an authenticated, ownership-scoped API that accepts identifiers for persisted study-guide sections or quiz feedback and streams synthesized speech; do not expose an arbitrary paid text-to-speech proxy.
+- [ ] Add accessible read-aloud controls to `StudyGuideView.tsx` and quiz feedback/results: play, pause/stop, replay, loading, and failure states, with a clear disclosure that the voice is AI-generated.
+- [ ] **Spoken quiz answers:** add browser microphone capture via `MediaRecorder` for fill-in-the-blank questions and upload the completed recording to an authenticated transcription endpoint.
+- [ ] Validate microphone uploads before any provider call: allowlisted audio formats, bounded bytes and duration, ownership checks, rate/cost limiting, and clear unsupported-browser/permission-denied errors.
+- [ ] Return an editable transcript to the learner before submission. Only the confirmed text is sent through the existing `PATCH /attempts/{id}/answers/{qid}` path and persisted as `AnswerSubmission.answer_text`; never grade an unconfirmed transcript automatically.
+- [ ] Supply bounded repository/question vocabulary hints where supported to improve transcription of technical terms, while preserving manual correction for identifiers such as `snake_case`, filenames, and library names.
+- [ ] Do not persist raw microphone audio or generated speech in v1. Document the retention behavior and keep audio-provider calls observable without logging audio content or secrets.
+- [ ] Add backend tests with fake audio providers and frontend tests with mocked media/audio browser APIs. Automated tests must not make real, paid, or nondeterministic speech calls.
+- [ ] **Checkpoint — read aloud:** play a real generated study-guide section and quiz explanation in the browser, verify streaming/playback controls and the AI-voice disclosure, and confirm another user cannot request its audio.
+- [ ] **Checkpoint — spoken answer:** record both a concept answer and a technical identifier, edit the returned transcript, submit it through the existing quiz flow, and confirm grading/results contain only the learner-approved text.
+
+**Explicit non-goals for Phase 8:** realtime speech-to-speech sessions, interruption/barge-in, a conversational repository tutor, voice control for MCQ/drawing interactions, speaker diarization, self-hosted Whisper/model serving, and durable audio storage. These can be evaluated only after the two bounded workflows demonstrate real value.
 
 ---
 
@@ -789,10 +823,12 @@ Moving from Option A to B is deployment logistics, not a redesign — no ingesti
 | 3. Study guides | 1 week | ~6.5 weeks |
 | 4. Frontend shell | 1-2 weeks | ~8.5 weeks |
 | 5. Quizzes (MCQ/blank) | 1-2 weeks | ~10.5 weeks |
-| 6. Drawing questions | 1-2 weeks | ~12.5 weeks |
-| 7. Polish + VPS hosting | 1-2 weeks | ~14 weeks |
+| 5.5 UI design integration | 1-2 weeks | ~12 weeks |
+| 6. Drawing questions | 1-2 weeks | ~14 weeks |
+| 7. Polish + VPS hosting | 1-2 weeks | ~15.5 weeks |
+| 8. Voice learning | 1-2 weeks | ~17 weeks |
 
-~3-3.5 months solo, part-time-adjustable.
+~4 months solo, part-time-adjustable.
 
 ---
 

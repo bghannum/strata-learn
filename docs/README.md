@@ -11,6 +11,7 @@ This index identifies the canonical source for each kind of project information.
 | Branch, PR, CI, and review process | [Development workflow](development/workflow.md) | Current |
 | Architectural rationale | [Architecture decision records](adr/) | Current unless superseded |
 | Intended frontend experience | [UI/UX specification](design/ui-spec.md) | Planned |
+| Frontend visual reference | [`Strata-Learn UI mockups.zip`](../Strata-Learn%20UI%20mockups.zip) | Planned/reference |
 | Original vision and implementation sequence | [Original project plan](design/original-project-plan.md) | Historical/aspirational |
 | Resolved bugs and engineering lessons | [Resolved engineering issues](history/resolved-engineering-issues.md) | Historical |
 | Previous AI-review experiments | [AI review experiments](history/ai-review-experiments.md) | Historical |

@@ -1,10 +1,10 @@
 # Strata Learn — UI/UX Feature Spec
 
-> **Planned behavior.** This document specifies the intended Phase 4–6 user experience. It does not track implementation status; the current React files are placeholders. See [Current architecture](../architecture.md) for what exists now.
+> **Target behavior.** This document specifies the intended Phase 4–6 user experience. The functional Phase 4–5 baseline now exists; Phase 5.5 applies the checked-in visual design before drawing-question work begins. See [Current architecture](../architecture.md) for implemented behavior and the status matrix below for known gaps.
 
 | | |
 |---|---|
-| **Status** | Planned — ready for Phase 4 design/build |
+| **Status** | Target UX — Phase 4–5 baseline implemented; Phase 5.5 design integration next; Phase 6 not started |
 | **Related design** | [Original project plan](original-project-plan.md); this spec covers the Phase 4–6 frontend surface |
 | **Owner** | Solo builder |
 | **Intended reader** | Claude Design / Claude Code (frontend build) |
@@ -13,7 +13,7 @@
 
 ## 1. Problem
 
-The backend pipeline (ingest → Layer A → Layer B → generation → assessment) produces study guides and quizzes, but none of it is usable without a UI that lets the person: get a repo into the system, see whether/where the pipeline is stuck, read what got generated, and take/grade a quiz. This spec defines that surface.
+The backend pipeline (ingest → Layer A → Layer B → generation → assessment) needs a UI that lets the person get a repo into the system, see whether or where the pipeline is stuck, read what was generated, and take and grade a quiz. The functional baseline now exists. Phase 5.5 makes the interactive prototype in [`Strata-Learn UI mockups.zip`](../../Strata-Learn%20UI%20mockups.zip) the explicit visual reference for production design parity; this spec remains the behavioral reference for that integration and later drawing-question work.
 
 ## 2. Goals
 
@@ -55,6 +55,21 @@ Mapped to the component names from the original project plan — this spec elabo
 | `DrawingCanvas.tsx` | Phase 6 | tldraw-based box/arrow canvas for drawing questions (component, used within QuizTaker) |
 | `AttemptResults.tsx` | Phase 5 | Graded results + per-question feedback |
 | `RepoDetail.tsx` | Phase 4 addition | Container for a single repo's status, study guide link, and quiz history |
+
+---
+
+## 5.1 Implementation Status
+
+| Area | Current state | Remaining target work |
+|---|---|---|
+| Authentication and repository ingestion | Implemented through Phase 4b, including the single-account registration secret, Git URL/zip paths, client-side zip-size validation, and upload progress | Clear auth state after a runtime `401` ([#33](https://github.com/bghannum/strata-learn/issues/33)) |
+| Indexing progress and repository detail | Implemented with shared chip/stepper states, WebSocket updates, failure details, and a raw-analysis viewer | Re-index/retry the same repository instead of creating a new one ([#26](https://github.com/bghannum/strata-learn/issues/26)); bound dashboard WebSocket fan-out ([#27](https://github.com/bghannum/strata-learn/issues/27)) |
+| Study-guide reading | Implemented with section navigation, collapsible Markdown, Mermaid rendering, and a citation slide-over | Citations currently render as a per-section list because generated `claim_excerpt` values cannot always be anchored to a literal substring; precise inline markers remain a target, not an implemented claim |
+| Quiz generation and taking | Implemented through Phase 5 with MCQ/fill-in-the-blank questions, resumable attempts, immediate grading, citations, and refreshable results | Completed-result answer detail ([#34](https://github.com/bghannum/strata-learn/issues/34)), previous-question navigation ([#35](https://github.com/bghannum/strata-learn/issues/35)), retakes ([#36](https://github.com/bghannum/strata-learn/issues/36)), feedback timing ([#37](https://github.com/bghannum/strata-learn/issues/37)), and bounded/cancellable polling ([#38](https://github.com/bghannum/strata-learn/issues/38)) |
+| Visual design system | The current functional UI predates the checked-in Organic mockup | Phase 5.5 ports the mockup's tokens and interaction patterns into maintainable React/CSS, then verifies every existing screen, state, breakpoint, and keyboard path |
+| Drawing questions | Not implemented; `DrawingCanvas.tsx` is a stub and the generator/grader modules are empty | All Phase 6 work in §6.6 and the drawing-specific result treatment in §6.7 |
+
+This matrix is a concise reconciliation aid, not a second backlog. GitHub Issues remain canonical for actionable work, and [Current architecture](../architecture.md) remains canonical for implemented behavior.
 
 ---
 
@@ -152,9 +167,10 @@ Every data-bearing screen needs explicit design for: **loading**, **empty** (e.g
 
 ## 10. Phasing
 
-This spec's flows map directly onto the master plan's existing phases — no new phases needed:
+This spec's flows map directly onto the master plan's Phase 4–7 UI work. Phase 8 voice learning is scoped separately in the master plan and does not change these requirements:
 
-- **Phase 4:** §6.1, §6.2, §6.3 (minus staleness banner, which depends on Phase 7 diffing), §6.4's debug viewer
-- **Phase 5:** §6.5, §6.7 (MCQ/fill-blank only)
-- **Phase 6:** §6.6, plus the drawing-specific parts of §6.7
-- **Phase 7:** staleness banner (depends on diffing), any expansion of §6.4 if the debug viewer proves insufficient
+- **Phase 4 — baseline implemented:** §6.1, §6.2, §6.3 (minus staleness and the known citation/retry gaps), and §6.4's debug viewer
+- **Phase 5 — baseline implemented:** §6.5 and §6.7 for MCQ/fill-blank, with the known gaps linked in §5.1
+- **Phase 5.5 — next:** apply the checked-in mockup's Organic visual system and screen treatments to the real Phase 4–5 flows; resolve the linked design-parity gaps; verify responsive, loading, empty, error, disabled, hover, pressed, and keyboard-focus states
+- **Phase 6 — not started:** §6.6, plus the drawing-specific parts of §6.7
+- **Phase 7 — planned:** staleness banner (depends on diffing), any expansion of §6.4 if the debug viewer proves insufficient
