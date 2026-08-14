@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import type { Citation } from '../api/client'
+import { buttonClasses } from './ui/buttonVariants'
+import Tag from './ui/Tag'
 
 interface CitationPanelProps {
   citation: Citation | null
@@ -19,42 +21,45 @@ function CitationPanel({ citation, onClose }: CitationPanelProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
+      {/* tabIndex={-1} — found via #48 (the identical bug fixed in
+      AppLayout.tsx's account-menu backdrop, Codex's PR #47 review): without
+      it, a keyboard user opening this panel and pressing Tab lands on this
+      full-screen, visually empty target instead of "Close". */}
       <button
         type="button"
+        tabIndex={-1}
         aria-label="Close citation panel"
-        className="absolute inset-0 bg-black/30"
+        className="absolute inset-0 bg-organic-neutral-900/45"
         onClick={onClose}
       />
-      <div className="relative flex h-full w-full max-w-lg flex-col overflow-auto bg-white p-6 shadow-xl dark:bg-gray-900">
-        <button
-          type="button"
-          onClick={onClose}
-          className="self-end text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-        >
-          Close
-        </button>
-
-        <div className="mt-2 flex items-center justify-between gap-2">
-          <p className="font-mono text-sm text-gray-900 dark:text-gray-100">
-            {citation.file_path}:{citation.line_start}-{citation.line_end}
-          </p>
+      <aside className="relative flex h-full w-full max-w-lg flex-col overflow-auto bg-organic-bg p-7 shadow-organic-lg">
+        <div className="mb-4.5 flex items-center gap-2.5">
+          <Tag variant="accent">Citation</Tag>
           <button
             type="button"
-            onClick={handleCopyPath}
-            className="shrink-0 rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800"
+            onClick={onClose}
+            aria-label="Close"
+            className="ml-auto cursor-pointer border-0 bg-transparent text-lg opacity-60 hover:opacity-100"
           >
-            {copied ? 'Copied!' : 'Copy path'}
+            ×
           </button>
         </div>
 
-        <p className="mt-3 text-sm text-gray-600 dark:text-gray-400">{citation.claim_excerpt}</p>
+        <h3 className="mb-1 font-mono text-base font-normal">{citation.file_path}</h3>
+        <p className="mb-4 text-xs opacity-60">
+          Lines {citation.line_start}–{citation.line_end}
+        </p>
 
-        {/* No syntax-highlighting library added this phase — plain monospace
-        text, a deliberate v1 simplification (see the phase plan). */}
-        <pre className="mt-4 overflow-auto rounded-md bg-gray-900 p-3 text-xs text-gray-100">
+        <pre className="mb-4.5 overflow-auto rounded-2xl bg-organic-neutral-900 p-4 text-xs leading-relaxed text-organic-neutral-200">
           {citation.snippet_text}
         </pre>
-      </div>
+
+        <p className="mb-4.5 text-sm leading-relaxed">{citation.claim_excerpt}</p>
+
+        <button type="button" onClick={handleCopyPath} className={buttonClasses('secondary')}>
+          {copied ? 'Copied!' : 'Copy path'}
+        </button>
+      </aside>
     </div>
   )
 }
