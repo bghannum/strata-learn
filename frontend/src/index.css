@@ -2,10 +2,42 @@
 @import "./styles/organic.css";
 @plugin "@tailwindcss/typography";
 
+/* Dropping dark mode entirely (Phase 5.5, confirmed with the user — Organic
+ * ships no dark tokens at all). Tailwind's default `dark:` variant follows
+ * `prefers-color-scheme` regardless of this page's own `color-scheme`
+ * property (that only controls native form-control/scrollbar rendering,
+ * not CSS media-query matching) — so a still-unported screen's `dark:`
+ * classes kept winning against the new organic-bg background on an
+ * OS-dark-mode browser, going illegible rather than just unstyled. This
+ * redefines `dark:` to require a literal `.dark` ancestor class, which
+ * nothing in the app ever adds, neutralizing every `dark:` utility
+ * app-wide immediately rather than waiting for each screen's own PR to
+ * strip them one at a time. Remove this once no screen has any `dark:`
+ * classes left (tracked by the Phase 5.5 screen-port sequence). */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
-  color-scheme: light dark;
+  /* Organic is light-only (confirmed with the user, Phase 5.5) — forcing
+   * this rather than `light dark` stops the browser from painting
+   * scrollbars/native form-control chrome in dark UI while page content
+   * stays forced light. */
+  color-scheme: light;
 }
 
 body {
   margin: 0;
+  background: var(--color-organic-bg);
+  color: var(--color-organic-text);
+  font-family: var(--font-organic-body);
+}
+
+:focus {
+  outline: none;
+}
+:focus-visible {
+  outline: 2px solid var(--color-organic-accent);
+  outline-offset: 2px;
+}
+::selection {
+  background: color-mix(in srgb, var(--color-organic-accent) 30%, transparent);
 }
