@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   ApiError,
@@ -7,6 +7,7 @@ import {
   getRepoQuiz,
   getRepoStudyGuide,
   getSnapshot,
+  isAbortError,
   pollQuiz,
   useIndexingProgress,
   type AnalysisSnapshot,
@@ -64,28 +65,51 @@ function RepoDetail() {
   // second tab, or navigating away and back — without this, the page would
   // only ever offer "Generate Quiz" again, enqueuing a second paid job on
   // top of one that may already be running or done.
+  //
+  // The AbortController stops pollQuiz's timer chain on unmount/re-run (#38)
+  // — without it, navigating away mid-poll left the recursive setTimeout
+  // running and calling setState on an unmounted component.
   useEffect(() => {
     if (!guide || !repoId) return
+    const controller = new AbortController()
     getRepoQuiz(repoId)
-      .then((found) => (found.status === 'generating' ? pollQuiz(found.id) : found))
+      .then((found) => (found.status === 'generating' ? pollQuiz(found.id, { signal: controller.signal }) : found))
       .then(setQuiz)
       .catch((err) => {
+        if (isAbortError(err)) return
         if (!(err instanceof ApiError && err.status === 404)) {
           setQuizError(err instanceof ApiError ? err.message : 'Could not check for an existing quiz.')
         }
       })
-      .finally(() => setQuizChecked(true))
+      .finally(() => {
+        if (!controller.signal.aborted) setQuizChecked(true)
+      })
+    return () => controller.abort()
   }, [guide, repoId])
+
+  // Tracks the in-flight poll so unmount can abort it (see the effect above
+  // for why this matters).
+  const pollControllerRef = useRef<AbortController | null>(null)
+  useEffect(() => {
+    return () => pollControllerRef.current?.abort()
+  }, [])
 
   function handleGenerateQuiz() {
     if (!repoId) return
     setQuizPending(true)
     setQuizError(null)
+    const controller = new AbortController()
+    pollControllerRef.current = controller
     generateQuiz(repoId)
-      .then((created) => pollQuiz(created.id))
+      .then((created) => pollQuiz(created.id, { signal: controller.signal }))
       .then(setQuiz)
-      .catch((err) => setQuizError(err instanceof ApiError ? err.message : 'Could not generate a quiz.'))
-      .finally(() => setQuizPending(false))
+      .catch((err) => {
+        if (isAbortError(err)) return
+        setQuizError(err instanceof ApiError ? err.message : 'Could not generate a quiz.')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setQuizPending(false)
+      })
   }
 
   if (!loaded) {
