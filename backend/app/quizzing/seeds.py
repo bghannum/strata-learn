@@ -5,10 +5,12 @@ importing the orchestrator that calls them.
 """
 
 from dataclasses import dataclass
+from uuid import UUID
 
 
 @dataclass(frozen=True)
 class QuestionSeed:
+    citation_id: UUID
     claim_excerpt: str
     snippet_text: str
     file_path: str

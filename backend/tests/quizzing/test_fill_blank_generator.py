@@ -1,3 +1,5 @@
+import uuid
+
 from app.quizzing.fill_blank_generator import FillBlankOutput, generate_fill_blank_questions
 from app.quizzing.seeds import QuestionSeed
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
@@ -5,6 +7,7 @@ from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 
 def _seed() -> QuestionSeed:
     return QuestionSeed(
+        citation_id=uuid.uuid4(),
         claim_excerpt="uses arq for background jobs", snippet_text="import arq",
         file_path="app/worker.py", line_start=1, line_end=5,
     )

@@ -4,6 +4,7 @@ import {
   ApiError,
   completeAttempt,
   createAttempt,
+  getAttempt,
   getQuiz,
   submitAnswer,
   type AnswerResult,
@@ -29,15 +30,34 @@ function QuizTaker() {
 
   useEffect(() => {
     if (!quizId) return
+    let fetchedQuiz: Quiz
+
     getQuiz(quizId)
-      .then((fetchedQuiz) => {
-        setQuiz(fetchedQuiz)
-        if (fetchedQuiz.status !== 'ready') {
+      .then((quiz) => {
+        fetchedQuiz = quiz
+        setQuiz(quiz)
+        if (quiz.status !== 'ready') {
           throw new Error('This quiz is not ready yet.')
         }
-        return createAttempt(fetchedQuiz.id)
+        return createAttempt(quiz.id)
       })
-      .then(setAttempt)
+      .then((createdAttempt) => {
+        setAttempt(createdAttempt)
+        return getAttempt(createdAttempt.id)
+      })
+      .then((results) => {
+        // createAttempt is idempotent per (user, quiz) — a reload, a second
+        // tab, or React StrictMode's double mount-effect invocation can all
+        // resume the same in-progress attempt rather than starting a fresh
+        // one. Skip past whatever's already been graded so a resume doesn't
+        // re-ask (and doesn't lose) already-answered questions.
+        const answeredIds = new Set(results.questions.filter((q) => q.score !== null).map((q) => q.question_id))
+        let resumeIndex = 0
+        while (resumeIndex < fetchedQuiz.questions.length && answeredIds.has(fetchedQuiz.questions[resumeIndex].id)) {
+          resumeIndex += 1
+        }
+        setIndex(Math.min(resumeIndex, fetchedQuiz.questions.length - 1))
+      })
       .catch((err) => setError(err instanceof ApiError ? err.message : (err as Error).message || 'Could not start this quiz.'))
       .finally(() => setLoading(false))
   }, [quizId])

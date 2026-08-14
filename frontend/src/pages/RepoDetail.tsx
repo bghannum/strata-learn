@@ -4,6 +4,7 @@ import {
   ApiError,
   generateQuiz,
   getRepo,
+  getRepoQuiz,
   getRepoStudyGuide,
   getSnapshot,
   pollQuiz,
@@ -30,6 +31,7 @@ function RepoDetail() {
   const [guide, setGuide] = useState<StudyGuide | null>(null)
   const [guideError, setGuideError] = useState<string | null>(null)
   const [quiz, setQuiz] = useState<Quiz | null>(null)
+  const [quizChecked, setQuizChecked] = useState(false)
   const [quizPending, setQuizPending] = useState(false)
   const [quizError, setQuizError] = useState<string | null>(null)
 
@@ -57,6 +59,23 @@ function RepoDetail() {
       .then(setGuide)
       .catch((err) => setGuideError(err instanceof ApiError ? err.message : 'Could not load the study guide.'))
   }, [status, repoId])
+
+  // Recovers an already-enqueued or already-ready quiz after a reload, a
+  // second tab, or navigating away and back — without this, the page would
+  // only ever offer "Generate Quiz" again, enqueuing a second paid job on
+  // top of one that may already be running or done.
+  useEffect(() => {
+    if (!guide || !repoId) return
+    getRepoQuiz(repoId)
+      .then((found) => (found.status === 'generating' ? pollQuiz(found.id) : found))
+      .then(setQuiz)
+      .catch((err) => {
+        if (!(err instanceof ApiError && err.status === 404)) {
+          setQuizError(err instanceof ApiError ? err.message : 'Could not check for an existing quiz.')
+        }
+      })
+      .finally(() => setQuizChecked(true))
+  }, [guide, repoId])
 
   function handleGenerateQuiz() {
     if (!repoId) return
@@ -120,7 +139,7 @@ function RepoDetail() {
             </p>
           )}
 
-          {guide && !quiz && (
+          {guide && quizChecked && !quiz && (
             <button
               type="button"
               onClick={handleGenerateQuiz}

@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import Enum
 
-from sqlalchemy import JSON, Column, DateTime, ForeignKey
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy import Enum as SAEnum
 from sqlmodel import Field, SQLModel
 
@@ -278,6 +278,14 @@ class Question(SQLModel, table=True):
     file_path: str
     line_start: int
     line_end: int
+    # The seed Citation's own id, not just its file_path/line range copied
+    # above — a range alone can't be traced back to one specific Citation
+    # row when the same range is cited by more than one Section (e.g. a
+    # glossary entry and a deep-dive paragraph over the same lines), so
+    # AttemptResults couldn't otherwise show a real, working citation back
+    # to the study guide (found via the Phase 5 Codex review). Nullable
+    # because a citation can in principle be deleted independently.
+    source_citation_id: uuid.UUID | None = Field(default=None, foreign_key="citation.id", index=True)
     prompt_version: str
     model: str
     created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
@@ -300,6 +308,12 @@ class Attempt(SQLModel, table=True):
 
 
 class AnswerSubmission(SQLModel, table=True):
+    # A DB-level guarantee, not just app-level care in api/attempts.py's
+    # row-locking (belt-and-suspenders against two concurrent PATCHes for
+    # the same question racing past the same-session upsert check — found
+    # via the Phase 5 Codex review).
+    __table_args__ = (UniqueConstraint("attempt_id", "question_id", name="uq_answersubmission_attempt_question"),)
+
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     attempt_id: uuid.UUID = Field(foreign_key="attempt.id", index=True)
     question_id: uuid.UUID = Field(foreign_key="question.id", index=True)

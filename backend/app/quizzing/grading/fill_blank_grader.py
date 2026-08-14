@@ -6,6 +6,8 @@ implementation or it doesn't, there's no "conceptually equivalent" variable
 name.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 from app.db.models import FillBlankMode, Question
@@ -14,7 +16,13 @@ from app.semantics.prompts import load_prompt
 
 
 class FillBlankGradeOutput(BaseModel):
-    score: float
+    # Literal, not a bare float — §10.2's rubric only defines 0.0/0.5/1.0.
+    # This constrains the model's structured-output schema itself (Anthropic
+    # enforces it at generation time, not just after the fact), so an
+    # in-range-but-off-rubric value like 0.7 can't reach Attempt.score's
+    # average in the first place (found via the Phase 5 Codex review — a
+    # plain float with a post-hoc [0,1] clamp let 0.7 straight through).
+    score: Literal[0.0, 0.5, 1.0]
     feedback: str
 
 
@@ -48,12 +56,4 @@ async def grade_fill_blank(llm: LLMProvider, question: Question, answer_text: st
     )
     output = response.parsed
     assert isinstance(output, FillBlankGradeOutput)
-
-    # Clamp — the prompt asks for exactly 0.0/0.5/1.0, but nothing stops a
-    # model from returning e.g. 0.7; a score outside the documented range
-    # would silently corrupt Attempt.score's average (generation.py never
-    # validates LLM-judge output the way mcq_generator/fill_blank_generator
-    # validate their own, since there's no "drop the result" option once a
-    # student is waiting on feedback for the answer they just submitted).
-    score = max(0.0, min(1.0, output.score))
-    return score, output.feedback
+    return output.score, output.feedback

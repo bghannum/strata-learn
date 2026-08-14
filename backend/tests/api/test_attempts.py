@@ -5,13 +5,19 @@ import uuid
 
 from fastapi.testclient import TestClient
 
-from app.api.attempts import get_llm_provider
+from sqlmodel import select
+
+from app.api.attempts import MAX_ANSWER_TEXT_CHARS, get_llm_provider
 from app.db.models import (
+    AnswerSubmission,
+    Citation,
     FillBlankMode,
     Question,
     QuestionType,
     Quiz,
     QuizStatus,
+    Section,
+    SectionType,
     SourceType,
     StudyGuide,
 )
@@ -188,3 +194,124 @@ async def test_get_attempt_reflects_completed_state(pending_repo_factory) -> Non
     body = response.json()
     assert body["status"] == "completed"
     assert body["score"] == 0.5
+
+
+async def test_create_attempt_is_idempotent_for_in_progress_attempt(pending_repo_factory) -> None:
+    # StrictMode's double mount-effect invocation, a reload, or a second tab
+    # must all resume the same attempt rather than minting a fresh one and
+    # orphaning whatever was already answered (Phase 5 Codex review).
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        quiz_id, _mcq_id, _fb_id = await _make_quiz_with_questions(pending_repo_factory, uuid.UUID(user["id"]))
+
+        first = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+        second = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+
+    assert first["id"] == second["id"]
+
+
+async def test_create_attempt_starts_a_new_one_after_completion(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        quiz_id, mcq_id, _fb_id = await _make_quiz_with_questions(pending_repo_factory, uuid.UUID(user["id"]))
+
+        first = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+        client.patch(f"/attempts/{first['id']}/answers/{mcq_id}", json={"selected_index": 1})
+        client.post(f"/attempts/{first['id']}/complete")
+
+        second = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+
+    assert second["id"] != first["id"]
+    assert second["status"] == "in_progress"
+
+
+async def test_submit_answer_rejects_oversized_answer_text(pending_repo_factory) -> None:
+    app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider([])  # would raise if called
+    try:
+        with TestClient(app) as client:
+            user = register_test_user(client)
+            quiz_id, _mcq_id, fb_id = await _make_quiz_with_questions(pending_repo_factory, uuid.UUID(user["id"]))
+            attempt = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+
+            response = client.patch(
+                f"/attempts/{attempt['id']}/answers/{fb_id}",
+                json={"answer_text": "x" * (MAX_ANSWER_TEXT_CHARS + 1)},
+            )
+
+        assert response.status_code == 422
+    finally:
+        app.dependency_overrides.pop(get_llm_provider, None)
+
+
+async def test_submit_answer_upsert_does_not_duplicate_row(pending_repo_factory) -> None:
+    # Two PATCHes for the same question (a resubmit, or — outside this
+    # single-threaded test — a genuine race) must leave exactly one
+    # AnswerSubmission row: the unique constraint plus the attempt-row lock
+    # in _owned_attempt_for_update together guarantee this (Phase 5 Codex
+    # review).
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        quiz_id, mcq_id, _fb_id = await _make_quiz_with_questions(pending_repo_factory, uuid.UUID(user["id"]))
+        attempt = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+
+        client.patch(f"/attempts/{attempt['id']}/answers/{mcq_id}", json={"selected_index": 0})
+        client.patch(f"/attempts/{attempt['id']}/answers/{mcq_id}", json={"selected_index": 1})
+
+        async with async_session_factory() as session:
+            rows = list(
+                (
+                    await session.exec(
+                        select(AnswerSubmission).where(
+                            AnswerSubmission.attempt_id == uuid.UUID(attempt["id"]),
+                            AnswerSubmission.question_id == mcq_id,
+                        )
+                    )
+                ).all()
+            )
+
+    assert len(rows) == 1
+    assert rows[0].selected_index == 1  # the later submission won
+
+
+async def test_complete_results_include_working_citation(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=uuid.UUID(user["id"])
+        )
+        async with async_session_factory() as session:
+            guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=1)
+            session.add(guide)
+            await session.flush()
+            section = Section(
+                study_guide_id=guide.id, section_type=SectionType.deep_dive, title="Deep Dives", order=0, content_md="x"
+            )
+            session.add(section)
+            await session.flush()
+            citation = Citation(
+                section_id=section.id, file_path="app.py", line_start=1, line_end=2,
+                claim_excerpt="the real claim", snippet_text="import arq",
+            )
+            session.add(citation)
+            await session.flush()
+            quiz = Quiz(repo_id=repo_id, study_guide_id=guide.id, status=QuizStatus.ready)
+            session.add(quiz)
+            await session.flush()
+            question = Question(
+                quiz_id=quiz.id, question_type=QuestionType.mcq, order=0, prompt="q1",
+                choices=["a", "b"], correct_index=0, explanation="e",
+                file_path="app.py", line_start=1, line_end=2, source_citation_id=citation.id,
+                prompt_version="v1", model="fake-model",
+            )
+            session.add(question)
+            await session.commit()
+            quiz_id, question_id = quiz.id, question.id
+
+        attempt = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+        client.patch(f"/attempts/{attempt['id']}/answers/{question_id}", json={"selected_index": 0})
+        response = client.post(f"/attempts/{attempt['id']}/complete")
+
+    assert response.status_code == 200
+    result_question = response.json()["questions"][0]
+    assert result_question["citation_claim_excerpt"] == "the real claim"
+    assert result_question["citation_snippet_text"] == "import arq"

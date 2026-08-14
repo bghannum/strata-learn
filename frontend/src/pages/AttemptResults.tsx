@@ -79,9 +79,21 @@ function AttemptResultsPage() {
               <p className="mt-2 text-sm text-gray-400 dark:text-gray-500">Not answered</p>
             )}
 
-            <p className="mt-2 font-mono text-xs text-gray-400 dark:text-gray-500">
-              {question.file_path}:{question.line_start}-{question.line_end}
-            </p>
+            <details className="mt-3 rounded-md border border-gray-200 dark:border-gray-700">
+              <summary className="cursor-pointer px-3 py-2 font-mono text-xs text-gray-500 dark:text-gray-400">
+                {question.file_path}:{question.line_start}-{question.line_end}
+              </summary>
+              <div className="border-t border-gray-200 px-3 py-2 dark:border-gray-700">
+                {question.citation_claim_excerpt && (
+                  <p className="text-sm text-gray-700 dark:text-gray-300">{question.citation_claim_excerpt}</p>
+                )}
+                {question.citation_snippet_text && (
+                  <pre className="mt-2 overflow-auto rounded-md bg-gray-900 p-3 text-xs text-gray-100">
+                    {question.citation_snippet_text}
+                  </pre>
+                )}
+              </div>
+            </details>
           </div>
         ))}
       </div>

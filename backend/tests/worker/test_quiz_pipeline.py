@@ -72,6 +72,15 @@ async def _make_study_guide_with_two_citations(pending_repo_factory) -> tuple[uu
         return repo_id, guide.id
 
 
+async def _make_study_guide_with_no_citations(pending_repo_factory) -> tuple[uuid.UUID, uuid.UUID]:
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, "https://example.com/repo.git")
+    async with async_session_factory() as session:
+        guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=1)
+        session.add(guide)
+        await session.commit()
+        return repo_id, guide.id
+
+
 async def _make_pending_quiz(repo_id: uuid.UUID, study_guide_id: uuid.UUID, status=QuizStatus.generating) -> uuid.UUID:
     async with async_session_factory() as session:
         quiz = Quiz(repo_id=repo_id, study_guide_id=study_guide_id, status=status)
@@ -98,6 +107,26 @@ async def test_generate_quiz_success_persists_questions_and_marks_ready(pending_
         questions = list((await session.exec(select(Question).where(Question.quiz_id == quiz_id))).all())
     assert len(questions) == 2
     assert {q.question_type.value for q in questions} == {"mcq", "fill_blank"}
+    # Each question keeps a working link back to the Citation it was
+    # generated from, not just a copied file_path/line range (Phase 5
+    # Codex review — a range alone can't be traced to one Citation row
+    # when the same range is cited by more than one Section).
+    assert all(q.source_citation_id is not None for q in questions)
+
+
+async def test_generate_quiz_with_no_citations_marks_failed(pending_repo_factory) -> None:
+    # A guide too thin to seed any questions from must not end up `ready`
+    # with zero questions — QuizTaker indexes straight into questions[0]
+    # (Phase 5 Codex review).
+    repo_id, guide_id = await _make_study_guide_with_no_citations(pending_repo_factory)
+    quiz_id = await _make_pending_quiz(repo_id, guide_id)
+
+    with pytest.raises(RuntimeError, match="no usable questions"):
+        await generate_quiz({}, quiz_id=quiz_id, study_guide_id=guide_id, llm=FakeLLMProvider([]))
+
+    async with async_session_factory() as session:
+        quiz = await session.get(Quiz, quiz_id)
+        assert quiz.status == QuizStatus.failed
 
 
 async def test_generate_quiz_short_circuits_when_already_ready(pending_repo_factory) -> None:

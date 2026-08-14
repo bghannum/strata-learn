@@ -1,5 +1,8 @@
 import uuid
 
+import pytest
+from pydantic import ValidationError
+
 from app.db.models import FillBlankMode, Question, QuestionType
 from app.quizzing.grading.fill_blank_grader import FillBlankGradeOutput, grade_fill_blank
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
@@ -59,12 +62,11 @@ async def test_grade_fill_blank_concept_mode_miss_falls_back_to_llm_judge() -> N
     assert "some background job thing" in call_input
 
 
-async def test_grade_fill_blank_clamps_out_of_range_llm_score() -> None:
-    llm = FakeLLMProvider(
-        [LLMResponse(text="", parsed=FillBlankGradeOutput(score=1.7, feedback="overconfident"), model="fake-model", stop_reason="end_turn", usage={})]
-    )
-    question = _question(FillBlankMode.concept)
-
-    score, _ = await grade_fill_blank(llm, question, "totally different answer")
-
-    assert score == 1.0
+def test_fill_blank_grade_output_rejects_off_rubric_score() -> None:
+    # §10.2's rubric only defines 0.0/0.5/1.0 — Literal makes this a schema
+    # constraint the LLM provider enforces at generation time, not just a
+    # post-hoc clamp (found via the Phase 5 Codex review: a plain float with
+    # a [0,1] clamp let an in-range-but-off-rubric value like 0.7 through
+    # unchanged).
+    with pytest.raises(ValidationError):
+        FillBlankGradeOutput(score=0.7, feedback="approximately right")

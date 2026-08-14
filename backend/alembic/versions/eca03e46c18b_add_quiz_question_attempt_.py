@@ -1,8 +1,8 @@
 """add quiz question attempt answersubmission tables
 
-Revision ID: 3e61848b73c1
+Revision ID: eca03e46c18b
 Revises: 38410b743b56
-Create Date: 2026-08-13 16:44:08.200084
+Create Date: 2026-08-13 18:32:28.593288
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ import sqlmodel
 
 
 # revision identifiers, used by Alembic.
-revision: str = '3e61848b73c1'
+revision: str = 'eca03e46c18b'
 down_revision: Union[str, Sequence[str], None] = '38410b743b56'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -63,13 +63,16 @@ def upgrade() -> None:
     sa.Column('file_path', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('line_start', sa.Integer(), nullable=False),
     sa.Column('line_end', sa.Integer(), nullable=False),
+    sa.Column('source_citation_id', sa.Uuid(), nullable=True),
     sa.Column('prompt_version', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('model', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.ForeignKeyConstraint(['quiz_id'], ['quiz.id'], ),
+    sa.ForeignKeyConstraint(['source_citation_id'], ['citation.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_question_quiz_id'), 'question', ['quiz_id'], unique=False)
+    op.create_index(op.f('ix_question_source_citation_id'), 'question', ['source_citation_id'], unique=False)
     op.create_table('answersubmission',
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('attempt_id', sa.Uuid(), nullable=False),
@@ -81,7 +84,8 @@ def upgrade() -> None:
     sa.Column('submitted_at', sa.DateTime(timezone=True), nullable=False),
     sa.ForeignKeyConstraint(['attempt_id'], ['attempt.id'], ),
     sa.ForeignKeyConstraint(['question_id'], ['question.id'], ),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('attempt_id', 'question_id', name='uq_answersubmission_attempt_question')
     )
     op.create_index(op.f('ix_answersubmission_attempt_id'), 'answersubmission', ['attempt_id'], unique=False)
     op.create_index(op.f('ix_answersubmission_question_id'), 'answersubmission', ['question_id'], unique=False)
@@ -94,6 +98,7 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_answersubmission_question_id'), table_name='answersubmission')
     op.drop_index(op.f('ix_answersubmission_attempt_id'), table_name='answersubmission')
     op.drop_table('answersubmission')
+    op.drop_index(op.f('ix_question_source_citation_id'), table_name='question')
     op.drop_index(op.f('ix_question_quiz_id'), table_name='question')
     op.drop_table('question')
     op.drop_index(op.f('ix_attempt_user_id'), table_name='attempt')

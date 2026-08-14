@@ -75,6 +75,7 @@ def identify_question_seeds(
     )
     return [
         QuestionSeed(
+            citation_id=c.id,
             claim_excerpt=c.claim_excerpt,
             snippet_text=c.snippet_text,
             file_path=c.file_path,
@@ -137,6 +138,17 @@ async def run_quiz_generation(llm: LLMProvider, quiz_id: UUID, study_guide_id: U
     combined: list[MCQResult | FillBlankResult] = [*mcq_results, *fill_blank_results]
     combined.sort(key=lambda r: (r.seed.file_path, r.seed.line_start))
 
+    if not combined:
+        # No usable citations (a guide too thin to seed any questions from),
+        # or every generated result failed its own generator's validation
+        # (mcq_generator.py's correct_index check, fill_blank_generator.py's
+        # blank-marker check). Marking `ready` with zero questions would let
+        # the client poll into a "successful" quiz QuizTaker can't render —
+        # it indexes straight into questions[0] (found via the Phase 5 Codex
+        # review). Raising here routes through quiz_pipeline.py's normal
+        # except-Exception handler, which marks the quiz `failed` instead.
+        raise RuntimeError("quiz generation produced no usable questions")
+
     async with async_session_factory() as session:
         # arq is at-least-once — a redelivered generate job must not
         # duplicate every question on top of a prior attempt's rows. Same
@@ -156,6 +168,7 @@ async def run_quiz_generation(llm: LLMProvider, quiz_id: UUID, study_guide_id: U
                     file_path=result.seed.file_path,
                     line_start=result.seed.line_start,
                     line_end=result.seed.line_end,
+                    source_citation_id=result.seed.citation_id,
                     prompt_version=result.prompt_version,
                     model=result.model,
                 )
@@ -171,6 +184,7 @@ async def run_quiz_generation(llm: LLMProvider, quiz_id: UUID, study_guide_id: U
                     file_path=result.seed.file_path,
                     line_start=result.seed.line_start,
                     line_end=result.seed.line_end,
+                    source_citation_id=result.seed.citation_id,
                     prompt_version=result.prompt_version,
                     model=result.model,
                 )

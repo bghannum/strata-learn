@@ -21,6 +21,7 @@ from app.db.models import (
     AnswerSubmission,
     Attempt,
     AttemptStatus,
+    Citation,
     Question,
     QuestionType,
     Quiz,
@@ -33,6 +34,13 @@ from app.quizzing.grading.mcq_grader import grade_mcq
 from app.semantics.llm_provider import AnthropicProvider, LLMProvider
 
 router = APIRouter(prefix="/attempts", tags=["attempts"])
+
+# Bounds the text handed to grade_fill_blank's LLM-judge fallback — an
+# unbounded answer_text is stored as-is and interpolated directly into a
+# paid Anthropic call; a pasted or crafted oversized answer would inflate
+# billed input tokens for no grading benefit (found via the Phase 5 Codex
+# review). Generous for a genuine one-word-to-one-sentence fill-blank answer.
+MAX_ANSWER_TEXT_CHARS = 2000
 
 
 def get_llm_provider() -> LLMProvider:
@@ -77,6 +85,13 @@ class QuestionResultOut(BaseModel):
     file_path: str
     line_start: int
     line_end: int
+    # The actual cited claim/snippet from the study guide's own Citation row
+    # this question was generated from — a bare file_path:line_start-line_end
+    # is a path, not a *working* citation back to the study guide's evidence
+    # (found via the Phase 5 Codex review; ui-spec.md §6.7 asks for exactly
+    # this link). Null only if the source Citation has since been deleted.
+    citation_claim_excerpt: str | None
+    citation_snippet_text: str | None
 
 
 class AttemptResultsOut(BaseModel):
@@ -94,6 +109,23 @@ async def _owned_attempt(session: AsyncSession, attempt_id: UUID, current_user: 
     return attempt
 
 
+async def _owned_attempt_for_update(session: AsyncSession, attempt_id: UUID, current_user: User) -> Attempt:
+    """Like _owned_attempt, but locks the row (`SELECT ... FOR UPDATE`) for
+    the rest of this transaction. submit_answer and complete_attempt both use
+    this — without it, a slow concept-mode grading call in one request and a
+    concurrent call to the other endpoint can both read `in_progress` before
+    either commits, so an answer can land after completion and be silently
+    excluded from the already-computed score (found via the Phase 5 Codex
+    review). The lock makes the two endpoints serialize on a given attempt
+    rather than race; unrelated attempts are unaffected."""
+    attempt = (
+        await session.exec(select(Attempt).where(Attempt.id == attempt_id).with_for_update())
+    ).first()
+    if attempt is None or attempt.user_id != current_user.id:
+        raise HTTPException(404, "attempt not found")
+    return attempt
+
+
 async def _build_results(session: AsyncSession, attempt: Attempt) -> AttemptResultsOut:
     questions = list(
         (await session.exec(select(Question).where(Question.quiz_id == attempt.quiz_id).order_by(Question.order))).all()
@@ -102,6 +134,12 @@ async def _build_results(session: AsyncSession, attempt: Attempt) -> AttemptResu
         (await session.exec(select(AnswerSubmission).where(AnswerSubmission.attempt_id == attempt.id))).all()
     )
     submission_by_question = {s.question_id: s for s in submissions}
+
+    citation_ids = [q.source_citation_id for q in questions if q.source_citation_id is not None]
+    citation_by_id: dict[UUID, Citation] = {}
+    if citation_ids:
+        citations = (await session.exec(select(Citation).where(Citation.id.in_(citation_ids)))).all()
+        citation_by_id = {c.id: c for c in citations}
 
     return AttemptResultsOut(
         id=attempt.id,
@@ -118,6 +156,12 @@ async def _build_results(session: AsyncSession, attempt: Attempt) -> AttemptResu
                 file_path=q.file_path,
                 line_start=q.line_start,
                 line_end=q.line_end,
+                citation_claim_excerpt=citation_by_id[q.source_citation_id].claim_excerpt
+                if q.source_citation_id in citation_by_id
+                else None,
+                citation_snippet_text=citation_by_id[q.source_citation_id].snippet_text
+                if q.source_citation_id in citation_by_id
+                else None,
             )
             for q in questions
         ],
@@ -149,6 +193,24 @@ async def create_attempt(
     if repo is None or repo.user_id != current_user.id:
         raise HTTPException(404, "quiz not found")
 
+    # Idempotent per (user, quiz), not a new row every call — React
+    # StrictMode double-invokes mount effects in dev, and a page reload or
+    # a second tab hitting QuizTaker for the same quiz would otherwise mint
+    # a fresh, empty attempt each time and orphan whatever answers were
+    # already submitted to the previous one (found via the Phase 5 Codex
+    # review; ui-spec.md §6.5 calls for exactly this interruption-safety).
+    existing = (
+        await session.exec(
+            select(Attempt).where(
+                Attempt.quiz_id == quiz.id,
+                Attempt.user_id == current_user.id,
+                Attempt.status == AttemptStatus.in_progress,
+            )
+        )
+    ).first()
+    if existing is not None:
+        return AttemptOut(id=existing.id, quiz_id=existing.quiz_id, status=existing.status.value, score=existing.score)
+
     attempt = Attempt(quiz_id=quiz.id, user_id=current_user.id)
     session.add(attempt)
     await session.commit()
@@ -165,7 +227,7 @@ async def submit_answer(
     current_user: User = Depends(get_current_user),
     llm: LLMProvider = Depends(get_llm_provider),
 ) -> AnswerResultOut:
-    attempt = await _owned_attempt(session, attempt_id, current_user)
+    attempt = await _owned_attempt_for_update(session, attempt_id, current_user)
     if attempt.status != AttemptStatus.in_progress:
         raise HTTPException(409, "attempt is already completed")
 
@@ -180,6 +242,8 @@ async def submit_answer(
     else:
         if not body.answer_text or not body.answer_text.strip():
             raise HTTPException(422, "answer_text is required for a fill_blank question")
+        if len(body.answer_text) > MAX_ANSWER_TEXT_CHARS:
+            raise HTTPException(422, f"answer_text exceeds the {MAX_ANSWER_TEXT_CHARS}-character limit")
         score, feedback = await grade_fill_blank(llm, question, body.answer_text)
 
     existing = (
@@ -212,7 +276,7 @@ async def complete_attempt(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> AttemptResultsOut:
-    attempt = await _owned_attempt(session, attempt_id, current_user)
+    attempt = await _owned_attempt_for_update(session, attempt_id, current_user)
     if attempt.status != AttemptStatus.in_progress:
         raise HTTPException(409, "attempt is already completed")
 

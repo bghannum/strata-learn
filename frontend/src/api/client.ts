@@ -197,6 +197,15 @@ export function getQuiz(quizId: string): Promise<Quiz> {
   return request(`/quizzes/${quizId}`)
 }
 
+// GET /repos/{id}/quiz redirects to GET /quizzes/{id} — mirrors
+// getRepoStudyGuide. Lets RepoDetail recover an already-enqueued or
+// already-ready quiz after a reload instead of only offering "Generate
+// Quiz" again (which would enqueue a second paid job). Throws ApiError(404)
+// if this repo has no quiz yet — callers should treat that as "none exists".
+export function getRepoQuiz(repoId: string): Promise<Quiz> {
+  return request(`/repos/${repoId}/quiz`)
+}
+
 // --- Attempts ---
 
 export type AttemptStatus = 'in_progress' | 'completed'
@@ -225,6 +234,8 @@ export interface QuestionResult {
   file_path: string
   line_start: number
   line_end: number
+  citation_claim_excerpt: string | null
+  citation_snippet_text: string | null
 }
 
 export interface AttemptResults {
