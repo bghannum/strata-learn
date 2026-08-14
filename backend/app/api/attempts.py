@@ -23,6 +23,7 @@ from app.db.models import (
     Attempt,
     AttemptStatus,
     Citation,
+    FeedbackMode,
     Question,
     QuestionType,
     Quiz,
@@ -77,8 +78,12 @@ class AnswerIn(BaseModel):
 
 class AnswerResultOut(BaseModel):
     question_id: UUID
-    score: float
-    feedback: str
+    # #37, found via Codex's PR #50 review: nullable, not always populated.
+    # In end_of_quiz mode this response must not reveal correctness at all
+    # (score alone is enough to imply it) — the answer is still graded and
+    # persisted server-side, just not echoed back here. See submit_answer.
+    score: float | None
+    feedback: str | None
     correct_index: int | None
     correct_answer: str | None
 
@@ -87,6 +92,11 @@ class QuestionResultOut(BaseModel):
     question_id: UUID
     question_type: str
     prompt: str
+    # Independent of score/feedback below — true whenever a submission
+    # exists, regardless of whether feedback_mode allows revealing it yet.
+    # QuizTaker.tsx's resume logic needs this signal without needing the
+    # (possibly withheld) score to detect "already answered".
+    answered: bool
     score: float | None
     feedback: str | None
     file_path: str
@@ -99,6 +109,17 @@ class QuestionResultOut(BaseModel):
     # this link). Null only if the source Citation has since been deleted.
     citation_claim_excerpt: str | None
     citation_snippet_text: str | None
+    # #34, ui-spec.md §6.7: the student's own answer and the correct one, as
+    # display text (an mcq choice's text, not its bare index — resolved here
+    # so the frontend doesn't need question.choices just to render this).
+    # Both null while the attempt is still in_progress, regardless of
+    # whether a given question has already been answered — GET
+    # /attempts/{id} must never let a mid-quiz fetch reveal the correct
+    # answer to a question the student hasn't reached yet, and gating
+    # uniformly by attempt status keeps that contract simple to reason
+    # about rather than leaking it question-by-question.
+    submitted_answer: str | None = None
+    correct_answer: str | None = None
 
 
 class AttemptResultsOut(BaseModel):
@@ -133,7 +154,29 @@ async def _owned_attempt_for_update(session: AsyncSession, attempt_id: UUID, cur
     return attempt
 
 
+def _answer_display_text(question: Question, selected_index: int | None, answer_text: str | None) -> str | None:
+    """Resolves a stored submission to display text — an mcq choice's text,
+    not its bare index, so QuestionResultOut doesn't need to also carry
+    question.choices just for the frontend to look this up itself."""
+    if question.question_type == QuestionType.mcq:
+        if selected_index is None or question.choices is None or not (0 <= selected_index < len(question.choices)):
+            return None
+        return question.choices[selected_index]
+    return answer_text
+
+
+def _correct_answer_display_text(question: Question) -> str | None:
+    if question.question_type == QuestionType.mcq:
+        if question.correct_index is None or question.choices is None or not (
+            0 <= question.correct_index < len(question.choices)
+        ):
+            return None
+        return question.choices[question.correct_index]
+    return question.correct_answer
+
+
 async def _build_results(session: AsyncSession, attempt: Attempt) -> AttemptResultsOut:
+    quiz = await session.get(Quiz, attempt.quiz_id)
     questions = list(
         (await session.exec(select(Question).where(Question.quiz_id == attempt.quiz_id).order_by(Question.order))).all()
     )
@@ -148,6 +191,19 @@ async def _build_results(session: AsyncSession, attempt: Attempt) -> AttemptResu
         citations = (await session.exec(select(Citation).where(Citation.id.in_(citation_ids)))).all()
         citation_by_id = {c.id: c for c in citations}
 
+    # #34: submitted_answer/correct_answer only once the attempt is
+    # completed — see QuestionResultOut's comment for why this is gated
+    # uniformly rather than per-question.
+    is_completed = attempt.status == AttemptStatus.completed
+    # #37, found via Codex's PR #50 review: score/feedback need their own,
+    # looser gate. An answered question's score/feedback were already
+    # revealed via submit_answer's own response at submit time in immediate
+    # mode, so showing them again here isn't a new leak — but in
+    # end_of_quiz mode they must stay hidden until completion, the whole
+    # point of that mode. An unanswered question has no submission at all,
+    # so it's None either way regardless of this flag.
+    reveal_score_feedback = is_completed or quiz.feedback_mode == FeedbackMode.immediate
+
     return AttemptResultsOut(
         id=attempt.id,
         quiz_id=attempt.quiz_id,
@@ -158,8 +214,13 @@ async def _build_results(session: AsyncSession, attempt: Attempt) -> AttemptResu
                 question_id=q.id,
                 question_type=q.question_type.value,
                 prompt=q.prompt,
-                score=submission_by_question[q.id].score if q.id in submission_by_question else None,
-                feedback=submission_by_question[q.id].feedback if q.id in submission_by_question else None,
+                answered=q.id in submission_by_question,
+                score=submission_by_question[q.id].score
+                if q.id in submission_by_question and reveal_score_feedback
+                else None,
+                feedback=submission_by_question[q.id].feedback
+                if q.id in submission_by_question and reveal_score_feedback
+                else None,
                 file_path=q.file_path,
                 line_start=q.line_start,
                 line_end=q.line_end,
@@ -169,6 +230,12 @@ async def _build_results(session: AsyncSession, attempt: Attempt) -> AttemptResu
                 citation_snippet_text=citation_by_id[q.source_citation_id].snippet_text
                 if q.source_citation_id in citation_by_id
                 else None,
+                submitted_answer=_answer_display_text(
+                    q, submission_by_question[q.id].selected_index, submission_by_question[q.id].answer_text
+                )
+                if is_completed and q.id in submission_by_question
+                else None,
+                correct_answer=_correct_answer_display_text(q) if is_completed else None,
             )
             for q in questions
         ],
@@ -258,6 +325,14 @@ async def submit_answer(
     if question is None or question.quiz_id != attempt.quiz_id:
         raise HTTPException(404, "question not found on this attempt's quiz")
 
+    # #37, found via Codex's PR #50 review: in end_of_quiz mode, this
+    # response must not reveal correctness at all — the answer is still
+    # graded and persisted below either way, just not echoed back here.
+    # Without this, inspecting the network response defeats the whole
+    # point of the mode regardless of what QuizTaker.tsx chooses to render.
+    quiz = await session.get(Quiz, attempt.quiz_id)
+    reveal = quiz is not None and quiz.feedback_mode == FeedbackMode.immediate
+
     existing = (
         await session.exec(
             select(AnswerSubmission).where(
@@ -273,10 +348,10 @@ async def submit_answer(
     if existing is not None and existing.selected_index == body.selected_index and existing.answer_text == body.answer_text:
         return AnswerResultOut(
             question_id=question.id,
-            score=existing.score,
-            feedback=existing.feedback,
-            correct_index=question.correct_index,
-            correct_answer=question.correct_answer,
+            score=existing.score if reveal else None,
+            feedback=existing.feedback if reveal else None,
+            correct_index=question.correct_index if reveal else None,
+            correct_answer=question.correct_answer if reveal else None,
         )
 
     if question.question_type == QuestionType.mcq:
@@ -303,10 +378,10 @@ async def submit_answer(
 
     return AnswerResultOut(
         question_id=question.id,
-        score=score,
-        feedback=feedback,
-        correct_index=question.correct_index,
-        correct_answer=question.correct_answer,
+        score=score if reveal else None,
+        feedback=feedback if reveal else None,
+        correct_index=question.correct_index if reveal else None,
+        correct_answer=question.correct_answer if reveal else None,
     )
 
 

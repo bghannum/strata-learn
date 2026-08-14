@@ -44,16 +44,19 @@ function MermaidDiagram({ chart }: MermaidDiagramProps) {
     // Belt-and-suspenders: Phase 3's tests guard Mermaid syntax validity at
     // generation time, but the text is still LLM-influenced — a render
     // failure here shows the raw source instead of a blank, silent gap.
+    // Reuses organic-danger rather than introducing a third bespoke warning
+    // color — Organic has no warning role either, and "could not render"
+    // reads as an error state to the reader regardless.
     return (
-      <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-300">
-        <p>Could not render this diagram: {error}</p>
-        <pre className="mt-2 overflow-auto whitespace-pre-wrap text-xs">{chart}</pre>
+      <div className="rounded-2xl bg-organic-danger-bg p-3.5">
+        <p className="text-sm text-organic-danger">Could not render this diagram: {error}</p>
+        <pre className="mt-2 overflow-auto text-xs whitespace-pre-wrap text-organic-danger">{chart}</pre>
       </div>
     )
   }
 
   if (!svg) {
-    return <p className="text-sm text-gray-500 dark:text-gray-400">Rendering diagram…</p>
+    return <p className="text-sm opacity-70">Rendering diagram…</p>
   }
 
   return <div className="overflow-auto" dangerouslySetInnerHTML={{ __html: svg }} />

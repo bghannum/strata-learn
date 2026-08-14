@@ -12,9 +12,9 @@ Phases 0 through 5 are complete:
 - Anthropic-backed Layer B module summaries, architecture-pattern detection, and trade-off extraction;
 - citation-grounded study guide generation (Overview, Architecture, Trade-offs, Glossary, Deep-Dives) plus a Mermaid architecture diagram, served via `GET /repos/{id}/study-guide`;
 - a working frontend: register/log in, add a repo, watch it index live, and read the generated study guide with inline diagrams and clickable citations, all scoped to the logged-in user via cookie-based sessions;
-- quiz generation (MCQ + fill-in-the-blank, grounded in the study guide's own citations) and taking, with immediate per-answer grading/feedback and a results view.
+- quiz generation (MCQ + fill-in-the-blank, grounded in the study guide's own citations) and taking, with per-answer grading/feedback (either immediate or deferred to the end of the quiz, chosen per quiz), Previous navigation, retakes, and a results view showing each question's submitted and correct answer.
 
-Remaining roadmap phases first integrate the checked-in UI mockup across the existing browser flow (Phase 5.5), then add drawing questions (Phase 6), versioning/diffing/hosting polish (Phase 7), and voice learning through read-aloud content plus spoken quiz answers (Phase 8).
+Phase 5.5 (UI design integration) has applied the checked-in Organic mockup across every screen — shared primitives, tokens, and light-only styling replacing the earlier default Tailwind look — plus a real reindex/retry action for a failed run. Visual-regression screenshot baselines and a full manual responsive/keyboard sweep remain open. Remaining roadmap phases add drawing questions (Phase 6), versioning/diffing/hosting polish (Phase 7), and voice learning through read-aloud content plus spoken quiz answers (Phase 8).
 
 Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
 

@@ -10,16 +10,20 @@ import {
   isAbortError,
   pollQuiz,
   PollTimeoutError,
+  reindexRepo,
   useIndexingProgress,
   type AnalysisSnapshot,
+  type FeedbackMode,
   type Quiz,
   type Repo,
   type SnapshotStatus,
   type StudyGuide,
 } from '../api/client'
+import IndexingProgress from '../components/IndexingProgress'
+import Button from '../components/ui/Button'
+import { cn } from '../components/ui/cn'
 
 const QUIZ_TIMEOUT_MESSAGE = 'Quiz generation is taking longer than expected. Refresh the page to check its status.'
-import IndexingProgress from '../components/IndexingProgress'
 
 function isTerminal(status: SnapshotStatus | undefined): boolean {
   return status === 'ready' || status === 'failed'
@@ -38,6 +42,13 @@ function RepoDetail() {
   const [quizChecked, setQuizChecked] = useState(false)
   const [quizPending, setQuizPending] = useState(false)
   const [quizError, setQuizError] = useState<string | null>(null)
+  // #37: end_of_quiz is ui-spec.md §6.5's own stated default ("closer to
+  // genuine self-assessment") — found via Codex's PR #50 review: the field
+  // existed end-to-end but nothing ever let a caller choose 'immediate', so
+  // no quiz generated through the app could actually use it.
+  const [feedbackMode, setFeedbackMode] = useState<FeedbackMode>('end_of_quiz')
+  const [reindexing, setReindexing] = useState(false)
+  const [reindexError, setReindexError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!repoId) return
@@ -119,7 +130,7 @@ function RepoDetail() {
     const controller = new AbortController()
     pollControllerRef.current = controller
     let createdQuiz: Quiz | null = null
-    generateQuiz(repoId)
+    generateQuiz(repoId, feedbackMode)
       .then((created) => {
         createdQuiz = created
         return pollQuiz(created.id, { signal: controller.signal })
@@ -143,109 +154,138 @@ function RepoDetail() {
       })
   }
 
+  // #26: retries a failed indexing run in place, replacing the earlier
+  // "Try adding it again" fallback (which created a whole new Repo row
+  // rather than reusing this one — the endpoint this needed didn't exist
+  // yet in Phase 4a). A fresh snapshot means useIndexingProgress reconnects
+  // its WebSocket the moment `snapshot` updates to a non-terminal status.
+  function handleRetry() {
+    if (!repoId) return
+    setReindexing(true)
+    setReindexError(null)
+    reindexRepo(repoId)
+      .then((updatedRepo) => {
+        setRepo(updatedRepo)
+        return getSnapshot(repoId)
+      })
+      .then(setSnapshot)
+      .catch((err) => setReindexError(err instanceof ApiError ? err.message : 'Could not retry indexing.'))
+      .finally(() => setReindexing(false))
+  }
+
   if (!loaded) {
     return (
-      <main className="mx-auto max-w-2xl p-6">
-        <p className="text-sm text-gray-500 dark:text-gray-400">Loading…</p>
+      <main className="mx-auto max-w-2xl p-7">
+        <p className="text-sm opacity-70">Loading…</p>
       </main>
     )
   }
 
   if (loadError || !repo) {
     return (
-      <main className="mx-auto max-w-2xl p-6">
-        <p className="rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">
-          {loadError ?? 'Repository not found.'}
-        </p>
+      <main className="mx-auto max-w-2xl p-7">
+        <div className="rounded-2xl bg-organic-danger-bg p-3.5">
+          <p className="text-sm text-organic-danger">{loadError ?? 'Repository not found.'}</p>
+        </div>
       </main>
     )
   }
 
   return (
-    <main className="mx-auto max-w-2xl p-6">
-      <Link to="/" className="text-sm text-blue-600 hover:underline dark:text-blue-400">
+    <main className="mx-auto max-w-2xl p-7">
+      <Link to="/" className="text-[13px] opacity-60 hover:underline">
         ← All repositories
       </Link>
-      <h1 className="mt-2 text-xl font-semibold text-gray-900 dark:text-gray-100">{repo.display_name}</h1>
-      <p className="text-sm text-gray-500 dark:text-gray-400">{repo.source_uri}</p>
+      <h1 className="mt-2 mb-1 text-[34px] leading-tight">{repo.display_name}</h1>
+      <p className="font-mono text-xs opacity-55">{repo.source_uri}</p>
 
-      <div className="mt-6">
+      <div className="mt-5.5 rounded-[32px] bg-organic-surface p-7">
         <IndexingProgress
           status={status}
           lastNonTerminalStatus={lastNonTerminalStatus}
           error={liveError}
           variant="stepper"
+          onRetry={handleRetry}
+          retrying={reindexing}
+          retryError={reindexError}
         />
       </div>
 
       {status === 'ready' && (
-        <div className="mt-6 flex flex-wrap items-center gap-3">
+        <div className="mt-5.5 flex flex-wrap items-center gap-3">
           {guide && (
-            <Link
-              to={`/study-guides/${guide.id}`}
-              className="inline-block rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-            >
-              View Study Guide
+            <Link to={`/study-guides/${guide.id}`}>
+              <Button>View Study Guide</Button>
             </Link>
           )}
           {guideError && (
-            <p className="rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">
-              {guideError}
-            </p>
+            <div className="rounded-2xl bg-organic-danger-bg p-3.5">
+              <p className="text-sm text-organic-danger">{guideError}</p>
+            </div>
           )}
 
           {guide && quizChecked && !quiz && (
-            <button
-              type="button"
-              onClick={handleGenerateQuiz}
-              disabled={quizPending}
-              className="inline-block rounded-md border border-blue-600 px-4 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50 dark:hover:bg-blue-950"
-            >
-              {quizPending ? 'Generating quiz…' : 'Generate Quiz'}
-            </button>
+            <>
+              {/* Same has-[:checked]: segmented-control pattern as AddRepo.tsx's
+              Git URL/Upload zip toggle. */}
+              <div className="inline-flex overflow-hidden rounded-full border border-organic-divider">
+                {(['end_of_quiz', 'immediate'] as const).map((mode, index) => (
+                  <label
+                    key={mode}
+                    className={cn(
+                      'cursor-pointer px-3 py-1.5 text-xs has-[:checked]:bg-organic-accent-700 has-[:checked]:text-organic-bg',
+                      index > 0 && 'border-l border-organic-divider',
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="feedbackMode"
+                      className="sr-only"
+                      checked={feedbackMode === mode}
+                      onChange={() => setFeedbackMode(mode)}
+                    />
+                    {mode === 'end_of_quiz' ? 'End of quiz' : 'As I go'}
+                  </label>
+                ))}
+              </div>
+              <Button variant="secondary" onClick={handleGenerateQuiz} disabled={quizPending}>
+                {quizPending ? 'Generating quiz…' : 'Generate Quiz'}
+              </Button>
+            </>
           )}
           {quiz?.status === 'ready' && (
-            <Link
-              to={`/quizzes/${quiz.id}`}
-              className="inline-block rounded-md border border-blue-600 px-4 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950"
-            >
-              Take Quiz
+            <Link to={`/quizzes/${quiz.id}`}>
+              <Button variant="secondary">Take Quiz</Button>
             </Link>
           )}
           {quiz?.status === 'failed' && (
-            <p className="rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">
-              Quiz generation failed.{' '}
-              <button type="button" onClick={handleGenerateQuiz} className="underline">
-                Try again
-              </button>
-            </p>
+            <div className="rounded-2xl bg-organic-danger-bg p-3.5">
+              <p className="text-sm text-organic-danger">
+                Quiz generation failed.{' '}
+                <button type="button" onClick={handleGenerateQuiz} className="font-semibold underline">
+                  Try again
+                </button>
+              </p>
+            </div>
           )}
           {quizError && (
-            <p className="rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">
-              {quizError}
-            </p>
+            <div className="rounded-2xl bg-organic-danger-bg p-3.5">
+              <p className="text-sm text-organic-danger">{quizError}</p>
+            </div>
           )}
         </div>
       )}
 
-      {status === 'failed' && (
-        // No POST /repos/{id}/reindex endpoint exists yet — retrying means
-        // adding the repo again rather than re-triggering this same job.
-        <Link to="/repos/new" className="mt-6 inline-block text-sm text-blue-600 hover:underline dark:text-blue-400">
-          Try adding it again
-        </Link>
-      )}
-
-      <div className="mt-8 border-t border-gray-200 pt-4 dark:border-gray-700">
+      <div className="mt-8 border-t border-organic-divider pt-4">
         <button
           type="button"
           onClick={() => setShowRaw((visible) => !visible)}
-          className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+          className="text-sm opacity-60 hover:opacity-100"
         >
           {showRaw ? 'Hide' : 'View'} raw analysis
         </button>
         {showRaw && (
-          <pre className="mt-2 max-h-96 overflow-auto rounded-md bg-gray-900 p-3 text-xs text-gray-100">
+          <pre className="mt-2 max-h-96 overflow-auto rounded-2xl bg-organic-neutral-900 p-4 text-xs text-organic-neutral-200">
             {JSON.stringify(snapshot, null, 2)}
           </pre>
         )}

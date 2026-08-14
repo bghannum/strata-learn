@@ -2,6 +2,9 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ApiError, register } from '../api/client'
 import { useAuth } from '../auth/useAuth'
+import AuthSidePanel from '../components/AuthSidePanel'
+import Button from '../components/ui/Button'
+import { Field, Input } from '../components/ui/Field'
 
 function Register() {
   const navigate = useNavigate()
@@ -27,73 +30,74 @@ function Register() {
   }
 
   return (
-    <main className="mx-auto max-w-sm p-6">
-      <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Create an account</h1>
-
-      <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-        <div>
-          <label htmlFor="email" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-            Email
-          </label>
-          <input
-            id="email"
-            type="email"
-            required
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800"
-          />
+    <main className="mx-auto grid max-w-4xl grid-cols-1 items-center gap-10 p-6 py-16 lg:grid-cols-[1.05fr_.95fr] lg:gap-14">
+      <div className="max-w-[420px]">
+        <div className="mb-6 flex items-center gap-2.5">
+          <span className="grid size-[34px] flex-none place-items-center rounded-full bg-organic-accent">
+            <span className="block size-[13px] rounded-full border-[3px] border-organic-bg" />
+          </span>
+          <span className="font-organic-heading text-xl font-normal">Strata Learn</span>
         </div>
+        <h1 className="mb-2.5 text-[38px] leading-tight">Create an account</h1>
+        <p className="mb-6 text-[15px] leading-relaxed opacity-70">
+          Registration is a one-time event — the first account created is the only one this instance ever has.
+        </p>
 
-        <div>
-          <label htmlFor="password" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-            Password
-          </label>
-          <input
-            id="password"
-            type="password"
-            required
-            maxLength={72}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800"
-          />
-        </div>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          <Field label="Email" htmlFor="email">
+            <Input
+              id="email"
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              autoComplete="email"
+            />
+          </Field>
 
-        <div>
-          <label htmlFor="registrationSecret" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-            Registration secret
-          </label>
-          <input
-            id="registrationSecret"
-            type="password"
-            required
-            value={registrationSecret}
-            onChange={(e) => setRegistrationSecret(e.target.value)}
-            className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800"
-          />
-          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">REGISTRATION_SECRET from the server's .env</p>
-        </div>
+          <Field label="Password" htmlFor="password">
+            <Input
+              id="password"
+              type="password"
+              required
+              maxLength={72}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="new-password"
+            />
+          </Field>
 
-        {error && (
-          <p className="rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">{error}</p>
-        )}
+          <Field label="Registration secret" htmlFor="registrationSecret">
+            <Input
+              id="registrationSecret"
+              type="password"
+              required
+              value={registrationSecret}
+              onChange={(e) => setRegistrationSecret(e.target.value)}
+            />
+          </Field>
+          <p className="-mt-2 text-xs opacity-70">REGISTRATION_SECRET from the server's .env</p>
 
-        <button
-          type="submit"
-          disabled={submitting}
-          className="w-full rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {submitting ? 'Creating account…' : 'Create account'}
-        </button>
-      </form>
+          {error && (
+            <div className="rounded-2xl bg-organic-danger-bg p-3.5">
+              <p className="text-sm text-organic-danger">{error}</p>
+            </div>
+          )}
 
-      <p className="mt-4 text-sm text-gray-500 dark:text-gray-400">
-        Already have an account?{' '}
-        <Link to="/login" className="text-blue-600 hover:underline dark:text-blue-400">
-          Log in
-        </Link>
-      </p>
+          <Button type="submit" size="lg" disabled={submitting} className="self-start">
+            {submitting ? 'Creating account…' : 'Create account'}
+          </Button>
+        </form>
+
+        <p className="mt-4 text-sm opacity-70">
+          Already have an account?{' '}
+          <Link to="/login" className="font-semibold text-organic-accent-700 hover:underline">
+            Log in
+          </Link>
+        </p>
+      </div>
+
+      <AuthSidePanel />
     </main>
   )
 }

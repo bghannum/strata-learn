@@ -21,7 +21,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.auth import get_current_user
-from app.db.models import Question, Quiz, QuizStatus, Repo, StudyGuide, User
+from app.db.models import FeedbackMode, Question, Quiz, QuizStatus, Repo, StudyGuide, User
 from app.db.session import get_session
 from app.quizzing.generation import create_pending_quiz, fail_quiz
 from app.redis_pool import get_redis_pool
@@ -43,7 +43,16 @@ class QuizOut(BaseModel):
     repo_id: UUID
     study_guide_id: UUID
     status: str
+    feedback_mode: str
     questions: list[QuestionOut]
+
+
+class GenerateQuizIn(BaseModel):
+    # #37: ui-spec.md §6.5's per-quiz feedback-timing toggle. Defaults to
+    # end_of_quiz (matching FeedbackMode's own default) so an empty POST
+    # body — what every caller sent before this field existed — keeps
+    # working unchanged.
+    feedback_mode: FeedbackMode = FeedbackMode.end_of_quiz
 
 
 async def _owned_repo(session: AsyncSession, repo_id: UUID, current_user: User) -> Repo:
@@ -56,6 +65,7 @@ async def _owned_repo(session: AsyncSession, repo_id: UUID, current_user: User) 
 @router.post("/{repo_id}/generate", response_model=QuizOut, status_code=201)
 async def generate_quiz_endpoint(
     repo_id: UUID,
+    body: GenerateQuizIn = GenerateQuizIn(),
     session: AsyncSession = Depends(get_session),
     redis: ArqRedis = Depends(get_redis_pool),
     current_user: User = Depends(get_current_user),
@@ -73,7 +83,7 @@ async def generate_quiz_endpoint(
     if guide is None:
         raise HTTPException(409, "study guide not ready yet — generate one before requesting a quiz")
 
-    quiz, created = await create_pending_quiz(session, repo_id, guide.id)
+    quiz, created = await create_pending_quiz(session, repo_id, guide.id, feedback_mode=body.feedback_mode)
 
     if created:
         try:
@@ -88,7 +98,14 @@ async def generate_quiz_endpoint(
     # billed LLM calls for the same quiz (found via the Phase 5 Codex
     # review, second pass).
 
-    return QuizOut(id=quiz.id, repo_id=quiz.repo_id, study_guide_id=quiz.study_guide_id, status=quiz.status.value, questions=[])
+    return QuizOut(
+        id=quiz.id,
+        repo_id=quiz.repo_id,
+        study_guide_id=quiz.study_guide_id,
+        status=quiz.status.value,
+        feedback_mode=quiz.feedback_mode.value,
+        questions=[],
+    )
 
 
 @router.get("/{quiz_id}", response_model=QuizOut)
@@ -112,6 +129,7 @@ async def get_quiz(
         repo_id=quiz.repo_id,
         study_guide_id=quiz.study_guide_id,
         status=quiz.status.value,
+        feedback_mode=quiz.feedback_mode.value,
         questions=[
             QuestionOut(
                 id=q.id,

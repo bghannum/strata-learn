@@ -63,6 +63,46 @@ async def test_generate_quiz_creates_pending_quiz_and_enqueues_job(pending_repo_
         assert body["status"] == "generating"
         assert body["study_guide_id"] == str(guide_id)
         assert body["questions"] == []
+        # #37: default when the caller sends no body at all — every caller
+        # before this field existed, and ui-spec.md §6.5's stated default.
+        assert body["feedback_mode"] == "end_of_quiz"
+    finally:
+        app.dependency_overrides.pop(get_redis_pool, None)
+
+
+async def test_generate_quiz_honors_explicit_feedback_mode(pending_repo_factory) -> None:
+    app.dependency_overrides[get_redis_pool] = _override_redis
+    try:
+        with TestClient(app) as client:
+            user = register_test_user(client)
+            repo_id, snapshot_id = await pending_repo_factory(
+                SourceType.git_url, "https://example.com/repo.git", user_id=uuid.UUID(user["id"])
+            )
+            await _make_ready_study_guide(repo_id, snapshot_id)
+
+            response = client.post(f"/quizzes/{repo_id}/generate", json={"feedback_mode": "immediate"})
+
+        assert response.status_code == 201
+        assert response.json()["feedback_mode"] == "immediate"
+    finally:
+        app.dependency_overrides.pop(get_redis_pool, None)
+
+
+async def test_get_quiz_returns_feedback_mode_it_was_created_with(pending_repo_factory) -> None:
+    app.dependency_overrides[get_redis_pool] = _override_redis
+    try:
+        with TestClient(app) as client:
+            user = register_test_user(client)
+            repo_id, snapshot_id = await pending_repo_factory(
+                SourceType.git_url, "https://example.com/repo.git", user_id=uuid.UUID(user["id"])
+            )
+            await _make_ready_study_guide(repo_id, snapshot_id)
+
+            created = client.post(f"/quizzes/{repo_id}/generate", json={"feedback_mode": "immediate"}).json()
+            fetched = client.get(f"/quizzes/{created['id']}")
+
+        assert fetched.status_code == 200
+        assert fetched.json()["feedback_mode"] == "immediate"
     finally:
         app.dependency_overrides.pop(get_redis_pool, None)
 

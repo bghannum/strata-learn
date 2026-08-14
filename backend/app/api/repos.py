@@ -139,6 +139,83 @@ async def create_repo(
     return repo
 
 
+@router.post("/{repo_id}/reindex", response_model=Repo, status_code=202)
+async def reindex_repo(
+    repo_id: UUID,
+    session: AsyncSession = Depends(get_session),
+    redis: ArqRedis = Depends(get_redis_pool),
+    current_user: User = Depends(get_current_user),
+) -> Repo:
+    """Retries a failed indexing run — ui-spec.md §6.2's "Retry" action,
+    deferred out of Phase 4 (#25) as a real scope expansion, tracked as #26.
+
+    A retry from scratch, not a resume from checkpoint: Layer B's per-module/
+    pattern/trade-off work isn't persisted incrementally in a form safe to
+    resume mid-run, so this creates a fresh AnalysisSnapshot and re-enqueues
+    the full pipeline rather than mutating the failed one in place. Only a
+    `failed` latest snapshot is eligible — reindexing a `ready` repo to pick
+    up new commits is the Phase 7 diffing feature, out of scope here.
+    """
+    # SELECT ... FOR UPDATE, not session.get — found via Codex's PR #50
+    # review: without a lock, two concurrent retries can both read the same
+    # failed snapshot before either updates latest_snapshot_id, so both
+    # create and enqueue a fresh snapshot (two full pipelines, including
+    # paid Layer B calls, with one snapshot silently orphaned). This
+    # serializes concurrent reindex calls on the same repo row — same
+    # pattern as attempts.py's _owned_attempt_for_update.
+    repo = (await session.exec(select(Repo).where(Repo.id == repo_id).with_for_update())).first()
+    if repo is None or repo.user_id != current_user.id:
+        raise HTTPException(404, "repo not found")
+    if repo.latest_snapshot_id is None:
+        raise HTTPException(404, "repo has no snapshot yet")
+
+    old_snapshot = await session.get(AnalysisSnapshot, repo.latest_snapshot_id)
+    if old_snapshot is None or old_snapshot.status != SnapshotStatus.failed:
+        raise HTTPException(409, "only a repo whose latest snapshot failed can be retried")
+
+    zip_bytes: bytes | None = None
+    if repo.source_type == SourceType.zip_upload:
+        # The original upload's bytes are keyed by the *old* snapshot's id
+        # with a 24h TTL (see ZIP_UPLOAD_TTL_SECONDS) — checked before
+        # creating anything new, so an expired upload fails fast rather than
+        # leaving a fresh pending snapshot that can never actually run.
+        zip_bytes = await redis.get(f"zip-upload:{old_snapshot.id}")
+        if zip_bytes is None:
+            raise HTTPException(
+                410,
+                "The uploaded zip is no longer available for retry — add this repository again with a fresh upload.",
+            )
+
+    new_snapshot = await create_pending_snapshot(session, repo.id)
+    repo.latest_snapshot_id = new_snapshot.id
+    session.add(repo)
+    await session.commit()
+    await session.refresh(repo)
+
+    zip_redis_key: str | None = None
+    try:
+        if zip_bytes is not None:
+            zip_redis_key = f"zip-upload:{new_snapshot.id}"
+            await redis.set(zip_redis_key, zip_bytes, ex=ZIP_UPLOAD_TTL_SECONDS)
+
+        await redis.enqueue_job(
+            "index_repo",
+            snapshot_id=new_snapshot.id,
+            repo_id=repo.id,
+            source_type=repo.source_type.value,
+            git_url=repo.source_uri if repo.source_type == SourceType.git_url else None,
+            zip_redis_key=zip_redis_key,
+        )
+    except Exception as exc:
+        # Same reasoning as create_repo's own enqueue-failure handling above:
+        # the new snapshot is already committed, so it must be explicitly
+        # marked failed rather than left stranded at "pending" forever.
+        await fail_snapshot(session, new_snapshot.id)
+        raise HTTPException(503, "Could not queue indexing job — try again shortly") from exc
+
+    return repo
+
+
 @router.get("", response_model=list[Repo])
 async def list_repos(
     session: AsyncSession = Depends(get_session), current_user: User = Depends(get_current_user)

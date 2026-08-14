@@ -164,6 +164,12 @@ export function getRepo(repoId: string): Promise<Repo> {
   return request(`/repos/${repoId}`)
 }
 
+// Only valid when the repo's latest snapshot is `failed` (backend 409s
+// otherwise) — retries indexing from scratch, not a resume from checkpoint.
+export function reindexRepo(repoId: string): Promise<Repo> {
+  return request(`/repos/${repoId}/reindex`, { method: 'POST' })
+}
+
 export function getSnapshot(repoId: string): Promise<AnalysisSnapshot> {
   return request(`/repos/${repoId}/snapshot`)
 }
@@ -196,16 +202,27 @@ export interface Question {
   fill_blank_mode: FillBlankMode | null
 }
 
+export type FeedbackMode = 'immediate' | 'end_of_quiz'
+
 export interface Quiz {
   id: string
   repo_id: string
   study_guide_id: string
   status: QuizStatus
+  feedback_mode: FeedbackMode
   questions: Question[]
 }
 
-export function generateQuiz(repoId: string): Promise<Quiz> {
-  return request(`/quizzes/${repoId}/generate`, { method: 'POST' })
+// feedback_mode defaults server-side to 'end_of_quiz' (ui-spec.md §6.5) if
+// omitted. If an already-`generating` quiz exists for this study guide, the
+// backend reuses it and returns *that* quiz's feedback_mode, not this call's
+// argument — it's the same generation job, not a new one.
+export function generateQuiz(repoId: string, feedbackMode?: FeedbackMode): Promise<Quiz> {
+  return request(`/quizzes/${repoId}/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ feedback_mode: feedbackMode }),
+  })
 }
 
 // Optional signal lets pollQuiz actually cancel an in-flight/hung request
@@ -237,8 +254,12 @@ export interface Attempt {
 
 export interface AnswerResult {
   question_id: string
-  score: number
-  feedback: string
+  // #37: null in end_of_quiz mode — the backend withholds these entirely
+  // rather than grading-but-hiding client-side, since inspecting the network
+  // response would otherwise reveal correctness immediately regardless of
+  // what the UI chooses to render.
+  score: number | null
+  feedback: string | null
   correct_index: number | null
   correct_answer: string | null
 }
@@ -247,6 +268,10 @@ export interface QuestionResult {
   question_id: string
   question_type: QuestionType
   prompt: string
+  // #37: true whenever a submission exists, independent of whether score
+  // below is currently revealed — use this, not `score !== null`, to know
+  // whether a question has already been answered.
+  answered: boolean
   score: number | null
   feedback: string | null
   file_path: string
@@ -254,6 +279,12 @@ export interface QuestionResult {
   line_end: number
   citation_claim_excerpt: string | null
   citation_snippet_text: string | null
+  // #34: display text (an mcq choice's own text, not its index) — both null
+  // until the attempt is completed, regardless of whether this particular
+  // question has already been answered (see the backend's QuestionResultOut
+  // for why: revealing this mid-quiz could leak upcoming correct answers).
+  submitted_answer: string | null
+  correct_answer: string | null
 }
 
 export interface AttemptResults {
