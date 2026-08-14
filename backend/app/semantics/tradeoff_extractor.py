@@ -118,6 +118,16 @@ class TradeoffCardResult:
     model: str
 
 
+# A candidate's line_start..line_end is the module unit's full line range —
+# i.e. the whole file — so this was only bounded indirectly by Layer A's 1
+# MiB max_file_size_bytes, a cap sized for parsing, not for LLM context
+# limits. A dense, low-comment file well under 1 MiB can still run tens of
+# thousands of tokens (found via Codex's PR #17 review, #20). Truncated
+# snippets are marked explicitly in the rendered text so the model doesn't
+# treat a cut file as complete.
+MAX_SNIPPET_CHARS = 20_000
+
+
 def _read_snippet(source_dir: Path, file_path: str, line_start: int, line_end: int) -> str:
     # errors="replace", matching parser.py's decoding policy exactly: Layer A
     # parses on raw bytes and never raises on non-UTF-8 source, so a file that
@@ -126,7 +136,10 @@ def _read_snippet(source_dir: Path, file_path: str, line_start: int, line_end: i
     # Phase 2 pre-push review).
     text = (source_dir / file_path).read_bytes().decode("utf-8", errors="replace")
     lines = text.splitlines()
-    return "\n".join(lines[line_start - 1 : line_end])
+    snippet = "\n".join(lines[line_start - 1 : line_end])
+    if len(snippet) > MAX_SNIPPET_CHARS:
+        snippet = snippet[:MAX_SNIPPET_CHARS] + f"\n... [truncated: file exceeds {MAX_SNIPPET_CHARS} chars]"
+    return snippet
 
 
 def _context_snippet(file_path: str, dependency_graph: dict) -> str:

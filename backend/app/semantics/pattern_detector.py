@@ -28,6 +28,14 @@ from app.semantics.prompts import load_prompt
 MAX_GRAPH_NODES = 500
 MAX_GRAPH_EDGES = 1000
 
+# A matching cap on entry_points — found via Codex's Phase 2 pre-push review
+# round 10 (#19): detect_entry_points can emit several entries per matching
+# file, and unlike the graph above this list wasn't bounded at all, so it
+# could still blow the request past the model's context limit even with the
+# graph itself capped. Sorted by (file, kind) for determinism, same pattern
+# as _bound_graph's edge ordering.
+MAX_ENTRY_POINTS = 200
+
 
 class PatternEvidenceItem(BaseModel):
     claim: str
@@ -97,6 +105,15 @@ def _bound_graph(dependency_graph: dict) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
+def _bound_entry_points(entry_points: list[dict], kept_file_ids: set[str]) -> list[dict]:
+    # Only entry points whose file survived graph bounding — otherwise the
+    # model sees entry points for files it has no other context about, the
+    # same internal-consistency problem _bound_graph already solves for
+    # edges (found via Codex's Phase 2 pre-push review round 10, #19).
+    in_scope = [ep for ep in entry_points if ep.get("file") in kept_file_ids]
+    return sorted(in_scope, key=lambda ep: (ep["file"], ep["kind"]))[:MAX_ENTRY_POINTS]
+
+
 def _render_directory_tree(file_paths: list[str]) -> str:
     tree: dict = {}
     for path in file_paths:
@@ -129,7 +146,7 @@ async def detect_pattern(
     input_text = template.render_input(
         dependency_graph_json=json.dumps(bounded_graph),
         directory_tree=_render_directory_tree(file_paths),
-        entry_points_json=json.dumps(entry_points),
+        entry_points_json=json.dumps(_bound_entry_points(entry_points, set(file_paths))),
     )
     response = await llm.complete(
         system=template.system,

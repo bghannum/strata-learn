@@ -3,13 +3,51 @@ import uuid
 from app.db.models import CodeUnit, UnitType
 from app.semantics.chunking import ModuleChunk
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
-from app.semantics.module_summarizer import ModuleSummaryOutput, summarize_modules
+from app.semantics.module_summarizer import MAX_FIELD_CHARS, ModuleSummaryOutput, _truncate, summarize_modules
 
 
 def _module_unit(file_path: str, line_end: int) -> CodeUnit:
     return CodeUnit(
         snapshot_id=uuid.uuid4(), file_path=file_path, unit_type=UnitType.module, name=file_path, line_start=1, line_end=line_end
     )
+
+
+def test_truncate_caps_oversized_fields() -> None:
+    # Found via Codex's PR #17 review (#20): docstring/signature had no size
+    # bound of their own, unlike pattern_detector's graph and
+    # tradeoff_extractor's file reads. An unusually large docstring (e.g. an
+    # embedded changelog) could still skew a chunk's budget.
+    oversized = "x" * (MAX_FIELD_CHARS + 100)
+
+    truncated = _truncate(oversized)
+
+    assert len(truncated) <= MAX_FIELD_CHARS + 100
+    assert "truncated" in truncated
+    assert _truncate(None) is None
+    assert _truncate("short") == "short"
+
+
+async def test_summarize_modules_truncates_oversized_docstring_reaching_the_llm() -> None:
+    module_unit = _module_unit("app/main.py", 42)
+    module_unit.docstring = "x" * (MAX_FIELD_CHARS + 100)
+    chunk = ModuleChunk(file_path="app/main.py", module_unit=module_unit, units=[])
+    llm = FakeLLMProvider(
+        [
+            LLMResponse(
+                text="",
+                parsed=ModuleSummaryOutput(purpose="p", role_in_system="r", key_concepts=[]),
+                model="fake-model",
+                stop_reason="end_turn",
+                usage={},
+            )
+        ]
+    )
+
+    await summarize_modules(llm, [chunk], {"edges": []})
+
+    sent_input = llm.calls[0].messages[0].content
+    assert "x" * (MAX_FIELD_CHARS + 100) not in sent_input
+    assert "truncated" in sent_input
 
 
 async def test_summarize_modules_builds_result_from_parsed_output() -> None:

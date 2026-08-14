@@ -4,6 +4,7 @@ from pathlib import Path
 from app.db.models import CodeUnit, UnitType
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 from app.semantics.tradeoff_extractor import (
+    MAX_SNIPPET_CHARS,
     EvidenceRef,
     TradeoffCardOutput,
     _read_snippet,
@@ -203,6 +204,21 @@ async def test_extract_tradeoffs_drops_card_with_no_validated_refs(tmp_path: Pat
     results = await extract_tradeoffs(llm, candidates, source_dir, {"edges": []}, code_units)
 
     assert results == []
+
+
+def test_read_snippet_truncates_oversized_files(tmp_path: Path) -> None:
+    # A candidate's line_start..line_end is the module unit's full line
+    # range — i.e. the whole file — so this was only bounded indirectly by
+    # Layer A's 1 MiB max_file_size_bytes, a cap sized for parsing, not LLM
+    # context limits (found via Codex's PR #17 review, #20).
+    oversized = "x = 1\n" * (MAX_SNIPPET_CHARS // 2)
+    (tmp_path / "big.py").write_text(oversized)
+    line_count = oversized.count("\n")
+
+    snippet = _read_snippet(tmp_path, "big.py", 1, line_count)
+
+    assert len(snippet) <= MAX_SNIPPET_CHARS + 100
+    assert "truncated" in snippet
 
 
 def test_read_snippet_tolerates_non_utf8_bytes(tmp_path: Path) -> None:

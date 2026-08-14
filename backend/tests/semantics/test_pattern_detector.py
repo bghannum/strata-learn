@@ -3,10 +3,12 @@ import uuid
 from app.db.models import CodeUnit, UnitType
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 from app.semantics.pattern_detector import (
+    MAX_ENTRY_POINTS,
     MAX_GRAPH_EDGES,
     MAX_GRAPH_NODES,
     PatternClaimOutput,
     PatternEvidenceItem,
+    _bound_entry_points,
     _bound_graph,
     _render_directory_tree,
     detect_pattern,
@@ -106,6 +108,63 @@ def test_bound_graph_caps_edges() -> None:
     bounded = _bound_graph(dependency_graph)
 
     assert len(bounded["edges"]) == MAX_GRAPH_EDGES
+
+
+def test_bound_entry_points_drops_files_outside_bounded_graph() -> None:
+    # An entry point for a file that _bound_graph already dropped would give
+    # the model an entry point it has no other context about (found via
+    # Codex's Phase 2 pre-push review round 10, #19).
+    entry_points = [
+        {"file": "app/main.py", "kind": "http", "reason": "instantiates FastAPI()"},
+        {"file": "app/dropped.py", "kind": "cli", "reason": "..."},
+    ]
+
+    bounded = _bound_entry_points(entry_points, kept_file_ids={"app/main.py"})
+
+    assert bounded == [{"file": "app/main.py", "kind": "http", "reason": "instantiates FastAPI()"}]
+
+
+def test_bound_entry_points_caps_and_sorts_deterministically() -> None:
+    entry_points = [
+        {"file": f"app/file_{i:04d}.py", "kind": "cli", "reason": "..."} for i in range(MAX_ENTRY_POINTS + 10)
+    ]
+    kept_file_ids = {ep["file"] for ep in entry_points}
+
+    bounded = _bound_entry_points(entry_points, kept_file_ids)
+
+    assert len(bounded) == MAX_ENTRY_POINTS
+    assert [ep["file"] for ep in bounded] == sorted(ep["file"] for ep in entry_points)[:MAX_ENTRY_POINTS]
+
+
+async def test_detect_pattern_bounds_entry_points_reaching_the_llm() -> None:
+    code_units = [_module_unit("app/api.py", 30)]
+    dependency_graph = {"nodes": [{"id": "app/api.py", "kind": "file", "language": "python"}], "edges": []}
+    entry_points = [{"file": "app/api.py", "kind": "http", "reason": "instantiates FastAPI()"}] + [
+        {"file": f"app/dropped_{i:04d}.py", "kind": "cli", "reason": "..."} for i in range(3)
+    ]
+    llm = FakeLLMProvider(
+        [
+            LLMResponse(
+                text="",
+                parsed=PatternClaimOutput(
+                    primary_pattern="layered",
+                    confidence="high",
+                    evidence=[PatternEvidenceItem(claim="c", supporting_paths=["app/api.py"])],
+                    caveats=None,
+                ),
+                model="fake-model",
+                stop_reason="end_turn",
+                usage={},
+            )
+        ]
+    )
+
+    await detect_pattern(llm, dependency_graph, code_units, entry_points=entry_points)
+
+    sent_input = llm.calls[0].messages[0].content
+    assert "app/api.py" in sent_input
+    for i in range(3):
+        assert f"app/dropped_{i:04d}.py" not in sent_input
 
 
 async def test_detect_pattern_resolves_and_drops_citations() -> None:
