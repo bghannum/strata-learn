@@ -1,10 +1,10 @@
 # Strata Learn — UI/UX Feature Spec
 
-> **Target behavior.** This document specifies the intended Phase 4–6 user experience. The functional Phase 4–5 baseline now exists; Phase 5.5 applies the checked-in visual design before drawing-question work begins. See [Current architecture](../architecture.md) for implemented behavior and the status matrix below for known gaps.
+> **Target behavior.** This document specifies the intended Phase 4–6 user experience. The functional Phase 4–5 baseline now exists; Phase 5.5 has applied the checked-in visual design across every screen. See [Current architecture](../architecture.md) for implemented behavior and the status matrix below for known gaps.
 
 | | |
 |---|---|
-| **Status** | Target UX — Phase 4–5 baseline implemented; Phase 5.5 design integration next; Phase 6 not started |
+| **Status** | Target UX — Phase 4–5 baseline implemented; Phase 5.5 design integration applied to every screen (visual-regression baselines and a full manual responsive/keyboard sweep still open — see §5.1); Phase 6 not started |
 | **Related design** | [Original project plan](original-project-plan.md); this spec covers the Phase 4–6 frontend surface |
 | **Owner** | Solo builder |
 | **Intended reader** | Claude Design / Claude Code (frontend build) |
@@ -62,11 +62,11 @@ Mapped to the component names from the original project plan — this spec elabo
 
 | Area | Current state | Remaining target work |
 |---|---|---|
-| Authentication and repository ingestion | Implemented through Phase 4b, including the single-account registration secret, Git URL/zip paths, client-side zip-size validation, and upload progress | Clear auth state after a runtime `401` ([#33](https://github.com/bghannum/strata-learn/issues/33)) |
-| Indexing progress and repository detail | Implemented with shared chip/stepper states, WebSocket updates, failure details, and a raw-analysis viewer | Re-index/retry the same repository instead of creating a new one ([#26](https://github.com/bghannum/strata-learn/issues/26)); bound dashboard WebSocket fan-out ([#27](https://github.com/bghannum/strata-learn/issues/27)) |
-| Study-guide reading | Implemented with section navigation, collapsible Markdown, Mermaid rendering, and a citation slide-over | Citations currently render as a per-section list because generated `claim_excerpt` values cannot always be anchored to a literal substring; precise inline markers remain a target, not an implemented claim |
-| Quiz generation and taking | Implemented through Phase 5 with MCQ/fill-in-the-blank questions, resumable attempts, immediate grading, citations, and refreshable results | Completed-result answer detail ([#34](https://github.com/bghannum/strata-learn/issues/34)), previous-question navigation ([#35](https://github.com/bghannum/strata-learn/issues/35)), retakes ([#36](https://github.com/bghannum/strata-learn/issues/36)), feedback timing ([#37](https://github.com/bghannum/strata-learn/issues/37)), and bounded/cancellable polling ([#38](https://github.com/bghannum/strata-learn/issues/38)) |
-| Visual design system | The current functional UI predates the checked-in Organic mockup | Phase 5.5 ports the mockup's tokens and interaction patterns into maintainable React/CSS, then verifies every existing screen, state, breakpoint, and keyboard path |
+| Authentication and repository ingestion | Implemented through Phase 4b; auth state now clears on a runtime `401` ([#33](https://github.com/bghannum/strata-learn/issues/33), closed) | — |
+| Indexing progress and repository detail | Shared chip/stepper states, WebSocket updates, failure details, a raw-analysis viewer, and a real `POST /repos/{id}/reindex` retry ([#26](https://github.com/bghannum/strata-learn/issues/26), closed) | Bound dashboard WebSocket fan-out ([#27](https://github.com/bghannum/strata-learn/issues/27)) |
+| Study-guide reading | Section navigation, collapsible Markdown, Mermaid rendering, and a citation slide-over | Citations still render as a per-section list, not inline markers — generated `claim_excerpt` values cannot always be anchored to a literal substring; not something the Phase 5.5 visual pass resolves |
+| Quiz generation and taking | MCQ/fill-in-the-blank questions, resumable attempts, citations, refreshable results, Previous navigation restoring in-session answers ([#35](https://github.com/bghannum/strata-learn/issues/35), closed), a per-quiz `feedback_mode` (immediate/end-of-quiz, [#37](https://github.com/bghannum/strata-learn/issues/37), closed), bounded/cancellable polling ([#38](https://github.com/bghannum/strata-learn/issues/38), closed), completed-result answer detail ([#34](https://github.com/bghannum/strata-learn/issues/34), closed), and Retake ([#36](https://github.com/bghannum/strata-learn/issues/36), closed) | — |
+| Visual design system | Organic's tokens and component patterns applied across every screen (login/register, dashboard, add-repo, repo detail, study guide, quiz taker, results) | Visual-regression screenshot baselines and a full manual keyboard/responsive sweep — the Playwright `e2e/` job currently starts only the frontend dev server, so authenticated screens with real data aren't reachable there yet without either standing up the backend stack in CI or mocking its responses |
 | Drawing questions | Not implemented; `DrawingCanvas.tsx` is a stub and the generator/grader modules are empty | All Phase 6 work in §6.6 and the drawing-specific result treatment in §6.7 |
 
 This matrix is a concise reconciliation aid, not a second backlog. GitHub Issues remain canonical for actionable work, and [Current architecture](../architecture.md) remains canonical for implemented behavior.
@@ -156,21 +156,22 @@ Every data-bearing screen needs explicit design for: **loading**, **empty** (e.g
 
 ## 8. Design System Notes
 
-- Tailwind utility classes per the master plan's stack — no separate design system to build from scratch.
+- The checked-in Organic mockup (Phase 5.5) is the design system: its color ramps, type, spacing, radius, and shadow tokens live in `frontend/src/styles/organic.css` as `organic`-prefixed Tailwind utilities, and shared primitives (`Button`, `Card`, `Field`/`Input`, `Tag`) under `frontend/src/components/ui/` compose those utilities rather than a separate hand-written CSS-class layer — this codebase stays Tailwind-utility-first. Organic ships light-only; dark mode was dropped app-wide rather than reinvented (no dark tokens exist in the source system).
+- Organic has no error/danger role — `--color-organic-danger`/`-danger-bg` were added deliberately and scoped narrowly (failed-status chips, form error banners, destructive-action text), not part of the delivered mockup.
 - Diagrams (`MermaidDiagram.tsx`) and code snippets (`CitationPanel.tsx`) are the two places visual polish matters most, since they're the "does this feel like a real study tool" moments — worth disproportionate design attention relative to, say, the dashboard list view.
-- Status/progress indicators (§6.2) should use a consistent color-and-icon language across `Dashboard.tsx` and `IndexingProgress.tsx` — same five states, same visual treatment, everywhere they appear.
+- Status/progress indicators (§6.2) use a consistent color-and-icon language across `Dashboard.tsx` and `IndexingProgress.tsx` — `IndexingProgress.tsx` is the single shared component behind both (a `chip` variant and a `stepper` variant), not two separate implementations kept in sync by hand.
 
 ## 9. Open Items for Design/Build
 
-- Per-quiz feedback-timing toggle (§6.5) isn't in the master plan's `Quiz` schema — needs a field (e.g., `feedback_mode`) added if this is built as specified.
 - Whether the "View raw analysis" debug viewer (§6.4) is worth gating behind anything, or just always visible — leaning toward always-visible since this remains a single-user tool.
+- Visual-regression screenshot baselines (Phase 5.5's own checklist item) aren't captured yet — the Playwright `e2e/` job only starts the frontend dev server, so authenticated screens with real data need either the backend stack running in CI or mocked API responses before baselines can be added.
 
 ## 10. Phasing
 
 This spec's flows map directly onto the master plan's Phase 4–7 UI work. Phase 8 voice learning is scoped separately in the master plan and does not change these requirements:
 
-- **Phase 4 — baseline implemented:** §6.1, §6.2, §6.3 (minus staleness and the known citation/retry gaps), and §6.4's debug viewer
-- **Phase 5 — baseline implemented:** §6.5 and §6.7 for MCQ/fill-blank, with the known gaps linked in §5.1
-- **Phase 5.5 — next:** apply the checked-in mockup's Organic visual system and screen treatments to the real Phase 4–5 flows; resolve the linked design-parity gaps; verify responsive, loading, empty, error, disabled, hover, pressed, and keyboard-focus states
+- **Phase 4 — baseline implemented:** §6.1, §6.2, §6.3 (minus staleness, which depends on Phase 7 diffing), and §6.4's debug viewer
+- **Phase 5 — baseline implemented:** §6.5 and §6.7 for MCQ/fill-blank
+- **Phase 5.5 — Organic applied to every screen; verification still open:** the checked-in mockup's visual system and screen treatments are applied across login/register, dashboard, add-repo, repo detail, study guide, quiz taker, and results, and every linked design-parity gap in §5.1 is closed. Still open: visual-regression screenshot baselines, and a full manual responsive/keyboard-focus sweep beyond the spot checks done screen-by-screen
 - **Phase 6 — not started:** §6.6, plus the drawing-specific parts of §6.7
 - **Phase 7 — planned:** staleness banner (depends on diffing), any expansion of §6.4 if the debug viewer proves insufficient

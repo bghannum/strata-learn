@@ -29,7 +29,7 @@ function stageState(stageIndex: number, currentIndex: number, isReady: boolean):
 // (see organic.css), used only for this failed state.
 const DOT_CLASSES: Record<StageState, string> = {
   'not-started': 'bg-organic-neutral-400',
-  'in-progress': 'bg-organic-accent animate-pulse',
+  'in-progress': 'bg-organic-accent animate-pulse motion-reduce:animate-none',
   complete: 'bg-organic-accent-2',
   failed: 'bg-organic-danger',
 }

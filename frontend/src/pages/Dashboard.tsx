@@ -71,11 +71,11 @@ function Dashboard() {
     <main className="mx-auto max-w-3xl p-7">
       {loading && (
         <div>
-          <div className="mb-5.5 h-8 w-56 animate-pulse rounded-lg bg-organic-neutral-300" />
+          <div className="mb-5.5 h-8 w-56 animate-pulse rounded-lg bg-organic-neutral-300 motion-reduce:animate-none" />
           <div className="flex flex-col gap-3.5 rounded-[32px] bg-organic-surface p-5.5">
-            <div className="h-3.5 w-[90%] animate-pulse rounded-md bg-organic-neutral-300" />
-            <div className="h-3.5 w-[70%] animate-pulse rounded-md bg-organic-neutral-300" />
-            <div className="h-3.5 w-[80%] animate-pulse rounded-md bg-organic-neutral-300" />
+            <div className="h-3.5 w-[90%] animate-pulse rounded-md bg-organic-neutral-300 motion-reduce:animate-none" />
+            <div className="h-3.5 w-[70%] animate-pulse rounded-md bg-organic-neutral-300 motion-reduce:animate-none" />
+            <div className="h-3.5 w-[80%] animate-pulse rounded-md bg-organic-neutral-300 motion-reduce:animate-none" />
           </div>
         </div>
       )}
