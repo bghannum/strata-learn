@@ -68,10 +68,16 @@ function IndexingProgress({ status, lastNonTerminalStatus, error, variant }: Ind
             return (
               <li key={stage.label} className="flex items-center gap-2">
                 <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${DOT_CLASSES[state]}`} />
+                {/* opacity-70, not -45 — found via Codex's PR #47 review class:
+                -45 is 2.72:1 on organic-bg, below the 4.5:1 small-text
+                requirement; -70 clears it (5.67:1). Not a disabled control
+                (WCAG's contrast exemption doesn't apply), just a
+                not-yet-reached stage label a sighted low-vision user still
+                needs to read. */}
                 <span
                   className={
                     state === 'not-started'
-                      ? 'text-sm text-organic-text opacity-45'
+                      ? 'text-sm text-organic-text opacity-70'
                       : 'text-sm font-medium text-organic-text'
                   }
                 >
@@ -118,9 +124,10 @@ function IndexingProgress({ status, lastNonTerminalStatus, error, variant }: Ind
         return (
           <li key={stage.label} className="flex items-center gap-2">
             <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${DOT_CLASSES[state]}`} />
+            {/* opacity-70, not -45 — see the failed-branch stepper above for why. */}
             <span
               className={
-                state === 'not-started' ? 'text-sm text-organic-text opacity-45' : 'text-sm font-medium text-organic-text'
+                state === 'not-started' ? 'text-sm text-organic-text opacity-70' : 'text-sm font-medium text-organic-text'
               }
             >
               {stage.label}

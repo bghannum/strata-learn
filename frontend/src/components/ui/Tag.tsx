@@ -11,7 +11,11 @@ const VARIANT_CLASSES: Record<TagVariant, string> = {
   accent: 'bg-organic-accent-100 text-organic-accent-800',
   'accent-2': 'bg-organic-accent-2-100 text-organic-accent-2-800',
   neutral: 'bg-organic-neutral-100 text-organic-neutral-800',
-  outline: 'border border-organic-accent text-organic-accent',
+  // border stays the base accent (a border only needs 3:1, and accent vs
+  // bg is 3.03:1) but text uses accent-700 — found via Codex's PR #47
+  // review: the base accent as tag text is ~3:1, below the 4.5:1 small-text
+  // requirement; accent-700 clears it (5.72:1).
+  outline: 'border border-organic-accent text-organic-accent-700',
   danger: 'bg-organic-danger-bg text-organic-danger',
 }
 

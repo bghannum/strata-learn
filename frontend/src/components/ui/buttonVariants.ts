@@ -24,9 +24,15 @@ const BASE =
 const BTN_PADDING = 'py-[var(--spacing-organic-2)] px-[calc(var(--spacing-organic-3)*1.2)]'
 
 const VARIANT_CLASSES: Record<ButtonVariant, string> = {
+  // Found via Codex's PR #47 review: the mockup's literal accent-500 fill
+  // with cream text is 3.03:1 — Organic's own readme says this exact pair
+  // is "tuned to at least 3:1... not for body copy," i.e. never intended
+  // for small text like a button label. Shifted one tier darker
+  // (700/800/900 instead of 500/600/700) clears 4.5:1 (5.72:1) while
+  // keeping the same "hover/press darkens further" progression.
   primary: cn(
     BTN_PADDING,
-    'bg-organic-accent text-organic-bg hover:bg-organic-accent-600 active:bg-organic-accent-700',
+    'bg-organic-accent-700 text-organic-bg hover:bg-organic-accent-800 active:bg-organic-accent-900',
   ),
   secondary: cn(
     BTN_PADDING,
@@ -34,8 +40,11 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
     'hover:bg-[color-mix(in_srgb,var(--color-organic-text)_7%,transparent)]',
     'active:bg-[color-mix(in_srgb,var(--color-organic-text)_14%,transparent)]',
   ),
+  // text-organic-accent-700, not the base accent (3.03:1 → 5.72:1) — same
+  // fix as primary, and matches Organic's readme guidance to use a deep
+  // ramp step for accent-colored text rather than the accent itself.
   ghost: cn(
-    'py-[var(--spacing-organic-2)] px-[var(--spacing-organic-1)] text-organic-accent',
+    'py-[var(--spacing-organic-2)] px-[var(--spacing-organic-1)] text-organic-accent-700',
     'hover:bg-[color-mix(in_srgb,var(--color-organic-accent)_10%,transparent)]',
     'active:bg-[color-mix(in_srgb,var(--color-organic-accent)_18%,transparent)]',
   ),

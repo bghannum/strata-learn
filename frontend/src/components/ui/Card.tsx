@@ -36,8 +36,11 @@ function Card({ elevation, className, children, ...props }: CardProps) {
 }
 
 export function CardKicker({ className, children, ...props }: HTMLAttributes<HTMLSpanElement>) {
+  // text-organic-accent-700, not the base accent — found via Codex's PR #47
+  // review: the base accent on organic-surface is 2.69:1, below the 4.5:1
+  // small-text requirement. accent-700 clears it (5.09:1).
   return (
-    <span className={cn('text-[10px] tracking-[0.1em] text-organic-accent uppercase', className)} {...props}>
+    <span className={cn('text-[10px] tracking-[0.1em] text-organic-accent-700 uppercase', className)} {...props}>
       {children}
     </span>
   )
@@ -60,14 +63,12 @@ export function CardBody({ className, children, ...props }: HTMLAttributes<HTMLP
 }
 
 export function CardMeta({ className, children, ...props }: HTMLAttributes<HTMLDivElement>) {
+  // text-organic-neutral-700, not a 50%-mixed text color — found via
+  // Codex's PR #47 review: the color-mix version is 2.99:1 on
+  // organic-surface, below the 4.5:1 small-text requirement. neutral-700
+  // clears it (4.92:1 on surface, 5.53:1 on bg).
   return (
-    <div
-      className={cn(
-        'flex items-center gap-[6px] text-[11px] text-[color-mix(in_srgb,var(--color-organic-text)_50%,transparent)]',
-        className,
-      )}
-      {...props}
-    >
+    <div className={cn('flex items-center gap-[6px] text-[11px] text-organic-neutral-700', className)} {...props}>
       {children}
     </div>
   )

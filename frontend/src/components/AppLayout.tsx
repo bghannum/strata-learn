@@ -60,9 +60,15 @@ function AppLayout() {
 
             {menuOpen && (
               <>
-                {/* Click-outside backdrop, same pattern as CitationPanel.tsx. */}
+                {/* Click-outside backdrop, same pattern as CitationPanel.tsx —
+                tabIndex={-1} found via Codex's PR #47 review: without it, a
+                keyboard user opening the menu and pressing Tab landed here
+                first (a full-screen, visually empty target) instead of
+                "Sign out", with the focus outline off at the viewport edge.
+                Excluded from the tab order; still clickable by mouse. */}
                 <button
                   type="button"
+                  tabIndex={-1}
                   aria-label="Close account menu"
                   className="fixed inset-0 z-10 cursor-default"
                   onClick={() => setMenuOpen(false)}
@@ -77,7 +83,10 @@ function AppLayout() {
                   >
                     Sign out
                   </button>
-                  <p className="m-0 text-[11.5px] leading-normal text-organic-text opacity-52">
+                  {/* opacity-70, not -52 — found via Codex's PR #47 review: -52
+                  is 3.32:1 on organic-bg, below the 4.5:1 small-text
+                  requirement; -70 clears it (5.67:1). */}
+                  <p className="m-0 text-[11.5px] leading-normal text-organic-text opacity-70">
                     Signing out clears the session cookie on this device.
                   </p>
                 </div>
