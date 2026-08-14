@@ -4,7 +4,9 @@ uses `with TestClient(app) as client:` and register_test_user."""
 import uuid
 from collections.abc import AsyncIterator
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from app.db.models import Question, QuestionType, Quiz, QuizStatus, SourceType, StudyGuide
 from app.db.session import async_session_factory
@@ -134,3 +136,47 @@ async def test_get_quiz_returns_no_questions_while_generating(pending_repo_facto
 
     assert response.status_code == 200
     assert response.json()["questions"] == []
+
+
+async def test_generate_quiz_reuses_existing_generating_quiz_without_reenqueueing(pending_repo_factory) -> None:
+    # A double-click, a retry, or two tabs must not enqueue a second paid
+    # generation batch for the same study guide while one is already in
+    # flight (Phase 5 Codex review, second pass).
+    redis = _RecordingRedis()
+
+    async def _override() -> AsyncIterator[_RecordingRedis]:
+        yield redis
+
+    app.dependency_overrides[get_redis_pool] = _override
+    try:
+        with TestClient(app) as client:
+            user = register_test_user(client)
+            repo_id, snapshot_id = await pending_repo_factory(
+                SourceType.git_url, "https://example.com/repo.git", user_id=uuid.UUID(user["id"])
+            )
+            await _make_ready_study_guide(repo_id, snapshot_id)
+
+            first = client.post(f"/quizzes/{repo_id}/generate")
+            second = client.post(f"/quizzes/{repo_id}/generate")
+
+        assert first.status_code == 201
+        assert second.status_code == 201
+        assert first.json()["id"] == second.json()["id"]
+        assert len(redis.enqueued) == 1  # not 2
+    finally:
+        app.dependency_overrides.pop(get_redis_pool, None)
+
+
+async def test_quiz_partial_unique_index_rejects_second_generating_row(pending_repo_factory) -> None:
+    # The DB-level guarantee create_pending_quiz's IntegrityError-recovery
+    # path depends on (Phase 5 Codex review, second pass).
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, "https://example.com/repo.git")
+    guide_id = await _make_ready_study_guide(repo_id, snapshot_id)
+
+    async with async_session_factory() as session:
+        session.add(Quiz(repo_id=repo_id, study_guide_id=guide_id, status=QuizStatus.generating))
+        await session.commit()
+
+        session.add(Quiz(repo_id=repo_id, study_guide_id=guide_id, status=QuizStatus.generating))
+        with pytest.raises(IntegrityError):
+            await session.commit()

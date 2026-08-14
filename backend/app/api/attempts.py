@@ -12,6 +12,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -180,6 +181,16 @@ async def get_attempt(
     return await _build_results(session, attempt)
 
 
+async def _find_in_progress_attempt(session: AsyncSession, quiz_id: UUID, user_id: UUID) -> Attempt | None:
+    return (
+        await session.exec(
+            select(Attempt).where(
+                Attempt.quiz_id == quiz_id, Attempt.user_id == user_id, Attempt.status == AttemptStatus.in_progress
+            )
+        )
+    ).first()
+
+
 @router.post("", response_model=AttemptOut, status_code=201)
 async def create_attempt(
     body: CreateAttemptIn,
@@ -199,21 +210,27 @@ async def create_attempt(
     # a fresh, empty attempt each time and orphan whatever answers were
     # already submitted to the previous one (found via the Phase 5 Codex
     # review; ui-spec.md §6.5 calls for exactly this interruption-safety).
-    existing = (
-        await session.exec(
-            select(Attempt).where(
-                Attempt.quiz_id == quiz.id,
-                Attempt.user_id == current_user.id,
-                Attempt.status == AttemptStatus.in_progress,
-            )
-        )
-    ).first()
+    #
+    # This check alone isn't race-free — two concurrent calls (the exact
+    # StrictMode/second-tab scenario it exists for) can both pass it before
+    # either commits. Attempt's partial unique index (db/models.py) is the
+    # real guarantee: a losing insert's IntegrityError is caught below and
+    # turned into "resume the winner's row" (found via the Phase 5 Codex
+    # review, second pass).
+    existing = await _find_in_progress_attempt(session, quiz.id, current_user.id)
     if existing is not None:
         return AttemptOut(id=existing.id, quiz_id=existing.quiz_id, status=existing.status.value, score=existing.score)
 
     attempt = Attempt(quiz_id=quiz.id, user_id=current_user.id)
     session.add(attempt)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        existing = await _find_in_progress_attempt(session, quiz.id, current_user.id)
+        if existing is None:
+            raise  # a real, different failure — don't mask it as "someone else won"
+        return AttemptOut(id=existing.id, quiz_id=existing.quiz_id, status=existing.status.value, score=existing.score)
     await session.refresh(attempt)
     return AttemptOut(id=attempt.id, quiz_id=attempt.quiz_id, status=attempt.status.value, score=attempt.score)
 
@@ -235,6 +252,27 @@ async def submit_answer(
     if question is None or question.quiz_id != attempt.quiz_id:
         raise HTTPException(404, "question not found on this attempt's quiz")
 
+    existing = (
+        await session.exec(
+            select(AnswerSubmission).where(
+                AnswerSubmission.attempt_id == attempt_id, AnswerSubmission.question_id == question_id
+            )
+        )
+    ).first()
+    # Checked before grading, not after — an ordinary HTTP retry (a lost
+    # response, a double-click) resubmitting the *same* answer must not
+    # incur a second paid grade_fill_blank call for a concept-mode question
+    # whose first attempt already committed (found via the Phase 5 Codex
+    # review, second pass). A genuinely changed answer still re-grades below.
+    if existing is not None and existing.selected_index == body.selected_index and existing.answer_text == body.answer_text:
+        return AnswerResultOut(
+            question_id=question.id,
+            score=existing.score,
+            feedback=existing.feedback,
+            correct_index=question.correct_index,
+            correct_answer=question.correct_answer,
+        )
+
     if question.question_type == QuestionType.mcq:
         if body.selected_index is None or not (0 <= body.selected_index < len(question.choices or [])):
             raise HTTPException(422, "selected_index is required and must be a valid choice index for an mcq question")
@@ -246,13 +284,6 @@ async def submit_answer(
             raise HTTPException(422, f"answer_text exceeds the {MAX_ANSWER_TEXT_CHARS}-character limit")
         score, feedback = await grade_fill_blank(llm, question, body.answer_text)
 
-    existing = (
-        await session.exec(
-            select(AnswerSubmission).where(
-                AnswerSubmission.attempt_id == attempt_id, AnswerSubmission.question_id == question_id
-            )
-        )
-    ).first()
     submission = existing or AnswerSubmission(attempt_id=attempt_id, question_id=question_id)
     submission.selected_index = body.selected_index
     submission.answer_text = body.answer_text

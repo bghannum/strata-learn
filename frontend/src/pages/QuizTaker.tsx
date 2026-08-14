@@ -22,6 +22,7 @@ function QuizTaker() {
   const [error, setError] = useState<string | null>(null)
 
   const [index, setIndex] = useState(0)
+  const [readyToFinish, setReadyToFinish] = useState(false)
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
   const [answerText, setAnswerText] = useState('')
   const [result, setResult] = useState<AnswerResult | null>(null)
@@ -56,7 +57,17 @@ function QuizTaker() {
         while (resumeIndex < fetchedQuiz.questions.length && answeredIds.has(fetchedQuiz.questions[resumeIndex].id)) {
           resumeIndex += 1
         }
-        setIndex(Math.min(resumeIndex, fetchedQuiz.questions.length - 1))
+        if (resumeIndex >= fetchedQuiz.questions.length) {
+          // Every question already has a graded submission (e.g. the page
+          // reloaded after the last answer saved but before Finish was
+          // clicked) — go straight to a Finish prompt instead of clamping
+          // back into the last question and forcing a resubmit, which would
+          // also repeat a paid judge call for a concept-mode question
+          // (found via the Phase 5 Codex review, second pass).
+          setReadyToFinish(true)
+        } else {
+          setIndex(resumeIndex)
+        }
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : (err as Error).message || 'Could not start this quiz.'))
       .finally(() => setLoading(false))
@@ -76,6 +87,25 @@ function QuizTaker() {
         <p className="rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">
           {error ?? 'Quiz not found.'}
         </p>
+      </main>
+    )
+  }
+
+  if (readyToFinish) {
+    return (
+      <main className="mx-auto max-w-2xl p-6">
+        <p className="text-sm text-gray-500 dark:text-gray-400">You've already answered every question.</p>
+        {error && (
+          <p className="mt-3 rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">{error}</p>
+        )}
+        <button
+          type="button"
+          onClick={handleFinish}
+          disabled={finishing}
+          className="mt-4 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+        >
+          {finishing ? 'Finishing…' : 'Finish Quiz'}
+        </button>
       </main>
     )
   }

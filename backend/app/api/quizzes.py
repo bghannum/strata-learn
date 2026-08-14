@@ -73,15 +73,20 @@ async def generate_quiz_endpoint(
     if guide is None:
         raise HTTPException(409, "study guide not ready yet — generate one before requesting a quiz")
 
-    quiz = await create_pending_quiz(session, repo_id, guide.id)
+    quiz, created = await create_pending_quiz(session, repo_id, guide.id)
 
-    try:
-        await redis.enqueue_job("generate_quiz", quiz_id=quiz.id, study_guide_id=guide.id)
-    except Exception as exc:
-        # quiz is already committed above — same "don't strand it silently"
-        # reasoning as api/repos.py's own enqueue try/except.
-        await fail_quiz(session, quiz.id)
-        raise HTTPException(503, "Could not queue quiz generation — try again shortly") from exc
+    if created:
+        try:
+            await redis.enqueue_job("generate_quiz", quiz_id=quiz.id, study_guide_id=guide.id)
+        except Exception as exc:
+            # quiz is already committed above — same "don't strand it silently"
+            # reasoning as api/repos.py's own enqueue try/except.
+            await fail_quiz(session, quiz.id)
+            raise HTTPException(503, "Could not queue quiz generation — try again shortly") from exc
+    # created=False means a `generating` quiz for this study guide already
+    # existed (this call reused it) — a second enqueue would double the
+    # billed LLM calls for the same quiz (found via the Phase 5 Codex
+    # review, second pass).
 
     return QuizOut(id=quiz.id, repo_id=quiz.repo_id, study_guide_id=quiz.study_guide_id, status=quiz.status.value, questions=[])
 

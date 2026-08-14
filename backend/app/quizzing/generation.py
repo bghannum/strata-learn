@@ -18,6 +18,7 @@ across slow external calls is a real cost here, not just a style choice).
 
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import delete, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -86,15 +87,43 @@ def identify_question_seeds(
     ]
 
 
-async def create_pending_quiz(session: AsyncSession, repo_id: UUID, study_guide_id: UUID) -> Quiz:
+async def _find_generating_quiz(session: AsyncSession, study_guide_id: UUID) -> Quiz | None:
+    return (
+        await session.exec(
+            select(Quiz).where(Quiz.study_guide_id == study_guide_id, Quiz.status == QuizStatus.generating)
+        )
+    ).first()
+
+
+async def create_pending_quiz(session: AsyncSession, repo_id: UUID, study_guide_id: UUID) -> tuple[Quiz, bool]:
     """The API creates this synchronously, before enqueueing the generation
     job, so POST /quizzes/{repo_id}/generate has an id to return immediately —
-    same pattern as create_pending_snapshot (analysis/snapshot.py)."""
+    same pattern as create_pending_snapshot (analysis/snapshot.py).
+
+    Returns (quiz, created) — `created` is False when an already-`generating`
+    quiz for this study guide is reused instead of starting a second one.
+    The initial check below isn't itself race-free (two concurrent calls can
+    both pass it before either commits — a double-click, a retry, two tabs),
+    so Quiz's partial unique index (db/models.py) is the real guarantee: a
+    losing insert's IntegrityError is caught and turned into "reuse the
+    winner's row" rather than a 500 (found via the Phase 5 Codex review,
+    second pass)."""
+    existing = await _find_generating_quiz(session, study_guide_id)
+    if existing is not None:
+        return existing, False
+
     quiz = Quiz(repo_id=repo_id, study_guide_id=study_guide_id, status=QuizStatus.generating)
     session.add(quiz)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        existing = await _find_generating_quiz(session, study_guide_id)
+        if existing is None:
+            raise  # a real, different failure — don't mask it as "someone else won"
+        return existing, False
     await session.refresh(quiz)
-    return quiz
+    return quiz, True
 
 
 async def fail_quiz(session: AsyncSession, quiz_id: UUID) -> None:

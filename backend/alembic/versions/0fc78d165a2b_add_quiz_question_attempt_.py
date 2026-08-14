@@ -1,8 +1,8 @@
 """add quiz question attempt answersubmission tables
 
-Revision ID: eca03e46c18b
+Revision ID: 0fc78d165a2b
 Revises: 38410b743b56
-Create Date: 2026-08-13 18:32:28.593288
+Create Date: 2026-08-13 20:42:14.435627
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ import sqlmodel
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'eca03e46c18b'
+revision: str = '0fc78d165a2b'
 down_revision: Union[str, Sequence[str], None] = '38410b743b56'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -34,6 +34,7 @@ def upgrade() -> None:
     )
     op.create_index(op.f('ix_quiz_repo_id'), 'quiz', ['repo_id'], unique=False)
     op.create_index(op.f('ix_quiz_study_guide_id'), 'quiz', ['study_guide_id'], unique=False)
+    op.create_index('uq_quiz_generating_per_study_guide', 'quiz', ['study_guide_id'], unique=True, postgresql_where=sa.text("status = 'generating'"))
     op.create_table('attempt',
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('quiz_id', sa.Uuid(), nullable=False),
@@ -48,6 +49,7 @@ def upgrade() -> None:
     )
     op.create_index(op.f('ix_attempt_quiz_id'), 'attempt', ['quiz_id'], unique=False)
     op.create_index(op.f('ix_attempt_user_id'), 'attempt', ['user_id'], unique=False)
+    op.create_index('uq_attempt_in_progress_per_quiz_user', 'attempt', ['quiz_id', 'user_id'], unique=True, postgresql_where=sa.text("status = 'in_progress'"))
     op.create_table('question',
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('quiz_id', sa.Uuid(), nullable=False),
@@ -101,9 +103,11 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_question_source_citation_id'), table_name='question')
     op.drop_index(op.f('ix_question_quiz_id'), table_name='question')
     op.drop_table('question')
+    op.drop_index('uq_attempt_in_progress_per_quiz_user', table_name='attempt', postgresql_where=sa.text("status = 'in_progress'"))
     op.drop_index(op.f('ix_attempt_user_id'), table_name='attempt')
     op.drop_index(op.f('ix_attempt_quiz_id'), table_name='attempt')
     op.drop_table('attempt')
+    op.drop_index('uq_quiz_generating_per_study_guide', table_name='quiz', postgresql_where=sa.text("status = 'generating'"))
     op.drop_index(op.f('ix_quiz_study_guide_id'), table_name='quiz')
     op.drop_index(op.f('ix_quiz_repo_id'), table_name='quiz')
     op.drop_table('quiz')

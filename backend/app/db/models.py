@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import Enum
 
-from sqlalchemy import JSON, Column, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, Index, UniqueConstraint, text
 from sqlalchemy import Enum as SAEnum
 from sqlmodel import Field, SQLModel
 
@@ -250,6 +250,23 @@ class Citation(SQLModel, table=True):
 
 
 class Quiz(SQLModel, table=True):
+    # A DB-level guarantee that at most one generation is ever in flight per
+    # study guide — the app-level "check for an existing `generating` quiz
+    # first" in generation.create_pending_quiz has a race window between two
+    # concurrent POST /quizzes/{repo_id}/generate calls (a double-click, a
+    # retry, two tabs) that both pass the check before either commits; this
+    # partial unique index turns the loser's insert into a conflict instead
+    # of a second paid generation job (found via the Phase 5 Codex review,
+    # second pass).
+    __table_args__ = (
+        Index(
+            "uq_quiz_generating_per_study_guide",
+            "study_guide_id",
+            unique=True,
+            postgresql_where=text("status = 'generating'"),
+        ),
+    )
+
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     repo_id: uuid.UUID = Field(foreign_key="repo.id", index=True)
     study_guide_id: uuid.UUID = Field(foreign_key="studyguide.id", index=True)
@@ -292,6 +309,22 @@ class Question(SQLModel, table=True):
 
 
 class Attempt(SQLModel, table=True):
+    # Same DB-level guarantee as Quiz's partial index, for the same race:
+    # POST /attempts' app-level "resume an existing in_progress attempt"
+    # check (api/attempts.py) has a window between two concurrent calls for
+    # the same (quiz, user) — React StrictMode's double mount-effect
+    # invocation, a reload racing the first request, or a second tab — that
+    # both pass the check before either commits (found via the Phase 5
+    # Codex review, second pass).
+    __table_args__ = (
+        Index(
+            "uq_attempt_in_progress_per_quiz_user",
+            "quiz_id", "user_id",
+            unique=True,
+            postgresql_where=text("status = 'in_progress'"),
+        ),
+    )
+
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     quiz_id: uuid.UUID = Field(foreign_key="quiz.id", index=True)
     # Required, unlike Repo.user_id — the original plan's Phase-1-era note
