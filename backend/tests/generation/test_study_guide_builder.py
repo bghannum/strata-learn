@@ -18,18 +18,22 @@ from app.db.models import (
     AnalysisSnapshot,
     Citation,
     CodeUnit,
+    Confidence,
     ModuleSummary,
     PatternClaim,
     Section,
     SectionType,
     StudyGuide,
+    Subsystem,
     TradeoffCard,
     UnitType,
 )
 from app.db.session import async_session_factory
+from app.generation.architecture_narrative import ArchitectureNarrativeOutput, WhySection
 from app.generation.diagram_builder import DiagramLabelItem, DiagramLabelOutput
 from app.generation.study_guide_builder import (
     MAX_OVERVIEW_ENTRY_POINTS,
+    _build_architecture,
     _build_deep_dives,
     _build_overview,
     _whole_file_citation,
@@ -45,8 +49,26 @@ _FILES = {
 
 
 def _diagram_llm() -> FakeLLMProvider:
+    """The narrative call runs first, then the diagram labeler — build_sections
+    synthesizes before it draws."""
     return FakeLLMProvider(
         [
+            LLMResponse(
+                text="",
+                parsed=ArchitectureNarrativeOutput(
+                    overview="The app takes a request and hands the slow work to a worker.",
+                    why_sections=[
+                        WhySection(
+                            heading="Why configuration lives in one module",
+                            body="Every caller reads the same settings object instead of its own environment.",
+                            supporting_paths=["app/config.py"],
+                        )
+                    ],
+                ),
+                model="fake-model",
+                stop_reason="end_turn",
+                usage={},
+            ),
             LLMResponse(
                 text="",
                 parsed=DiagramLabelOutput(
@@ -230,6 +252,115 @@ def test_build_deep_dives_omits_part_labels_for_a_whole_file_summary() -> None:
     assert "Part 1 of 1" not in section.content_md
 
 
+def _deep_dive_summary(file_path: str, purpose: str) -> ModuleSummary:
+    return ModuleSummary(
+        snapshot_id=uuid4(),
+        file_path=file_path,
+        purpose=purpose,
+        role_in_system="does its part",
+        key_concepts=[],
+        line_start=1,
+        line_end=20,
+        prompt_version="v1",
+        model="fake-model",
+    )
+
+
+def _deep_dive_subsystem(name: str, file_paths: list[str], order: int) -> Subsystem:
+    return Subsystem(
+        snapshot_id=uuid4(),
+        key=name.lower(),
+        name=name,
+        role=f"the {name} part",
+        file_paths=file_paths,
+        depth=order,
+        order=order,
+        prompt_version="v1",
+        model="fake-model",
+    )
+
+
+def test_build_deep_dives_groups_by_subsystem_in_partition_order() -> None:
+    # #54: a flat alphabetical file list is a reference index — it gives a
+    # reader no way to see which files form a unit or what order to read them.
+    summaries = [
+        _deep_dive_summary("app/worker/tasks.py", "Runs jobs"),
+        _deep_dive_summary("app/api/repos.py", "Serves repos"),
+    ]
+    subsystems = [
+        _deep_dive_subsystem("HTTP API", ["app/api/repos.py"], order=0),
+        _deep_dive_subsystem("Background worker", ["app/worker/tasks.py"], order=1),
+    ]
+
+    section = _build_deep_dives(summaries, subsystems)
+
+    assert section is not None
+    # "Background worker" sorts before "HTTP API" alphabetically, so the
+    # partition's order is doing real work here rather than coinciding
+    assert section.content_md.index("## HTTP API") < section.content_md.index("## Background worker")
+    assert "the HTTP API part" in section.content_md
+
+
+def test_build_deep_dives_puts_unclaimed_files_under_other() -> None:
+    # A snapshot indexed before subsystems existed, or a file no subsystem
+    # claims — it must still appear. Silently dropping files from the deep
+    # dives would be worse than grouping them imperfectly.
+    summaries = [_deep_dive_summary("app/api/repos.py", "Serves repos"), _deep_dive_summary("stray.py", "Strays")]
+    subsystems = [_deep_dive_subsystem("HTTP API", ["app/api/repos.py"], order=0)]
+
+    section = _build_deep_dives(summaries, subsystems)
+
+    assert section is not None
+    assert "## Other" in section.content_md
+    assert section.content_md.index("## HTTP API") < section.content_md.index("## Other")
+    assert "`stray.py`" in section.content_md
+
+
+def test_build_deep_dives_skips_a_subsystem_with_no_summarized_files() -> None:
+    summaries = [_deep_dive_summary("app/api/repos.py", "Serves repos")]
+    subsystems = [
+        _deep_dive_subsystem("HTTP API", ["app/api/repos.py"], order=0),
+        _deep_dive_subsystem("Empty", ["app/never/summarized.py"], order=1),
+    ]
+
+    section = _build_deep_dives(summaries, subsystems)
+
+    assert section is not None
+    assert "## Empty" not in section.content_md
+
+
+def test_build_deep_dives_without_subsystems_stays_flat() -> None:
+    # Backward compatibility for a snapshot with no Subsystem rows: no empty
+    # "Other" heading wrapped around what is already a flat list.
+    section = _build_deep_dives([_deep_dive_summary("app/main.py", "Runs it")], [])
+
+    assert section is not None
+    # no subsystem headings (## ...); the per-file headings (### ...) remain
+    assert not [line for line in section.content_md.splitlines() if line.startswith("## ")]
+    assert "`app/main.py`" in section.content_md
+
+
+def test_build_architecture_renders_evidence_plainly_without_a_narrative() -> None:
+    # If the narrative call produced nothing, the evidence must not be
+    # collapsed behind a disclosure the reader has to find and open — it's the
+    # whole section at that point.
+    claim = PatternClaim(
+        snapshot_id=uuid4(),
+        primary_pattern="modular monolith",
+        confidence=Confidence.medium,
+        evidence=[{"claim": "one app package", "supporting_paths": ["app/main.py"], "citations": []}],
+        caveats=None,
+        prompt_version="v1",
+        model="fake-model",
+    )
+
+    section = _build_architecture(claim, None, None, None, [], None)
+
+    assert section is not None
+    assert "<details>" not in section.content_md
+    assert section.content_md.startswith("**Primary pattern:**")
+
+
 async def test_run_study_guide_generation_builds_all_five_sections(layer_a_ready_factory) -> None:
     repo_id, snapshot_id, source_dir = await layer_a_ready_factory(_FILES)
     await _seed_layer_b(snapshot_id)
@@ -259,6 +390,15 @@ async def test_run_study_guide_generation_builds_all_five_sections(layer_a_ready
     assert architecture.prompt_version == "v1"
     assert "confidence: medium" in architecture.content_md
     assert "Confidence." not in architecture.content_md  # not the raw enum name
+
+    # #52: the narrative leads and the evidence list is demoted, rather than
+    # the section being a pattern label plus bullets.
+    assert architecture.content_md.startswith("The app takes a request")
+    assert "### Why configuration lives in one module" in architecture.content_md
+    assert architecture.content_md.index("The app takes a request") < architecture.content_md.index(
+        "**Primary pattern:**"
+    )
+    assert "<details>" in architecture.content_md
 
     tradeoffs = sections[2]
     assert "centralize settings in one module" in tradeoffs.content_md
