@@ -147,3 +147,61 @@ class Service {
 '''
         pf = parse_source(source, "src/Button.tsx", Language.typescript)
         assert "Button" in _units_by_name(pf.units)
+
+
+class TestPythonCallAndGuardFacts:
+    """called_names/has_main_guard back entry-point detection (#12), which used
+    to regex raw bytes and so counted any mention of a framework as a use of
+    it."""
+
+    def test_called_names_captures_bare_and_dotted_callees(self):
+        source = b"import uvicorn\n\napp = FastAPI()\nuvicorn.run(app)\n"
+        pf = parse_source(source, "main.py", Language.python)
+        assert "FastAPI" in pf.called_names
+        assert "uvicorn.run" in pf.called_names
+
+    def test_called_names_excludes_mentions_in_comments_and_strings(self):
+        source = b'# calls FastAPI()\nREASON = "instantiates Flask()"\n'
+        pf = parse_source(source, "notes.py", Language.python)
+        assert pf.called_names == ()
+
+    def test_called_names_excludes_a_docstring_mention(self):
+        source = b'"""This module explains how Celery() is configured."""\n\nX = 1\n'
+        pf = parse_source(source, "docs.py", Language.python)
+        assert pf.called_names == ()
+
+    def test_called_names_finds_calls_nested_in_a_function(self):
+        source = b"def create_app():\n    return Flask(__name__)\n"
+        pf = parse_source(source, "factory.py", Language.python)
+        assert "Flask" in pf.called_names
+
+    def test_called_names_deduplicates_repeated_callees(self):
+        source = b"f()\nf()\ng()\n"
+        pf = parse_source(source, "repeat.py", Language.python)
+        assert pf.called_names == ("f", "g")
+
+    def test_main_guard_detected_at_module_level(self):
+        source = b'if __name__ == "__main__":\n    main()\n'
+        pf = parse_source(source, "cli.py", Language.python)
+        assert pf.has_main_guard is True
+
+    def test_main_guard_in_a_string_is_not_detected(self):
+        source = b'SNIPPET = \'if __name__ == "__main__":\'\n'
+        pf = parse_source(source, "template.py", Language.python)
+        assert pf.has_main_guard is False
+
+    def test_main_guard_nested_in_a_function_is_not_detected(self):
+        source = b'def f():\n    if __name__ == "__main__":\n        pass\n'
+        pf = parse_source(source, "nested.py", Language.python)
+        assert pf.has_main_guard is False
+
+    def test_unrelated_module_level_if_is_not_a_main_guard(self):
+        source = b'import sys\n\nif sys.platform == "darwin":\n    pass\n'
+        pf = parse_source(source, "platform.py", Language.python)
+        assert pf.has_main_guard is False
+
+    def test_javascript_files_have_empty_python_only_facts(self):
+        source = b"const app = express();\n"
+        pf = parse_source(source, "src/app.js", Language.javascript)
+        assert pf.called_names == ()
+        assert pf.has_main_guard is False

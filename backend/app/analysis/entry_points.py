@@ -1,31 +1,61 @@
 """Entry-point detection: heuristics over common patterns (a `__main__` guard,
 package.json scripts/main, Dockerfile CMD/ENTRYPOINT, manage.py, FastAPI/Flask/
-arq/Celery app objects). LAYER A — pattern matching only, no LLM (ADR-006).
+arq/Celery app objects). LAYER A — structural matching only, no LLM (ADR-006).
 False negatives are expected and fine; a heuristic that starts guessing when it
 can't point at a concrete source pattern is worse than one that stays quiet.
+
+Python detection reads the tree-sitter facts parser.py already extracted
+(`called_names`, `has_main_guard`, and class units) rather than regex-matching
+raw file bytes. The regex version counted any *mention* of a framework as a use
+of it, so a comment, docstring, or string literal naming `FastAPI(` flagged its
+file — including this module, which flagged itself on its own `reason` strings
+(#12). Entry points feed the Overview section, the pattern_detector prompt, and
+tradeoff_extractor's decision-point scoring, so a false positive there
+propagates into three separate generated outputs.
+
+package.json is still parsed as JSON and Dockerfile still matched by regex:
+neither is code with an AST to consult, and both are already matched
+structurally enough for their format.
 """
 
 import json
 import re
 from pathlib import Path
 
+from app.analysis.parser import ParsedFile
 from app.ingestion.walker import WalkedFile
 
-_PY_MAIN_GUARD = re.compile(rb"if\s+__name__\s*==\s*['\"]__main__['\"]\s*:")
-_FASTAPI_APP = re.compile(rb"\bFastAPI\s*\(")
-_FLASK_APP = re.compile(rb"\bFlask\s*\(")
-_UVICORN_RUN = re.compile(rb"\buvicorn\.run\s*\(")
-_ARQ_WORKER = re.compile(rb"\bWorkerSettings\b")
-_CELERY_APP = re.compile(rb"\bCelery\s*\(")
 _DOCKER_CMD = re.compile(rb"^\s*(CMD|ENTRYPOINT)\s+(.*)$", re.MULTILINE)
 
+# Framework objects whose *construction* marks the file as an entry point, keyed
+# by the callee name as written in source.
+_CONSTRUCTOR_ENTRY_POINTS = {
+    "FastAPI": ("http", "instantiates FastAPI()"),
+    "Flask": ("http", "instantiates Flask()"),
+    "Celery": ("worker", "instantiates Celery()"),
+}
 
-def detect_entry_points(files: list[WalkedFile]) -> list[dict]:
+# Calls matched on their full dotted name instead of the final attribute. A
+# bare "run" is far too common to treat as a signal on its own, whereas the
+# constructors above are distinctive enough that `web.FastAPI()` is still
+# almost certainly the real thing.
+_DOTTED_CALL_ENTRY_POINTS = {
+    "uvicorn.run": ("http", "calls uvicorn.run()"),
+}
+
+# arq's documented convention is a class by this exact name; the class *body*
+# is the worker's configuration, so defining one is the entry point.
+_ARQ_WORKER_SETTINGS = "WorkerSettings"
+
+
+def detect_entry_points(files: list[WalkedFile], parsed_files: list[ParsedFile]) -> list[dict]:
+    parsed_by_path = {pf.relative_path: pf for pf in parsed_files}
+
     entry_points: list[dict] = []
     for f in files:
         name = Path(f.relative_path).name
         if name.endswith(".py"):
-            entry_points.extend(_python_entry_points(f))
+            entry_points.extend(_python_entry_points(f, parsed_by_path.get(f.relative_path)))
         elif name == "package.json":
             entry_points.extend(_package_json_entry_points(f))
         elif name == "Dockerfile":
@@ -33,27 +63,35 @@ def detect_entry_points(files: list[WalkedFile]) -> list[dict]:
     return entry_points
 
 
-def _python_entry_points(f: WalkedFile) -> list[dict]:
-    try:
-        content = f.path.read_bytes()
-    except OSError:
-        return []
-
+def _python_entry_points(f: WalkedFile, parsed: ParsedFile | None) -> list[dict]:
     points: list[dict] = []
+
+    # Filename-based, so it holds even for a file tree-sitter produced nothing
+    # for (an empty manage.py still is one).
     if Path(f.relative_path).name == "manage.py":
         points.append({"file": f.relative_path, "kind": "cli", "reason": "manage.py (Django management entrypoint)"})
-    if _PY_MAIN_GUARD.search(content):
+
+    if parsed is None:
+        # Empty file, or one parse_file couldn't read — no structural facts to
+        # judge on, and guessing from the raw bytes is the behavior this
+        # replaced.
+        return points
+
+    if parsed.has_main_guard:
         points.append({"file": f.relative_path, "kind": "cli", "reason": 'if __name__ == "__main__": guard'})
-    if _FASTAPI_APP.search(content):
-        points.append({"file": f.relative_path, "kind": "http", "reason": "instantiates FastAPI()"})
-    if _FLASK_APP.search(content):
-        points.append({"file": f.relative_path, "kind": "http", "reason": "instantiates Flask()"})
-    if _UVICORN_RUN.search(content):
-        points.append({"file": f.relative_path, "kind": "http", "reason": "calls uvicorn.run()"})
-    if _ARQ_WORKER.search(content):
+
+    for called in parsed.called_names:
+        final_attribute = called.rsplit(".", 1)[-1]
+        if final_attribute in _CONSTRUCTOR_ENTRY_POINTS:
+            kind, reason = _CONSTRUCTOR_ENTRY_POINTS[final_attribute]
+            points.append({"file": f.relative_path, "kind": kind, "reason": reason})
+        if called in _DOTTED_CALL_ENTRY_POINTS:
+            kind, reason = _DOTTED_CALL_ENTRY_POINTS[called]
+            points.append({"file": f.relative_path, "kind": kind, "reason": reason})
+
+    if any(u.unit_type == "class" and u.name == _ARQ_WORKER_SETTINGS for u in parsed.units):
         points.append({"file": f.relative_path, "kind": "worker", "reason": "defines an arq WorkerSettings class"})
-    if _CELERY_APP.search(content):
-        points.append({"file": f.relative_path, "kind": "worker", "reason": "instantiates Celery()"})
+
     return points
 
 

@@ -185,6 +185,13 @@ class ModuleSummary(SQLModel, table=True):
     key_concepts: list = Field(default_factory=list, sa_column=Column(JSON))
     line_start: int
     line_end: int
+    # A file with more units than MAX_UNITS_PER_CHUNK (semantics/chunking.py) is
+    # summarized in several LLM calls, one row each, all sharing this file_path
+    # and the same whole-module line_start/line_end. Without these, those rows
+    # are indistinguishable and a consumer can't tell a whole-file summary from
+    # one part of one (#14). 1-indexed; a normal single-chunk file is 1 of 1.
+    chunk_index: int = 1
+    chunk_count: int = 1
     prompt_version: str
     model: str
     created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())

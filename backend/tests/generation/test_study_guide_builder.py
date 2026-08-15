@@ -30,6 +30,7 @@ from app.db.session import async_session_factory
 from app.generation.diagram_builder import DiagramLabelItem, DiagramLabelOutput
 from app.generation.study_guide_builder import (
     MAX_OVERVIEW_ENTRY_POINTS,
+    _build_deep_dives,
     _build_overview,
     _whole_file_citation,
     run_study_guide_generation,
@@ -181,6 +182,52 @@ def test_build_overview_caps_entry_points(tmp_path: Path) -> None:
     assert len(section.citations) == MAX_OVERVIEW_ENTRY_POINTS
     assert section.content_md.count("- **file") == MAX_OVERVIEW_ENTRY_POINTS
     assert "10 more, not shown" in section.content_md
+
+
+def test_build_deep_dives_orders_split_file_parts_by_chunk_index() -> None:
+    # #14: every chunk of a split file carries the same whole-module line range,
+    # so the previous sort key (line_start) was identical across them and the
+    # "Part N of M" labels were assigned in whatever order Postgres returned
+    # the rows. Passing them in reversed order must still render 1 then 2.
+    def _summary(chunk_index: int, purpose: str) -> ModuleSummary:
+        return ModuleSummary(
+            snapshot_id=uuid4(),
+            file_path="app/big.py",
+            purpose=purpose,
+            role_in_system="part of the big module",
+            key_concepts=[],
+            line_start=1,
+            line_end=900,
+            chunk_index=chunk_index,
+            chunk_count=2,
+            prompt_version="v1",
+            model="fake-model",
+        )
+
+    section = _build_deep_dives([_summary(2, "Second half"), _summary(1, "First half")])
+
+    assert section is not None
+    assert section.content_md.index("**Part 1 of 2:**") < section.content_md.index("**Part 2 of 2:**")
+    assert section.content_md.index("First half") < section.content_md.index("Second half")
+
+
+def test_build_deep_dives_omits_part_labels_for_a_whole_file_summary() -> None:
+    summary = ModuleSummary(
+        snapshot_id=uuid4(),
+        file_path="app/main.py",
+        purpose="Runs the application",
+        role_in_system="Entry point",
+        key_concepts=[],
+        line_start=1,
+        line_end=20,
+        prompt_version="v1",
+        model="fake-model",
+    )
+
+    section = _build_deep_dives([summary])
+
+    assert section is not None
+    assert "Part 1 of 1" not in section.content_md
 
 
 async def test_run_study_guide_generation_builds_all_five_sections(layer_a_ready_factory) -> None:

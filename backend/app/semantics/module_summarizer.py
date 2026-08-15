@@ -31,6 +31,8 @@ class ModuleSummaryResult:
     line_end: int
     prompt_version: str
     model: str
+    chunk_index: int = 1
+    chunk_count: int = 1
 
 
 def _import_list(file_path: str, dependency_graph: dict) -> list[str]:
@@ -93,6 +95,8 @@ async def summarize_modules(
                 line_end=chunk.module_unit.line_end,
                 prompt_version=template.version,
                 model=response.model,
+                chunk_index=chunk.chunk_index,
+                chunk_count=chunk.chunk_count,
             )
         )
 

@@ -77,6 +77,61 @@ def test_chunk_by_module_caps_total_chunks_across_many_files_deterministically()
     assert selected == expected
 
 
+def test_single_chunk_file_is_part_one_of_one() -> None:
+    units = [
+        _unit("a.py", UnitType.module, "a.py", 1, 20),
+        _unit("a.py", UnitType.function, "helper", 10, 15),
+    ]
+
+    chunk = chunk_by_module(units)[0]
+
+    assert (chunk.chunk_index, chunk.chunk_count) == (1, 1)
+
+
+def test_split_file_chunks_are_numbered_in_order() -> None:
+    # #14: every chunk of a file shares its file_path and its whole-module line
+    # range, so before this the persisted rows were indistinguishable and a
+    # consumer couldn't tell one part from another — or from a whole summary.
+    units = [_unit("big.py", UnitType.module, "big.py", 1, 1000)]
+    units += [
+        _unit("big.py", UnitType.function, f"fn_{i}", i, i + 1) for i in range(MAX_UNITS_PER_CHUNK + 10)
+    ]
+
+    chunks = chunk_by_module(units)
+
+    assert [(c.chunk_index, c.chunk_count) for c in chunks] == [(1, 2), (2, 2)]
+    # the ordering the index encodes is the unit order, which the shared line
+    # range could never express
+    assert chunks[0].units[0].name == "fn_0"
+    assert chunks[1].units[0].name == f"fn_{MAX_UNITS_PER_CHUNK}"
+
+
+def test_chunk_count_reflects_chunks_actually_emitted_not_chunks_wanted() -> None:
+    # A file cut off mid-way by MAX_CHUNKS_PER_SNAPSHOT must report the count
+    # that will really exist — claiming "part 1 of 5" when only 3 summaries are
+    # ever generated would describe rows no consumer can find.
+    unit_count = (MAX_CHUNKS_PER_SNAPSHOT + 5) * MAX_UNITS_PER_CHUNK
+    units = [_unit("huge.py", UnitType.module, "huge.py", 1, 100000)]
+    units += [_unit("huge.py", UnitType.function, f"fn_{i}", i, i + 1) for i in range(unit_count)]
+
+    chunks = chunk_by_module(units)
+
+    assert len(chunks) == MAX_CHUNKS_PER_SNAPSHOT
+    assert all(c.chunk_count == MAX_CHUNKS_PER_SNAPSHOT for c in chunks)
+    assert [c.chunk_index for c in chunks] == list(range(1, MAX_CHUNKS_PER_SNAPSHOT + 1))
+
+
+def test_chunk_indices_are_per_file_not_global() -> None:
+    units = []
+    for name in ("a.py", "b.py"):
+        units.append(_unit(name, UnitType.module, name, 1, 20))
+        units.append(_unit(name, UnitType.function, "helper", 10, 15))
+
+    chunks = chunk_by_module(units)
+
+    assert all(c.chunk_index == 1 and c.chunk_count == 1 for c in chunks)
+
+
 def test_chunk_by_module_caps_total_chunks_within_a_single_oversized_file() -> None:
     # Found via Codex's Phase 2 pre-push review: a cap on distinct *files*
     # alone doesn't bound billed LLM calls — a single valid file with enough
