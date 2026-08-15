@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   ApiError,
+  checkForUpdates,
   generateQuiz,
   getRepo,
   getRepoQuiz,
   getRepoStudyGuide,
   getSnapshot,
+  getUpdateStatus,
   isAbortError,
   pollQuiz,
   PollTimeoutError,
@@ -18,6 +20,7 @@ import {
   type Repo,
   type SnapshotStatus,
   type StudyGuide,
+  type UpdateStatus,
 } from '../api/client'
 import IndexingProgress from '../components/IndexingProgress'
 import Button from '../components/ui/Button'
@@ -27,6 +30,31 @@ const QUIZ_TIMEOUT_MESSAGE = 'Quiz generation is taking longer than expected. Re
 
 function isTerminal(status: SnapshotStatus | undefined): boolean {
   return status === 'ready' || status === 'failed'
+}
+
+/** "unknown" has several distinct causes and saying which one is the whole
+ *  point — an unexplained shrug next to a "Check for updates" button that a
+ *  zip-upload repo can never satisfy would just be confusing. */
+const UNKNOWN_REASONS: Record<string, string> = {
+  zip_upload: 'Uploaded zip — no remote to compare against',
+  never_checked: 'Not checked yet',
+  remote_unreachable: "Couldn't reach the remote",
+  no_indexed_commit: 'No commit recorded for this index',
+}
+
+function UpdateStatusBadge({ status }: { status: UpdateStatus }) {
+  if (status.status === 'stale') {
+    return (
+      <p className="text-sm">
+        <span className="font-semibold text-organic-danger">New commits on the remote.</span>{' '}
+        This guide describes an earlier version of the code.
+      </p>
+    )
+  }
+  if (status.status === 'up_to_date') {
+    return <p className="text-sm opacity-70">Up to date with the remote.</p>
+  }
+  return <p className="text-sm opacity-70">{UNKNOWN_REASONS[status.reason ?? ''] ?? 'Update status unknown'}</p>
 }
 
 function RepoDetail() {
@@ -49,6 +77,9 @@ function RepoDetail() {
   const [feedbackMode, setFeedbackMode] = useState<FeedbackMode>('end_of_quiz')
   const [reindexing, setReindexing] = useState(false)
   const [reindexError, setReindexError] = useState<string | null>(null)
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
+  const [checkingUpdates, setCheckingUpdates] = useState(false)
+  const [updateError, setUpdateError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!repoId) return
@@ -159,6 +190,29 @@ function RepoDetail() {
   // rather than reusing this one — the endpoint this needed didn't exist
   // yet in Phase 4a). A fresh snapshot means useIndexingProgress reconnects
   // its WebSocket the moment `snapshot` updates to a non-terminal status.
+  // Only the *cached* result on load — the backend's GET does no network I/O,
+  // so this can't make the page wait on a third-party host. Actually asking the
+  // remote is the button below (#62).
+  useEffect(() => {
+    if (status !== 'ready' || !repoId) return
+    getUpdateStatus(repoId)
+      .then(setUpdateStatus)
+      .catch(() => {
+        // Not being able to read a cached staleness answer shouldn't take the
+        // page down with it — the guide is still perfectly readable.
+      })
+  }, [status, repoId])
+
+  function handleCheckUpdates() {
+    if (!repoId) return
+    setCheckingUpdates(true)
+    setUpdateError(null)
+    checkForUpdates(repoId)
+      .then(setUpdateStatus)
+      .catch((err) => setUpdateError(err instanceof ApiError ? err.message : 'Could not check for updates.'))
+      .finally(() => setCheckingUpdates(false))
+  }
+
   function handleRetry() {
     if (!repoId) return
     setReindexing(true)
@@ -210,6 +264,18 @@ function RepoDetail() {
           retryError={reindexError}
         />
       </div>
+
+      {status === 'ready' && updateStatus && (
+        <div className="mt-5.5 flex flex-wrap items-center gap-3 rounded-2xl border border-organic-divider p-3.5">
+          <UpdateStatusBadge status={updateStatus} />
+          {updateStatus.reason !== 'zip_upload' && (
+            <Button variant="secondary" onClick={handleCheckUpdates} disabled={checkingUpdates}>
+              {checkingUpdates ? 'Checking…' : 'Check for updates'}
+            </Button>
+          )}
+          {updateError && <p className="text-sm text-organic-danger">{updateError}</p>}
+        </div>
+      )}
 
       {status === 'ready' && (
         <div className="mt-5.5 flex flex-wrap items-center gap-3">

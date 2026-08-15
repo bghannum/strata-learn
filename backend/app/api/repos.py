@@ -12,6 +12,8 @@ mid-extract still surface async, as `status=failed` over WS /repos/{id}/progress
 import asyncio
 import io
 import json
+from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID
 
 from arq.connections import ArqRedis
@@ -26,6 +28,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -38,6 +41,7 @@ from app.db.session import get_session
 from app.ingestion.source import (
     SourcePreparationError,
     check_git_url_reachable,
+    get_remote_head_commit,
     validate_zip_upload,
 )
 from app.redis_pool import get_redis_pool
@@ -237,6 +241,91 @@ async def get_repo(
     if repo is None or repo.user_id != current_user.id:
         raise HTTPException(404, "repo not found")
     return repo
+
+
+class UpdateStatusOut(BaseModel):
+    """`status` is derived on every read rather than stored — see Repo's own
+    comment on why persisting a verdict would go silently wrong after a
+    reindex."""
+
+    status: Literal["up_to_date", "stale", "unknown"]
+    checked_at: datetime | None
+    remote_commit: str | None
+    indexed_commit: str | None
+    # Distinguishes the several ways "unknown" happens, so the UI can say
+    # "zip uploads can't be checked" instead of an unexplained shrug.
+    reason: str | None = None
+
+
+async def _update_status(session: AsyncSession, repo: Repo) -> UpdateStatusOut:
+    indexed_commit: str | None = None
+    if repo.latest_snapshot_id is not None:
+        snapshot = await session.get(AnalysisSnapshot, repo.latest_snapshot_id)
+        indexed_commit = snapshot.commit_hash if snapshot is not None else None
+
+    common = {
+        "checked_at": repo.updates_checked_at,
+        "remote_commit": repo.remote_head_commit,
+        "indexed_commit": indexed_commit,
+    }
+
+    if repo.source_type != SourceType.git_url:
+        # A zip upload has no remote to compare against and no commit_hash of
+        # its own (see the column's comment) — permanently uncheckable, which
+        # is a real answer rather than a failure.
+        return UpdateStatusOut(status="unknown", reason="zip_upload", **common)
+    if repo.updates_checked_at is None:
+        return UpdateStatusOut(status="unknown", reason="never_checked", **common)
+    if repo.remote_head_commit is None:
+        return UpdateStatusOut(status="unknown", reason="remote_unreachable", **common)
+    if indexed_commit is None:
+        return UpdateStatusOut(status="unknown", reason="no_indexed_commit", **common)
+    status = "up_to_date" if indexed_commit == repo.remote_head_commit else "stale"
+    return UpdateStatusOut(status=status, **common)
+
+
+@router.get("/{repo_id}/update-status", response_model=UpdateStatusOut)
+async def get_update_status(
+    repo_id: UUID, session: AsyncSession = Depends(get_session), current_user: User = Depends(get_current_user)
+) -> UpdateStatusOut:
+    """Reads the last check's result. Deliberately does no network I/O — a
+    `git ls-remote` on a page-load path would make every repo view wait on a
+    third-party host that can hang (#62). Checking is an explicit action; see
+    the POST below."""
+    repo = await session.get(Repo, repo_id)
+    if repo is None or repo.user_id != current_user.id:
+        raise HTTPException(404, "repo not found")
+    return await _update_status(session, repo)
+
+
+@router.post("/{repo_id}/check-updates", response_model=UpdateStatusOut)
+async def check_updates(
+    repo_id: UUID, session: AsyncSession = Depends(get_session), current_user: User = Depends(get_current_user)
+) -> UpdateStatusOut:
+    """Asks the remote for its current HEAD and records the answer.
+
+    The one place network I/O happens for this feature, and only because a
+    user asked for it. Offloaded to a thread for the same reason register()
+    offloads bcrypt: `git ls-remote` is blocking, and the single Uvicorn event
+    loop also serves the repo-progress WebSocket that other requests may be
+    waiting on.
+
+    An unreachable remote is recorded as "checked, couldn't tell" rather than
+    raising — the repository and its guide are both still fine, and a 5xx
+    would misrepresent a network hiccup as a broken request.
+    """
+    repo = await session.get(Repo, repo_id)
+    if repo is None or repo.user_id != current_user.id:
+        raise HTTPException(404, "repo not found")
+    if repo.source_type != SourceType.git_url:
+        raise HTTPException(409, "only a git-backed repo can be checked for updates")
+
+    repo.remote_head_commit = await asyncio.to_thread(get_remote_head_commit, repo.source_uri)
+    repo.updates_checked_at = datetime.now(UTC)
+    session.add(repo)
+    await session.commit()
+    await session.refresh(repo)
+    return await _update_status(session, repo)
 
 
 @router.get("/{repo_id}/snapshot", response_model=AnalysisSnapshot)

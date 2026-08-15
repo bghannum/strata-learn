@@ -364,3 +364,135 @@ async def test_reindex_another_users_repo_returns_404(pending_repo_factory) -> N
         response = client.post(f"/repos/{repo_id}/reindex")
 
     assert response.status_code == 404
+
+
+# --- #62: staleness detection ---
+
+
+async def _set_snapshot_commit(snapshot_id: UUID, commit_hash: str) -> None:
+    async with async_session_factory() as session:
+        snapshot = await session.get(AnalysisSnapshot, snapshot_id)
+        assert snapshot is not None
+        snapshot.commit_hash = commit_hash
+        session.add(snapshot)
+        await session.commit()
+
+
+async def _git_repo(client: TestClient, pending_repo_factory) -> tuple[UUID, UUID]:
+    user = register_test_user(client)
+    return await pending_repo_factory(
+        SourceType.git_url, "https://example.com/repo.git", user_id=UUID(user["id"])
+    )
+
+
+async def test_update_status_is_unknown_before_any_check(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        repo_id, _snapshot_id = await _git_repo(client, pending_repo_factory)
+        body = client.get(f"/repos/{repo_id}/update-status").json()
+
+    assert body["status"] == "unknown"
+    assert body["reason"] == "never_checked"
+    assert body["checked_at"] is None
+
+
+async def test_update_status_does_no_network_io(pending_repo_factory, monkeypatch) -> None:
+    # The whole reason checking is an explicit action (#62): a git ls-remote on
+    # a page-load path would make every repo view wait on a third-party host
+    # that can hang.
+    def _boom(*args, **kwargs):
+        raise AssertionError("update-status must not reach the remote")
+
+    monkeypatch.setattr("app.api.repos.get_remote_head_commit", _boom)
+
+    with TestClient(app) as client:
+        repo_id, _snapshot_id = await _git_repo(client, pending_repo_factory)
+        assert client.get(f"/repos/{repo_id}/update-status").status_code == 200
+
+
+async def test_check_updates_reports_stale_when_the_remote_moved(pending_repo_factory, monkeypatch) -> None:
+    monkeypatch.setattr("app.api.repos.get_remote_head_commit", lambda *a, **k: "b" * 40)
+
+    with TestClient(app) as client:
+        repo_id, snapshot_id = await _git_repo(client, pending_repo_factory)
+        await _set_snapshot_commit(snapshot_id, "a" * 40)
+        body = client.post(f"/repos/{repo_id}/check-updates").json()
+
+    assert body["status"] == "stale"
+    assert body["indexed_commit"] == "a" * 40
+    assert body["remote_commit"] == "b" * 40
+    assert body["checked_at"] is not None
+
+
+async def test_check_updates_reports_up_to_date(pending_repo_factory, monkeypatch) -> None:
+    monkeypatch.setattr("app.api.repos.get_remote_head_commit", lambda *a, **k: "a" * 40)
+
+    with TestClient(app) as client:
+        repo_id, snapshot_id = await _git_repo(client, pending_repo_factory)
+        await _set_snapshot_commit(snapshot_id, "a" * 40)
+        assert client.post(f"/repos/{repo_id}/check-updates").json()["status"] == "up_to_date"
+
+
+async def test_check_updates_result_persists_for_the_next_read(pending_repo_factory, monkeypatch) -> None:
+    monkeypatch.setattr("app.api.repos.get_remote_head_commit", lambda *a, **k: "b" * 40)
+
+    with TestClient(app) as client:
+        repo_id, snapshot_id = await _git_repo(client, pending_repo_factory)
+        await _set_snapshot_commit(snapshot_id, "a" * 40)
+        client.post(f"/repos/{repo_id}/check-updates")
+        body = client.get(f"/repos/{repo_id}/update-status").json()
+
+    assert body["status"] == "stale"
+    assert body["remote_commit"] == "b" * 40
+
+
+async def test_unreachable_remote_is_unknown_not_an_error(pending_repo_factory, monkeypatch) -> None:
+    # The repo and its guide are both still fine — a 5xx would misrepresent a
+    # network hiccup as a broken request.
+    monkeypatch.setattr("app.api.repos.get_remote_head_commit", lambda *a, **k: None)
+
+    with TestClient(app) as client:
+        repo_id, snapshot_id = await _git_repo(client, pending_repo_factory)
+        await _set_snapshot_commit(snapshot_id, "a" * 40)
+        response = client.post(f"/repos/{repo_id}/check-updates")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "unknown"
+    assert response.json()["reason"] == "remote_unreachable"
+
+
+async def test_staleness_is_recomputed_not_stored(pending_repo_factory, monkeypatch) -> None:
+    # A stored verdict would go silently wrong the moment a reindex changes the
+    # indexed commit without anyone re-running the check.
+    monkeypatch.setattr("app.api.repos.get_remote_head_commit", lambda *a, **k: "b" * 40)
+
+    with TestClient(app) as client:
+        repo_id, snapshot_id = await _git_repo(client, pending_repo_factory)
+        await _set_snapshot_commit(snapshot_id, "a" * 40)
+        assert client.post(f"/repos/{repo_id}/check-updates").json()["status"] == "stale"
+
+        # the repo is re-indexed up to the remote's commit; no new check is run
+        await _set_snapshot_commit(snapshot_id, "b" * 40)
+        assert client.get(f"/repos/{repo_id}/update-status").json()["status"] == "up_to_date"
+
+
+async def test_zip_upload_cannot_be_checked(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, _snapshot_id = await pending_repo_factory(
+            SourceType.zip_upload, "upload.zip", user_id=UUID(user["id"])
+        )
+        assert client.get(f"/repos/{repo_id}/update-status").json()["reason"] == "zip_upload"
+        assert client.post(f"/repos/{repo_id}/check-updates").status_code == 409
+
+
+async def test_update_status_is_scoped_to_its_owner(pending_repo_factory) -> None:
+    with TestClient(app) as owner:
+        repo_id, _snapshot_id = await _git_repo(owner, pending_repo_factory)
+
+    with TestClient(app) as other:
+        # A second account can't come from POST /auth/register (ADR-007's
+        # single-tenant design) — same DB-level bypass the other cross-user
+        # isolation tests here use.
+        await login_as_new_user(other)
+        assert other.get(f"/repos/{repo_id}/update-status").status_code == 404
+        assert other.post(f"/repos/{repo_id}/check-updates").status_code == 404

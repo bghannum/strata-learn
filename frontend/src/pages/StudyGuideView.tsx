@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import Markdown from 'react-markdown'
-import { ApiError, getStudyGuide, type Citation, type StudyGuide } from '../api/client'
+import { ApiError, getStudyGuide, studyGuideExportUrl, type Citation, type StudyGuide } from '../api/client'
 import MermaidDiagram from '../components/MermaidDiagram'
 import CitationPanel from '../components/CitationPanel'
 import { buttonClasses } from '../components/ui/buttonVariants'
@@ -63,6 +63,12 @@ function StudyGuideView() {
         <Link to={`/repos/${guide.repo_id}`} className={`mt-4 ${buttonClasses('primary')}`}>
           Generate quiz
         </Link>
+        {/* A plain link, not a fetch-and-blob: the browser downloads it
+        directly and uses the filename the API puts in Content-Disposition.
+        Session cookies ride along on a same-origin navigation. */}
+        <a href={studyGuideExportUrl(guide.id)} className={`mt-2 ${buttonClasses('secondary')}`}>
+          Export Markdown
+        </a>
       </nav>
 
       <div className="min-w-0 flex-1">

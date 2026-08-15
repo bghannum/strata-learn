@@ -56,6 +56,29 @@ def check_git_url_reachable(url: str, timeout_seconds: float = 10) -> None:
         raise SourcePreparationError(f"Could not reach repository: {exc}") from exc
 
 
+def get_remote_head_commit(url: str, timeout_seconds: float = 10) -> str | None:
+    """The remote's current HEAD sha, or None if the remote can't be reached or
+    reports nothing usable.
+
+    Same `git ls-remote` mechanism (and the same `kill_after_timeout` reasoning)
+    as check_git_url_reachable above, but this one wants the answer rather than
+    just the absence of an error — it's how staleness detection compares the
+    remote against the commit a snapshot was actually built from (#62).
+
+    Returns None instead of raising because an unreachable remote is not a
+    request failure here: the repository still exists, its guide is still
+    readable, and the honest answer is "couldn't tell", not a 5xx.
+    """
+    try:
+        output = git.cmd.Git().ls_remote(url, "HEAD", kill_after_timeout=timeout_seconds)
+    except git.GitCommandError:
+        return None
+    # "<sha>\tHEAD" — an empty repo (no commits) returns nothing at all.
+    first_line = output.strip().split("\n")[0] if output.strip() else ""
+    sha = first_line.split("\t")[0].strip()
+    return sha or None
+
+
 def clone_git_repo(url: str, job_id: uuid.UUID, pinned_commit: str | None = None) -> tuple[Path, str | None]:
     """Shallow-clone `url` into a scoped job workspace. Returns (source_dir, commit_hash).
 

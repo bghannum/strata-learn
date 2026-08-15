@@ -195,6 +195,32 @@ export function getSnapshot(repoId: string): Promise<AnalysisSnapshot> {
   return request(`/repos/${repoId}/snapshot`)
 }
 
+export interface UpdateStatus {
+  status: 'up_to_date' | 'stale' | 'unknown'
+  checked_at: string | null
+  remote_commit: string | null
+  indexed_commit: string | null
+  reason: string | null
+}
+
+/** Reads the last check's result. No network I/O on the backend — safe on load. */
+export function getUpdateStatus(repoId: string): Promise<UpdateStatus> {
+  return request(`/repos/${repoId}/update-status`)
+}
+
+/** Asks the remote for its current HEAD. This is the one that goes over the
+ *  network and can take a few seconds, so it's only ever user-initiated. */
+export function checkForUpdates(repoId: string): Promise<UpdateStatus> {
+  return request(`/repos/${repoId}/check-updates`, { method: 'POST' })
+}
+
+/** Absolute URL rather than a fetch: the browser handles the download itself,
+ *  honouring the Content-Disposition filename the API sets. Same-origin cookie
+ *  auth applies to a plain navigation, so no token plumbing is needed. */
+export function studyGuideExportUrl(studyGuideId: string): string {
+  return `${API_BASE_URL}/study-guides/${studyGuideId}/export.md`
+}
+
 // GET /repos/{id}/study-guide redirects to GET /study-guides/{id} — fetch()
 // follows redirects by default, so this returns the guide directly.
 export function getRepoStudyGuide(repoId: string): Promise<StudyGuide> {
