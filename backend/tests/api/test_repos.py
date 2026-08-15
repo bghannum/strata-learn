@@ -12,13 +12,28 @@ across calls on the same instance.
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.config import settings
-from app.db.models import AnalysisSnapshot, Repo, SnapshotStatus, SourceType, StudyGuide
+from app.db.models import (
+    AnalysisSnapshot,
+    AnswerSubmission,
+    Attempt,
+    AttemptStatus,
+    Question,
+    QuestionType,
+    Quiz,
+    QuizStatus,
+    Repo,
+    SnapshotStatus,
+    SourceType,
+    StudyGuide,
+    Subsystem,
+)
 from app.db.session import async_session_factory
 from app.main import app
 from app.redis_pool import get_redis_pool
@@ -496,3 +511,149 @@ async def test_update_status_is_scoped_to_its_owner(pending_repo_factory) -> Non
         await login_as_new_user(other)
         assert other.get(f"/repos/{repo_id}/update-status").status_code == 404
         assert other.post(f"/repos/{repo_id}/check-updates").status_code == 404
+
+
+# --- #64: mastery tracking ---
+
+
+async def _completed_attempt(
+    repo_id: UUID,
+    snapshot_id: UUID,
+    user_id: UUID,
+    answers: list[tuple[str | None, float]],
+    version: int = 1,
+    minutes: int = 0,
+) -> None:
+    """A study guide, a quiz with one question per answer, and a completed
+    attempt over it — the shape mastery aggregates from."""
+    async with async_session_factory() as session:
+        guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=version)
+        session.add(guide)
+        await session.flush()
+
+        quiz = Quiz(repo_id=repo_id, study_guide_id=guide.id, status=QuizStatus.ready)
+        session.add(quiz)
+        await session.flush()
+
+        questions = []
+        for order, (subsystem_key, _score) in enumerate(answers):
+            question = Question(
+                quiz_id=quiz.id, question_type=QuestionType.mcq, order=order, prompt="q",
+                choices=["a", "b"], correct_index=0, file_path="a.py", line_start=1, line_end=2,
+                subsystem_key=subsystem_key, prompt_version="v2", model="fake",
+            )
+            session.add(question)
+            questions.append(question)
+        await session.flush()
+
+        attempt = Attempt(
+            quiz_id=quiz.id, user_id=user_id, status=AttemptStatus.completed,
+            completed_at=datetime(2026, 8, 1, tzinfo=UTC) + timedelta(minutes=minutes),
+        )
+        session.add(attempt)
+        await session.flush()
+        for question, (_key, score) in zip(questions, answers, strict=True):
+            session.add(
+                AnswerSubmission(attempt_id=attempt.id, question_id=question.id, selected_index=0, score=score)
+            )
+        await session.commit()
+
+
+async def test_mastery_is_empty_before_any_quiz(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        repo_id, _snapshot_id = await _git_repo(client, pending_repo_factory)
+        body = client.get(f"/repos/{repo_id}/mastery").json()
+
+    assert body == {"completed_attempts": 0, "buckets": []}
+
+
+async def test_mastery_aggregates_per_subsystem_and_names_them(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=UUID(user["id"])
+        )
+        async with async_session_factory() as session:
+            session.add(
+                Subsystem(
+                    snapshot_id=snapshot_id, key="app/api", name="HTTP API", role="r",
+                    file_paths=["a.py"], depth=0, order=0, prompt_version="v1", model="fake",
+                )
+            )
+            await session.commit()
+
+        await _completed_attempt(repo_id, snapshot_id, UUID(user["id"]), [("app/api", 1.0), ("app/db", 0.0)])
+        body = client.get(f"/repos/{repo_id}/mastery").json()
+
+    assert body["completed_attempts"] == 1
+    by_key = {b["subsystem_key"]: b for b in body["buckets"]}
+    assert by_key["app/api"]["name"] == "HTTP API"
+    assert by_key["app/api"]["average_score"] == 1.0
+    # weakest first — this view exists to answer "what should I study next"
+    assert body["buckets"][0]["subsystem_key"] == "app/db"
+
+
+async def test_mastery_spans_study_guide_versions(pending_repo_factory) -> None:
+    # The whole point of #61's stable key: a re-index replaces every Section,
+    # Question, and Citation row, so two quizzes generated from two different
+    # study-guide versions must still aggregate into one history.
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=UUID(user["id"])
+        )
+        await _completed_attempt(repo_id, snapshot_id, UUID(user["id"]), [("app/api", 0.0)], version=1, minutes=0)
+        await _completed_attempt(
+            repo_id, snapshot_id, UUID(user["id"]), [("app/api", 1.0)], version=2, minutes=60
+        )
+
+        body = client.get(f"/repos/{repo_id}/mastery").json()
+
+    bucket = body["buckets"][0]
+    assert bucket["subsystem_key"] == "app/api"
+    assert bucket["attempts"] == 2
+    assert bucket["average_score"] == 0.5
+    assert [p["average_score"] for p in bucket["history"]] == [0.0, 1.0]
+
+
+async def test_in_progress_attempts_do_not_count(pending_repo_factory) -> None:
+    # An abandoned attempt is not evidence of anything, and its partial answers
+    # would drag down an average for a quiz never actually finished.
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=UUID(user["id"])
+        )
+        async with async_session_factory() as session:
+            guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=1)
+            session.add(guide)
+            await session.flush()
+            quiz = Quiz(repo_id=repo_id, study_guide_id=guide.id, status=QuizStatus.ready)
+            session.add(quiz)
+            await session.flush()
+            question = Question(
+                quiz_id=quiz.id, question_type=QuestionType.mcq, order=0, prompt="q", choices=["a"],
+                correct_index=0, file_path="a.py", line_start=1, line_end=2,
+                subsystem_key="app/api", prompt_version="v2", model="fake",
+            )
+            session.add(question)
+            attempt = Attempt(quiz_id=quiz.id, user_id=UUID(user["id"]), status=AttemptStatus.in_progress)
+            session.add(attempt)
+            await session.flush()
+            session.add(
+                AnswerSubmission(attempt_id=attempt.id, question_id=question.id, selected_index=0, score=0.0)
+            )
+            await session.commit()
+
+        body = client.get(f"/repos/{repo_id}/mastery").json()
+
+    assert body == {"completed_attempts": 0, "buckets": []}
+
+
+async def test_mastery_is_scoped_to_its_owner(pending_repo_factory) -> None:
+    with TestClient(app) as owner:
+        repo_id, _snapshot_id = await _git_repo(owner, pending_repo_factory)
+
+    with TestClient(app) as other:
+        await login_as_new_user(other)
+        assert other.get(f"/repos/{repo_id}/mastery").status_code == 404

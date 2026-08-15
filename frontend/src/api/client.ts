@@ -214,6 +214,30 @@ export function checkForUpdates(repoId: string): Promise<UpdateStatus> {
   return request(`/repos/${repoId}/check-updates`, { method: 'POST' })
 }
 
+export interface MasteryPoint {
+  completed_at: string
+  answered: number
+  average_score: number
+}
+
+export interface MasteryBucket {
+  subsystem_key: string
+  name: string
+  attempts: number
+  answered: number
+  average_score: number
+  history: MasteryPoint[]
+}
+
+export interface Mastery {
+  completed_attempts: number
+  buckets: MasteryBucket[]
+}
+
+export function getMastery(repoId: string): Promise<Mastery> {
+  return request(`/repos/${repoId}/mastery`)
+}
+
 /** Absolute URL rather than a fetch: the browser handles the download itself,
  *  honouring the Content-Disposition filename the API sets. Same-origin cookie
  *  auth applies to a plain navigation, so no token plumbing is needed. */

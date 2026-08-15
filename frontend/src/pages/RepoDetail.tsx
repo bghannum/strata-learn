@@ -4,6 +4,7 @@ import {
   ApiError,
   checkForUpdates,
   generateQuiz,
+  getMastery,
   getRepo,
   getRepoQuiz,
   getRepoStudyGuide,
@@ -16,6 +17,7 @@ import {
   useIndexingProgress,
   type AnalysisSnapshot,
   type FeedbackMode,
+  type Mastery,
   type Quiz,
   type Repo,
   type SnapshotStatus,
@@ -40,6 +42,47 @@ const UNKNOWN_REASONS: Record<string, string> = {
   never_checked: 'Not checked yet',
   remote_unreachable: "Couldn't reach the remote",
   no_indexed_commit: 'No commit recorded for this index',
+}
+
+function MasterySection({ mastery }: { mastery: Mastery }) {
+  if (mastery.completed_attempts === 0) return null
+
+  return (
+    <div className="mt-5.5 rounded-2xl border border-organic-divider p-3.5">
+      <h2 className="text-sm font-semibold">
+        Mastery{' '}
+        <span className="font-normal opacity-70">
+          across {mastery.completed_attempts} completed {mastery.completed_attempts === 1 ? 'quiz' : 'quizzes'}
+        </span>
+      </h2>
+      <ul className="mt-3 flex flex-col gap-2">
+        {mastery.buckets.map((bucket) => {
+          const percent = Math.round(bucket.average_score * 100)
+          // First and last point of the bucket's own history — enough to say
+          // "improving" or "slipping" without a charting dependency for a view
+          // that usually has two or three data points.
+          const first = bucket.history[0]
+          const last = bucket.history[bucket.history.length - 1]
+          const delta = bucket.history.length > 1 ? Math.round((last.average_score - first.average_score) * 100) : null
+          return (
+            <li key={bucket.subsystem_key} className="flex items-center gap-3 text-sm">
+              <span className="w-44 shrink-0 truncate">{bucket.name}</span>
+              <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-organic-divider">
+                <span
+                  className="block h-full rounded-full bg-organic-accent-700"
+                  style={{ width: `${percent}%` }}
+                />
+              </span>
+              <span className="w-10 shrink-0 text-right tabular-nums">{percent}%</span>
+              <span className="w-24 shrink-0 text-right opacity-70 tabular-nums">
+                {delta === null ? `${bucket.answered} answered` : `${delta >= 0 ? '+' : ''}${delta} pts`}
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
 }
 
 function UpdateStatusBadge({ status }: { status: UpdateStatus }) {
@@ -77,6 +120,7 @@ function RepoDetail() {
   const [feedbackMode, setFeedbackMode] = useState<FeedbackMode>('end_of_quiz')
   const [reindexing, setReindexing] = useState(false)
   const [reindexError, setReindexError] = useState<string | null>(null)
+  const [mastery, setMastery] = useState<Mastery | null>(null)
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const [updateError, setUpdateError] = useState<string | null>(null)
@@ -203,6 +247,18 @@ function RepoDetail() {
       })
   }, [status, repoId])
 
+  // Reloaded whenever a quiz result could have changed it — the value of this
+  // view is watching it move, so a stale number is worse than none.
+  useEffect(() => {
+    if (status !== 'ready' || !repoId) return
+    getMastery(repoId)
+      .then(setMastery)
+      .catch(() => {
+        // A missing mastery summary shouldn't take the page down — everything
+        // else on it still works.
+      })
+  }, [status, repoId, quiz])
+
   function handleCheckUpdates() {
     if (!repoId) return
     setCheckingUpdates(true)
@@ -264,6 +320,8 @@ function RepoDetail() {
           retryError={reindexError}
         />
       </div>
+
+      {status === 'ready' && mastery && <MasterySection mastery={mastery} />}
 
       {status === 'ready' && updateStatus && (
         <div className="mt-5.5 flex flex-wrap items-center gap-3 rounded-2xl border border-organic-divider p-3.5">
