@@ -1,6 +1,6 @@
 # Current architecture
 
-**Status:** Current through Phase 6 (generation quality); Phase 7 versioning/hosting is next.
+**Status:** Current through Phase 7 (versioning and mastery); Phase 8 voice learning is next. Hosting moved to a separate Productionization milestone — see the README.
 
 Strata Learn is a Docker Compose-based modular monolith that ingests a Git repository or uploaded zip, extracts deterministic structural facts, enriches them with citation-grounded LLM analysis, assembles the result into a study guide, and lets a logged-in user generate and take a quiz against it — all through a working frontend styled to the checked-in UI mockup. Improving the quality of what gets generated — conceptual explanation over per-file indexing — is the current phase; versioning/hosting polish, voice learning, and drawing questions follow it.
 
@@ -10,7 +10,7 @@ Strata Learn is a Docker Compose-based modular monolith that ingests a Git repos
 |---|---|---|
 | API | FastAPI | Auth (register/login/session), repository ingestion, repository/snapshot lookup, progress WebSocket, study guide lookup, quiz generation trigger/lookup, and attempt taking/grading |
 | Worker | arq | Source preparation, Layer A analysis, Layer B analysis, study guide generation, quiz generation, persistence, and status publication |
-| Database | PostgreSQL 16 | Users/sessions, repositories, snapshots, code units, module summaries, subsystems, pattern claims, trade-off cards, study guides/sections/citations, and quizzes/questions/attempts/answer submissions |
+| Database | PostgreSQL 16 | Users/sessions, repositories, snapshots, code units, module summaries, subsystems, pattern claims, trade-off cards, cached generated artifacts, study guides/sections/citations, and quizzes/questions/attempts/answer submissions |
 | Queue/events | Redis 7 | arq jobs, temporary zip bytes, and snapshot progress pub/sub |
 | Frontend | React/Vite | Register/login, add repo, live indexing progress, study guide reading (diagram + citations), quiz generation + taking, and results |
 | LLM provider | Anthropic | Claude-backed structured output for Layer B tasks, the architecture narrative and diagram labels, quiz question generation, and fill-in-the-blank concept-mode grading |
@@ -74,6 +74,36 @@ Every other section remains deterministic formatting of already-generated, alrea
 
 A crash between Layer B's commit and the guide's commit resumes on redelivery without re-running Layer B's billed calls, reacquiring source pinned to the originally analyzed commit rather than the branch's current tip. Study guide assembly itself does re-run on that path, including its own two LLM calls.
 
+### Versioning, staleness, and mastery
+
+Re-indexing accumulates snapshots rather than replacing them, so a repository
+carries its own history. Three features read that history.
+
+**Staleness** compares a snapshot's `commit_hash` to the remote's current HEAD.
+Checking is an explicit user action, never a page load: `git ls-remote` is a
+network round trip to a third party that can hang, so `POST
+/repos/{id}/check-updates` does the call and `GET /repos/{id}/update-status`
+only reads what it recorded. Only the raw observation is stored — a derived
+"stale" flag would go wrong the moment a reindex changed the other half of the
+comparison without anyone re-checking.
+
+**The architectural diff** (`generation/diffing.py`) compares two snapshots
+across subsystems, trade-off cards, the pattern claim, and dependency edges.
+Nothing matches on generated text: two runs of the same prompt over identical
+code produce differently-worded output, and a naive text diff would report
+churn that isn't real. Subsystems match on their stable key, trade-off cards on
+the set of files their evidence cites, and dependency edges are projected up to
+subsystem level before diffing so a refactor reads as one line rather than
+forty. API-only so far; there is no UI for it yet.
+
+**Mastery** (`quizzing/mastery.py`) aggregates graded answers by
+`Question.subsystem_key`, which is copied onto the question at generation time
+precisely because every `Section`, `Question`, and `Citation` row is replaced by
+a re-index — aggregating on any of those would reset a learner's history at the
+moment it became interesting. Only completed attempts count, and only the most
+recent attempt per quiz, since a retake covers the same questions and isn't an
+independent measurement.
+
 ### Quiz generation and taking
 
 Runs on demand, well after study guide generation — the two are decoupled in time, not chained in the same job. `POST /quizzes/{repo_id}/generate` creates a `Quiz` row (`generating`) and enqueues a separate `generate_quiz` arq job, then the client polls `GET /quizzes/{id}` until it reaches a terminal status (no progress WebSocket for this stage — see `worker/quiz_pipeline.py`'s docstring for why polling is enough here).
@@ -131,7 +161,13 @@ The worker commits final Layer B rows with `generating` atomically, and the stud
 | `GET` | `/repos/{repo_id}/snapshot` | Fetch its latest analysis snapshot |
 | `GET` | `/repos/{repo_id}/study-guide` | Redirect to its generated study guide |
 | `GET` | `/repos/{repo_id}/quiz` | Redirect to its most recently generated quiz, whatever its status |
+| `POST` | `/repos/{repo_id}/reindex` | Retry a failed indexing run against a fresh snapshot |
+| `GET` | `/repos/{repo_id}/update-status` | Read the cached staleness answer (no network I/O) |
+| `POST` | `/repos/{repo_id}/check-updates` | Ask the remote for its HEAD and record the result |
+| `GET` | `/repos/{repo_id}/mastery` | Quiz performance per subsystem, across study-guide versions |
 | `GET` | `/study-guides/{study_guide_id}` | Fetch a study guide with ordered sections and citations |
+| `GET` | `/study-guides/{id}/diff/{other_id}` | Architectural diff between two snapshots of one repo |
+| `GET` | `/study-guides/{study_guide_id}/export.md` | Download the guide as Markdown |
 | `WS` | `/repos/{repo_id}/progress` | Stream persisted and pub/sub status updates |
 | `POST` | `/quizzes/{repo_id}/generate` | Create a pending quiz and enqueue generation |
 | `GET` | `/quizzes/{quiz_id}` | Fetch a quiz's status and (once ready) its questions, answer key withheld |
