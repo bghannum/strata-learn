@@ -1,7 +1,14 @@
 """Assembles the study guide: Overview, Architecture, Trade-offs, Glossary,
-and Deep-Dive sections, built entirely from facts Layer A/B already collected
-(AnalysisSnapshot, CodeUnit, ModuleSummary, PatternClaim, TradeoffCard) — the
-only new LLM call anywhere in this module is inside diagram_builder.py.
+and Deep-Dive sections, built from facts Layer A/B already collected
+(AnalysisSnapshot, CodeUnit, ModuleSummary, PatternClaim, TradeoffCard,
+Subsystem).
+
+Two LLM calls are made from here: diagram_builder.py's node labeling, and —
+as of Phase 6 — architecture_narrative.py's synthesis pass. Everything else is
+still deterministic assembly of already-persisted rows. The narrative is the
+deliberate exception: with no synthesis anywhere, the Architecture section could
+only ever be a pattern label plus a citation list, which is exactly how it read
+(#52).
 
 Mirrors semantics/orchestrator.py's structure: a pure build step (this
 module's build_sections, plus the one diagram LLM call) followed by a short,
@@ -25,10 +32,12 @@ from app.db.models import (
     SectionType,
     SnapshotStatus,
     StudyGuide,
+    Subsystem,
     TradeoffCard,
     UnitType,
 )
 from app.db.session import async_session_factory
+from app.generation.architecture_narrative import ArchitectureNarrative, build_architecture_narrative
 from app.generation.citation import read_snippet
 from app.generation.diagram_builder import build_component_diagram
 from app.semantics.llm_provider import LLMProvider
@@ -114,24 +123,49 @@ def _build_overview(
 def _build_architecture(
     pattern_claim: PatternClaim | None, diagram_mermaid: str | None, diagram_prompt_version: str | None,
     diagram_model: str | None, diagram_citations: list[CitationSpec],
+    narrative: ArchitectureNarrative | None = None,
 ) -> SectionSpec | None:
-    if pattern_claim is None and diagram_mermaid is None:
+    if pattern_claim is None and diagram_mermaid is None and narrative is None:
         return None
 
     lines: list[str] = []
     citations = list(diagram_citations)
+
+    # Narrative first, evidence second (#52). The pattern label, confidence,
+    # and per-claim evidence bullets below used to *be* the section; they're
+    # still here and still cited, just no longer the thing a reader meets
+    # first. Collapsed into a <details> block so the section opens as an
+    # explanation rather than as a citation list — the markdown renderer
+    # passes the HTML through, and a reader with it closed still gets every
+    # claim the old section made.
+    if narrative is not None:
+        if narrative.overview:
+            lines += [narrative.overview, ""]
+        for section in narrative.why_sections:
+            lines += [f"### {section.heading}", "", section.body, ""]
+        for cite in narrative.citations:
+            citations.append(
+                CitationSpec(
+                    file_path=cite.file_path,
+                    line_start=cite.line_start,
+                    line_end=cite.line_end,
+                    claim_excerpt=cite.claim_excerpt,
+                )
+            )
+
+    evidence_lines: list[str] = []
     if pattern_claim is not None:
         # .value, not the bare enum — Confidence is `str, Enum`, but Python's
         # default Enum.__str__ still wins over the str mixin in f-strings,
         # rendering "Confidence.medium" instead of "medium" (confirmed via
         # Codex's Phase 3 pre-push review, and visible in the Phase 3 manual
         # checkpoint's own output).
-        lines.append(
+        evidence_lines.append(
             f"**Primary pattern:** {pattern_claim.primary_pattern} (confidence: {pattern_claim.confidence.value})"
         )
         if pattern_claim.caveats:
-            lines += ["", pattern_claim.caveats]
-        lines += ["", "**Evidence:**", ""]
+            evidence_lines += ["", pattern_claim.caveats]
+        evidence_lines += ["", "**Evidence:**", ""]
         # The rendered headline (primary_pattern + caveats) is the claim each
         # evidence item's citations actually support — the LLM call that
         # produced them evaluated the whole graph to reach that one claim,
@@ -145,7 +179,7 @@ def _build_architecture(
             primary_claim_text += f" {pattern_claim.caveats}"
         for item in pattern_claim.evidence:
             paths = ", ".join(f"`{p}`" for p in item.get("supporting_paths", []))
-            lines.append(f"- {item['claim']} — {paths}")
+            evidence_lines.append(f"- {item['claim']} — {paths}")
             for cite in item.get("citations", []):
                 citations.append(
                     CitationSpec(
@@ -156,14 +190,35 @@ def _build_architecture(
                     )
                 )
 
+    if evidence_lines:
+        if narrative is None:
+            # No narrative to lead with (the LLM call failed its own
+            # validation, or there was nothing to synthesize from) — render the
+            # evidence plainly rather than collapsing the entire section behind
+            # a disclosure the reader has to find and open.
+            lines += evidence_lines
+        else:
+            lines += [
+                "<details>",
+                f"<summary>Evidence ({len(pattern_claim.evidence)} claims)</summary>",
+                "",
+                *evidence_lines,
+                "",
+                "</details>",
+            ]
+
     return SectionSpec(
         section_type=SectionType.architecture,
         title="Architecture",
-        content_md="\n".join(lines) if lines else "_No architecture pattern could be grounded in evidence._",
+        content_md="\n".join(lines).strip() if lines else "_No architecture pattern could be grounded in evidence._",
         citations=citations,
         diagram_mermaid=diagram_mermaid,
-        prompt_version=diagram_prompt_version,
-        model=diagram_model,
+        # Two LLM calls now feed this section (the diagram labeler and the
+        # narrative). Section has one prompt_version/model pair, so it records
+        # the narrative's — the call that produced the section's actual prose.
+        # The diagram's own provenance stays reachable through its citations.
+        prompt_version=narrative.prompt_version if narrative is not None else diagram_prompt_version,
+        model=narrative.model if narrative is not None else diagram_model,
     )
 
 
@@ -248,7 +303,36 @@ def _build_glossary(module_summaries: list[ModuleSummary]) -> SectionSpec | None
     )
 
 
-def _build_deep_dives(module_summaries: list[ModuleSummary]) -> SectionSpec | None:
+# Files whose subsystem was never persisted (a snapshot indexed before
+# subsystems existed, or a file with no module summary in any group) still have
+# to appear — a deep dive silently missing files would be worse than an
+# imperfectly grouped one.
+_UNGROUPED_HEADING = "Other"
+
+
+def _subsystem_groups(
+    file_paths: set[str], subsystems: list[Subsystem]
+) -> list[tuple[str, str, list[str]]]:
+    """(heading, role, file_paths) per subsystem, in the partition's own
+    outside-in order, with anything left over trailing under "Other"."""
+    groups: list[tuple[str, str, list[str]]] = []
+    claimed: set[str] = set()
+    for subsystem in sorted(subsystems, key=lambda s: s.order):
+        members = sorted(p for p in subsystem.file_paths if p in file_paths)
+        if not members:
+            continue  # every file in it was skipped by Layer B — no heading to render
+        claimed.update(members)
+        groups.append((subsystem.name, subsystem.role, members))
+
+    leftover = sorted(file_paths - claimed)
+    if leftover:
+        groups.append((_UNGROUPED_HEADING, "", leftover))
+    return groups
+
+
+def _build_deep_dives(
+    module_summaries: list[ModuleSummary], subsystems: list[Subsystem] | None = None
+) -> SectionSpec | None:
     if not module_summaries:
         return None
 
@@ -265,33 +349,47 @@ def _build_deep_dives(module_summaries: list[ModuleSummary]) -> SectionSpec | No
     for summary in module_summaries:
         by_file.setdefault(summary.file_path, []).append(summary)
 
-    lines = []
+    # Grouped by subsystem rather than one flat alphabetical list of files
+    # (#54): a file listing is a reference index, and a reader who doesn't
+    # already know the codebase can't tell from it which files form a unit or
+    # what order to read them in. Only grouping and ordering change here — the
+    # per-file text and its citations are untouched, since the conceptual "why"
+    # writing lives in the Architecture narrative and duplicating it here would
+    # mean a second synthesis pass for marginal gain.
+    groups = _subsystem_groups(set(by_file), subsystems or [])
+
+    lines: list[str] = []
     citations = []
-    for file_path in sorted(by_file):
-        # Ordered by chunk_index, not line_start: every chunk of a file carries
-        # the identical whole-module line range, so the previous line_start sort
-        # had no real key to sort on and the "Part N of M" labels were assigned
-        # in whatever order Postgres returned the rows (#14, fixed by persisting
-        # the index rather than trying to recover it here).
-        chunks = sorted(by_file[file_path], key=lambda s: s.chunk_index)
-        lines += [f"### `{file_path}` (lines {chunks[0].line_start}-{chunks[0].line_end})", ""]
-        for summary in chunks:
-            if len(chunks) > 1:
-                lines.append(f"**Part {summary.chunk_index} of {summary.chunk_count}:**")
-            lines += [summary.purpose, "", summary.role_in_system, ""]
-            # Both rendered sentences, not just purpose — they come from the
-            # same LLM call grounded in the same line range, so both are
-            # covered by this one citation (found via Codex's Phase 3
-            # pre-push review: citing only purpose left role_in_system with
-            # no citation).
-            citations.append(
-                CitationSpec(
-                    file_path=summary.file_path,
-                    line_start=summary.line_start,
-                    line_end=summary.line_end,
-                    claim_excerpt=f"{summary.purpose} {summary.role_in_system}",
+    for heading, role, file_paths in groups:
+        if subsystems:
+            lines += [f"## {heading}", ""]
+            if role:
+                lines += [role, ""]
+        for file_path in file_paths:
+            # Ordered by chunk_index, not line_start: every chunk of a file carries
+            # the identical whole-module line range, so the previous line_start sort
+            # had no real key to sort on and the "Part N of M" labels were assigned
+            # in whatever order Postgres returned the rows (#14, fixed by persisting
+            # the index rather than trying to recover it here).
+            chunks = sorted(by_file[file_path], key=lambda s: s.chunk_index)
+            lines += [f"### `{file_path}` (lines {chunks[0].line_start}-{chunks[0].line_end})", ""]
+            for summary in chunks:
+                if len(chunks) > 1:
+                    lines.append(f"**Part {summary.chunk_index} of {summary.chunk_count}:**")
+                lines += [summary.purpose, "", summary.role_in_system, ""]
+                # Both rendered sentences, not just purpose — they come from the
+                # same LLM call grounded in the same line range, so both are
+                # covered by this one citation (found via Codex's Phase 3
+                # pre-push review: citing only purpose left role_in_system with
+                # no citation).
+                citations.append(
+                    CitationSpec(
+                        file_path=summary.file_path,
+                        line_start=summary.line_start,
+                        line_end=summary.line_end,
+                        claim_excerpt=f"{summary.purpose} {summary.role_in_system}",
+                    )
                 )
-            )
 
     return SectionSpec(
         section_type=SectionType.deep_dive, title="Deep Dives", content_md="\n".join(lines).rstrip(), citations=citations
@@ -306,12 +404,17 @@ async def build_sections(
     pattern_claim: PatternClaim | None,
     tradeoff_cards: list[TradeoffCard],
     source_dir: Path,
+    subsystems: list[Subsystem] | None = None,
 ) -> list[SectionSpec]:
+    subsystems = subsystems or []
     module_units_by_path = {u.file_path: u for u in code_units if u.unit_type == UnitType.module}
     module_purposes: dict[str, str] = {}
     for summary in module_summaries:
         module_purposes.setdefault(summary.file_path, summary.purpose)
 
+    narrative = await build_architecture_narrative(
+        llm, pattern_claim, subsystems, tradeoff_cards, snapshot.entry_points, code_units
+    )
     diagram = await build_component_diagram(llm, snapshot.dependency_graph, module_purposes)
     # claim_excerpt names the actual generated label ("HTTP API routes"),
     # not just "included in the diagram" — the label itself is the LLM's
@@ -336,10 +439,11 @@ async def build_sections(
             diagram.prompt_version if diagram is not None else None,
             diagram.model if diagram is not None else None,
             diagram_citations,
+            narrative,
         ),
         _build_tradeoffs(tradeoff_cards),
         _build_glossary(module_summaries),
-        _build_deep_dives(module_summaries),
+        _build_deep_dives(module_summaries, subsystems),
     ]
     return [section for section in candidates if section is not None]
 
@@ -447,8 +551,11 @@ async def run_study_guide_generation(llm: LLMProvider, snapshot: AnalysisSnapsho
         tradeoff_cards = list(
             (await session.exec(select(TradeoffCard).where(TradeoffCard.snapshot_id == snapshot.id))).all()
         )
+        subsystems = list(
+            (await session.exec(select(Subsystem).where(Subsystem.snapshot_id == snapshot.id))).all()
+        )
 
     sections = await build_sections(
-        llm, snapshot, code_units, module_summaries, pattern_claim, tradeoff_cards, source_dir
+        llm, snapshot, code_units, module_summaries, pattern_claim, tradeoff_cards, source_dir, subsystems
     )
     await persist_study_guide(snapshot, sections, source_dir)

@@ -41,6 +41,7 @@ from app.db.models import (
     TradeoffCard,
 )
 from app.db.session import async_session_factory
+from app.generation.architecture_narrative import ArchitectureNarrativeOutput
 from app.ingestion.source import JOBS_ROOT
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse, Message
 from app.semantics.module_summarizer import ModuleSummaryOutput
@@ -70,6 +71,19 @@ def _subsystem_name_response() -> LLMResponse:
     return LLMResponse(
         text="",
         parsed=SubsystemNameOutput(subsystems=[]),
+        model="fake-model",
+        stop_reason="end_turn",
+        usage={"input_tokens": 1, "output_tokens": 1},
+    )
+
+
+def _narrative_response() -> LLMResponse:
+    # architecture_narrative runs during study-guide assembly, after Layer B —
+    # so it lands at the end of a full-pipeline queue, not inside the Layer B
+    # group above.
+    return LLMResponse(
+        text="",
+        parsed=ArchitectureNarrativeOutput(overview="A small application.", why_sections=[]),
         model="fake-model",
         stop_reason="end_turn",
         usage={"input_tokens": 1, "output_tokens": 1},
@@ -118,7 +132,12 @@ def _no_decision_point_llm(file_path: str = "app.py") -> FakeLLMProvider:
     identify_decision_points finds nothing (no fan-in/out, no infra imports),
     so extract_tradeoffs never calls the LLM at all."""
     return FakeLLMProvider(
-        [_module_summary_response(), _subsystem_name_response(), _pattern_claim_response(file_path)]
+        [
+            _module_summary_response(),
+            _subsystem_name_response(),
+            _pattern_claim_response(file_path),
+            _narrative_response(),
+        ]
     )
 
 
@@ -269,6 +288,7 @@ async def test_index_repo_runs_layer_b_and_persists_all_three_tables(
             _subsystem_name_response(),
             _pattern_claim_response("worker.py"),
             _tradeoff_card_response("worker.py"),
+            _narrative_response(),
         ]
     )
 
@@ -379,7 +399,13 @@ async def test_index_repo_layer_b_reads_source_before_cleanup(
     repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
 
     probe = _ProbeLLMProvider(
-        snapshot_id, [_module_summary_response(), _subsystem_name_response(), _pattern_claim_response()]
+        snapshot_id,
+        [
+            _module_summary_response(),
+            _subsystem_name_response(),
+            _pattern_claim_response(),
+            _narrative_response(),
+        ],
     )
 
     await index_repo(
@@ -587,6 +613,14 @@ async def test_index_repo_resumes_from_generating_without_rerunning_layer_b(
         )
     assert len(pre_summaries) == 1  # sanity: Layer B actually ran and persisted
 
+    # Resuming re-runs study-guide assembly, which makes its own LLM calls —
+    # architecture_narrative's, plus diagram_builder's if the repo had internal
+    # edges (this single-file fixture has none). Seeding exactly that one
+    # response still proves Layer B is skipped rather than merely idempotent:
+    # re-running it would need three more calls and exhaust the queue, which
+    # FakeLLMProvider raises on.
+    resume_llm = FakeLLMProvider([_narrative_response()])
+
     async def run() -> None:
         await index_repo(
             {"redis": redis_pool},
@@ -594,14 +628,12 @@ async def test_index_repo_resumes_from_generating_without_rerunning_layer_b(
             repo_id=repo_id,
             source_type=SourceType.git_url.value,
             git_url=git_url,
-            # Would raise if Layer B (or diagram_builder's label call) ran
-            # again — proving the resume path skips both, not just tolerates
-            # re-running them via existing delete-then-insert idempotency.
-            llm=_BoomLLMProvider(),
+            llm=resume_llm,
         )
 
     messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)
     assert [m["status"] for m in messages] == [SnapshotStatus.ready.value]
+    assert len(resume_llm.calls) == 1  # the narrative only — no Layer B rerun
 
     snapshot = await _get_snapshot(snapshot_id)
     assert snapshot.status == SnapshotStatus.ready
@@ -669,7 +701,9 @@ async def test_index_repo_resume_pins_commit_and_clears_stale_workspace(
             repo_id=repo_id,
             source_type=SourceType.git_url.value,
             git_url=git_url,
-            llm=_BoomLLMProvider(),
+            # One response, for study-guide assembly's narrative call — see the
+            # resume test above for why this still proves Layer B is skipped.
+            llm=FakeLLMProvider([_narrative_response()]),
         )
 
     messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)

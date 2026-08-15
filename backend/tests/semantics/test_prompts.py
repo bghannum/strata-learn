@@ -33,6 +33,15 @@ def test_load_prompt_subsystem_namer() -> None:
     assert "Subsystems:\n[]" in rendered
 
 
+def test_load_prompt_architecture_narrative() -> None:
+    template = load_prompt("architecture_narrative")
+    assert "explaining how a codebase works" in template.system
+    rendered = template.render_input(
+        pattern_summary="modular monolith", subsystems_json="[]", entry_points_json="[]", tradeoffs_json="[]"
+    )
+    assert "Detected pattern: modular monolith" in rendered
+
+
 def test_load_prompt_uses_overridden_prompts_dir(tmp_path, monkeypatch) -> None:
     # Regression test for the local-dev-vs-Docker path fix: load_prompt() must
     # read from settings.prompts_dir at call time, not a hardcoded relative

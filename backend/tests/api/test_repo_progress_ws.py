@@ -23,6 +23,7 @@ from app.config import settings
 from app.db.models import SourceType
 from app.main import app
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
+from app.generation.architecture_narrative import ArchitectureNarrativeOutput
 from app.semantics.module_summarizer import ModuleSummaryOutput
 from app.semantics.pattern_detector import PatternClaimOutput
 from app.semantics.subsystem_namer import SubsystemNameOutput
@@ -35,7 +36,9 @@ def _fake_llm() -> FakeLLMProvider:
     # module_summarizer and pattern_detector each make one call;
     # identify_decision_points finds nothing, so extract_tradeoffs never calls
     # the LLM, and diagram_builder's node selection requires at least one
-    # internal file-to-file edge, so it never calls the LLM either. A real
+    # internal file-to-file edge, so it never calls the LLM either.
+    # architecture_narrative does call it, once, during study-guide assembly —
+    # a PatternClaim exists, which is enough to synthesize from. A real
     # ANTHROPIC_API_KEY isn't even loaded in this test process (no
     # backend/.env), so an omitted `llm` would fail loudly, not silently
     # bill — but a fake keeps this test decoupled from that either way.
@@ -60,6 +63,14 @@ def _fake_llm() -> FakeLLMProvider:
             LLMResponse(
                 text="",
                 parsed=PatternClaimOutput(primary_pattern="modular monolith", confidence="medium", evidence=[], caveats=None),
+                model="fake-model",
+                stop_reason="end_turn",
+                usage={},
+            ),
+            # architecture_narrative, during study-guide assembly
+            LLMResponse(
+                text="",
+                parsed=ArchitectureNarrativeOutput(overview="A single-file app.", why_sections=[]),
                 model="fake-model",
                 stop_reason="end_turn",
                 usage={},
