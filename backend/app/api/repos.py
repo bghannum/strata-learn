@@ -59,6 +59,14 @@ router = APIRouter(prefix="/repos", tags=["repos"])
 # enqueued but genuinely never runs.
 ZIP_UPLOAD_TTL_SECONDS = 24 * 60 * 60
 
+# How long the progress WebSocket waits for a pub/sub message before re-reading
+# the snapshot row directly (#9). Redis pub/sub has no delivery guarantee, so
+# the database — not the message — is the source of truth about whether
+# indexing finished; this bounds how long a dropped terminal message can leave
+# a client hanging. Short enough that a missed "ready" is a blink rather than a
+# stuck page, long enough that an idle client isn't polling Postgres hard.
+PROGRESS_POLL_FALLBACK_SECONDS = 5.0
+
 
 @router.post("", response_model=Repo, status_code=201)
 async def create_repo(
@@ -426,12 +434,35 @@ async def repo_progress(
             if snapshot.status in (SnapshotStatus.ready, SnapshotStatus.failed):
                 return  # already terminal — worker will never publish again
 
-        async for message in pubsub.listen():
-            if message["type"] != "message":
+        # A timed get_message loop rather than `async for pubsub.listen()`
+        # (#9): pub/sub is fire-and-forget, so a Redis failure on the worker's
+        # single terminal publish left a client that had already passed the
+        # DB check above waiting forever for a message that would never
+        # arrive — even though the snapshot was genuinely done. Every timeout
+        # re-reads the row, which makes this correct regardless of *why* a
+        # message was missed rather than only patching that one window.
+        #
+        # The publish path stays the fast one; this only bounds how long a
+        # dropped message can go unnoticed.
+        while True:
+            message = await pubsub.get_message(
+                ignore_subscribe_messages=True, timeout=PROGRESS_POLL_FALLBACK_SECONDS
+            )
+            if message is not None:
+                payload = json.loads(message["data"])
+                await websocket.send_json(payload)
+                if payload["status"] in (SnapshotStatus.ready.value, SnapshotStatus.failed.value):
+                    break
                 continue
-            payload = json.loads(message["data"])
-            await websocket.send_json(payload)
-            if payload["status"] in (SnapshotStatus.ready.value, SnapshotStatus.failed.value):
+
+            if snapshot is None:
+                continue
+            # refresh, not session.get: the snapshot is already in this
+            # session's identity map, so get() would keep handing back the
+            # same stale in-memory object no matter what the worker committed.
+            await session.refresh(snapshot)
+            if snapshot.status in (SnapshotStatus.ready, SnapshotStatus.failed):
+                await websocket.send_json({"status": snapshot.status.value})
                 break
     except WebSocketDisconnect:
         pass

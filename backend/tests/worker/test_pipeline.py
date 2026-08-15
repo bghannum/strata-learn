@@ -787,3 +787,87 @@ async def test_index_repo_short_circuit_publish_failure_does_not_mark_failed(
 
     snapshot = await _get_snapshot(snapshot_id)
     assert snapshot.status == SnapshotStatus.ready
+
+
+class _CancelAfterReadyLLMProvider:
+    """Serves a full pipeline's responses, then raises CancelledError on the
+    call *after* the last one — standing in for a cancellation that lands once
+    run_study_guide_generation has already committed `ready` (a job_timeout
+    expiring during the session close that follows it, or a worker shutdown at
+    the same moment)."""
+
+    def __init__(self, responses: list[LLMResponse]) -> None:
+        self._responses = deque(responses)
+
+    async def complete(
+        self, system: str, messages: list[Message], response_schema: type[BaseModel] | None = None
+    ) -> LLMResponse:
+        if not self._responses:
+            raise asyncio.CancelledError
+        return self._responses.popleft()
+
+
+async def test_cancellation_after_ready_does_not_overwrite_the_snapshot(
+    redis_pool: ArqRedis, git_fixture_repo: Path, pending_repo_factory, monkeypatch
+) -> None:
+    # #15: the CancelledError handler marked failed unconditionally, so a
+    # cancellation arriving *after* the `ready` commit turned a fully
+    # successful snapshot into a failed one — leaving complete, correct,
+    # already-paid-for semantic data permanently reported to clients as
+    # failed, and making a redelivered job miss the "already ready"
+    # short-circuit and repeat every billed Layer B call.
+    #
+    # Simulated by wrapping run_study_guide_generation rather than by timing a
+    # real cancellation: the real window is the session close immediately
+    # following its `ready` commit, which is exactly "the call returned, then
+    # cancellation arrived".
+    git_url = git_fixture_repo.as_uri()
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
+
+    real_generation = pipeline_module.run_study_guide_generation
+
+    async def cancel_after_commit(*args, **kwargs):
+        await real_generation(*args, **kwargs)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(pipeline_module, "run_study_guide_generation", cancel_after_commit)
+
+    async def run() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await index_repo(
+                {"redis": redis_pool},
+                snapshot_id=snapshot_id,
+                repo_id=repo_id,
+                source_type=SourceType.git_url.value,
+                git_url=git_url,
+                llm=_no_decision_point_llm(),
+            )
+
+    messages = await _collect_published(redis_pool, progress_channel(snapshot_id), run)
+
+    # The guard's whole point: `ready` survives, and clients are told so
+    # rather than being handed a "failed" that contradicts the database.
+    assert (await _get_snapshot(snapshot_id)).status == SnapshotStatus.ready
+    assert messages[-1]["status"] == SnapshotStatus.ready.value
+
+
+async def test_cancellation_before_ready_still_marks_failed(
+    redis_pool: ArqRedis, git_fixture_repo: Path, pending_repo_factory
+) -> None:
+    # The guard must not weaken the original fix: a cancellation on a snapshot
+    # that never reached `ready` still has to reach a terminal state, or it
+    # sits at "analyzing" forever with every WS client hanging.
+    git_url = git_fixture_repo.as_uri()
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
+
+    with pytest.raises(asyncio.CancelledError):
+        await index_repo(
+            {"redis": redis_pool},
+            snapshot_id=snapshot_id,
+            repo_id=repo_id,
+            source_type=SourceType.git_url.value,
+            git_url=git_url,
+            llm=_CancelledLLMProvider(),
+        )
+
+    assert (await _get_snapshot(snapshot_id)).status == SnapshotStatus.failed
