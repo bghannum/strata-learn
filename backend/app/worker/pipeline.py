@@ -71,6 +71,36 @@ async def index_repo(
             payload["error"] = error
         await redis.publish(channel, json.dumps(payload))
 
+    async def fail_unless_already_ready(error: str) -> None:
+        """Terminal-failure path for every handler below, with one guard: never
+        overwrite a snapshot that already reached `ready` (#15).
+
+        A failure can arrive *after* run_study_guide_generation has committed
+        `ready` — a cancellation during the session close that immediately
+        follows it, or any exception raised past that commit. Marking failed
+        there is wrong twice over: a shutdown-triggered cancellation (the case
+        arq might redeliver) would then bypass index_repo's own "already ready"
+        short-circuit and repeat every billed Layer B call for nothing, and a
+        job_timeout cancellation (never retried) would leave complete, correct
+        semantic data permanently reported to clients as failed.
+
+        Republishing `ready` here rather than staying silent: the client that
+        prompted this job is still waiting, and the DB says the work is done.
+        Guarded for the same reason the "already ready" short-circuit guards
+        its own publish — the database is already correct, so a failed
+        notification is not something to compensate for.
+        """
+        async with async_session_factory() as session:
+            current = await session.get(AnalysisSnapshot, snapshot_id)
+            if current is not None and current.status == SnapshotStatus.ready:
+                try:
+                    await publish(SnapshotStatus.ready)
+                except Exception:  # noqa: BLE001, S110 — deliberately swallowed, see docstring
+                    pass
+                return
+            await fail_snapshot(session, snapshot_id)
+        await publish(SnapshotStatus.failed, error=error)
+
     # job_id scopes the temp workspace (ingestion/source.py) — snapshot_id is
     # already a unique per-job identifier, no need to mint a separate one.
     job_id = snapshot_id
@@ -216,9 +246,7 @@ async def index_repo(
             # one step later. Also manages its own sessions internally.
             await run_study_guide_generation(llm, snapshot, source_dir)
     except SourcePreparationError as exc:
-        async with async_session_factory() as session:
-            await fail_snapshot(session, snapshot_id)
-        await publish(SnapshotStatus.failed, error=str(exc))
+        await fail_unless_already_ready(str(exc))
         return
     except asyncio.CancelledError:
         # Found via the Phase 2 manual checkpoint: a job timeout (arq's
@@ -246,9 +274,12 @@ async def index_repo(
         # default: the cost of an occasional premature "failed" on a rare
         # shutdown-retry is far smaller than the cost of a permanently stuck
         # snapshot on the common timeout path.
-        async with async_session_factory() as session:
-            await fail_snapshot(session, snapshot_id)
-        await publish(SnapshotStatus.failed, error="Indexing was cancelled (timed out or worker shutdown)")
+        #
+        # "Always mark it failed" now carries one exception, and only one: a
+        # snapshot that already reached `ready` is left alone (#15). That
+        # doesn't weaken the reasoning above — it never applied to work that
+        # had already succeeded.
+        await fail_unless_already_ready("Indexing was cancelled (timed out or worker shutdown)")
         raise
     except Exception:
         # Anything beyond a validated bad-source error (a parse crash, an
@@ -256,9 +287,12 @@ async def index_repo(
         # otherwise the snapshot sits at "parsing" forever and every WS
         # client watching it hangs indefinitely. Mark failed, notify, then
         # re-raise so arq still sees/logs it.
-        async with async_session_factory() as session:
-            await fail_snapshot(session, snapshot_id)
-        await publish(SnapshotStatus.failed, error="Indexing failed unexpectedly")
+        #
+        # Same already-ready guard as the cancellation path: #15 describes the
+        # cancellation case, but nothing makes this handler special — an
+        # exception raised after run_study_guide_generation's `ready` commit
+        # would overwrite it in exactly the same way.
+        await fail_unless_already_ready("Indexing failed unexpectedly")
         raise
     finally:
         cleanup_workspace(job_id)

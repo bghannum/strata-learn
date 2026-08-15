@@ -79,13 +79,30 @@ def _fake_llm() -> FakeLLMProvider:
     )
 
 
-def _run_pipeline_in_background(*, snapshot_id: UUID, repo_id: UUID, git_url: str) -> threading.Thread:
+class _SilentPublishPool:
+    """Wraps the real arq pool but drops every publish, standing in for a Redis
+    that fails on exactly the terminal notification (#9). Everything else the
+    pipeline does with Redis still goes through."""
+
+    def __init__(self, pool) -> None:
+        self._pool = pool
+
+    async def publish(self, *args, **kwargs) -> int:
+        return 0  # pretend it went nowhere — which, for pub/sub, it may not have
+
+    def __getattr__(self, name):
+        return getattr(self._pool, name)
+
+
+def _run_pipeline_in_background(
+    *, snapshot_id: UUID, repo_id: UUID, git_url: str, drop_publishes: bool = False
+) -> threading.Thread:
     def target() -> None:
         async def _run() -> None:
             pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
             try:
                 await index_repo(
-                    {"redis": pool},
+                    {"redis": _SilentPublishPool(pool) if drop_publishes else pool},
                     snapshot_id=snapshot_id,
                     repo_id=repo_id,
                     source_type=SourceType.git_url.value,
@@ -138,3 +155,38 @@ def test_progress_ws_reports_pending_parsing_ready(git_fixture_repo: Path, pendi
                 thread.join(timeout=10)
 
     assert statuses == ["pending", "parsing", "analyzing", "generating", "ready"]
+
+
+def test_progress_ws_falls_back_to_the_database_when_the_terminal_publish_is_lost(
+    git_fixture_repo: Path, pending_repo_factory
+) -> None:
+    """#9: pub/sub is fire-and-forget, so a Redis failure on the worker's one
+    terminal publish left a client that had already passed the initial DB check
+    waiting forever — even though the snapshot was genuinely done.
+
+    Simulated by never publishing at all: the pipeline runs with a publish that
+    silently drops every message, so the *only* way this client can learn the
+    job finished is the polling fallback re-reading the row.
+    """
+    git_url = git_fixture_repo.as_uri()
+
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, snapshot_id = asyncio.run(
+            pending_repo_factory(SourceType.git_url, git_url, user_id=UUID(user["id"]))
+        )
+
+        with client.websocket_connect(f"/repos/{repo_id}/progress") as ws:
+            assert ws.receive_json()["status"] == "pending"
+
+            thread = _run_pipeline_in_background(
+                snapshot_id=snapshot_id, repo_id=repo_id, git_url=git_url, drop_publishes=True
+            )
+            try:
+                # No message will ever arrive over pub/sub; this only returns
+                # because the handler re-reads the snapshot on its poll timeout.
+                message = ws.receive_json()
+            finally:
+                thread.join(timeout=30)
+
+    assert message["status"] == "ready"
