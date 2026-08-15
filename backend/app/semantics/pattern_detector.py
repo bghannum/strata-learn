@@ -28,6 +28,19 @@ from app.semantics.prompts import load_prompt
 MAX_GRAPH_NODES = 500
 MAX_GRAPH_EDGES = 1000
 
+# Slots held back from MAX_GRAPH_NODES for `external:*` nodes, so a repo with
+# MAX_GRAPH_NODES or more file nodes doesn't lose every trace of its own
+# frameworks, databases, and queues (#16 — before this, external nodes got only
+# the budget left over after files, which is exactly zero on the large repos
+# where the distinction matters most, taking every `imports_external` edge with
+# them and leaving the model to infer an architecture with no visibility into
+# what the system actually runs on).
+#
+# Only reserved when there are adjacent external nodes to spend it on, and any
+# slice left unspent is handed back to file nodes below — a repo with no
+# external dependencies still gets the full MAX_GRAPH_NODES for its own files.
+MAX_EXTERNAL_NODE_RESERVE = 100
+
 # A matching cap on entry_points — found via Codex's Phase 2 pre-push review
 # round 10 (#19): detect_entry_points can emit several entries per matching
 # file, and unlike the graph above this list wasn't bounded at all, so it
@@ -70,6 +83,15 @@ def _candidate_paths(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(" -> ")]
 
 
+def _adjacent_external_ids(all_edges: list[dict], file_ids: set[str]) -> set[str]:
+    """External node ids on either end of an edge touching one of `file_ids` —
+    real evidence of a dependency relationship, as opposed to an arbitrary
+    subset of the repo's package list."""
+    return {e["target"] for e in all_edges if e["source"] in file_ids} | {
+        e["source"] for e in all_edges if e["target"] in file_ids
+    }
+
+
 def _bound_graph(dependency_graph: dict) -> dict:
     all_nodes = dependency_graph.get("nodes", [])
     all_edges = dependency_graph.get("edges", [])
@@ -79,22 +101,35 @@ def _bound_graph(dependency_graph: dict) -> dict:
     # let external dependency IDs — often alphabetically early, e.g.
     # "external:aiohttp" — crowd real files out of the budget on a
     # dependency-heavy repo, skewing pattern detection toward files that
-    # happened to sort late). Files are capped first; any remaining budget
-    # goes to external nodes, and only ones actually adjacent to a kept file
-    # (real evidence of a dependency relationship), not an arbitrary subset.
+    # happened to sort late). Priority, though, is not the same as "everything
+    # left over": see MAX_EXTERNAL_NODE_RESERVE.
     file_nodes = sorted((n for n in all_nodes if n.get("kind") == "file"), key=lambda n: n["id"])
     external_nodes = sorted((n for n in all_nodes if n.get("kind") != "file"), key=lambda n: n["id"])
 
-    kept_file_nodes = file_nodes[:MAX_GRAPH_NODES]
+    # Reserve is sized against externals adjacent to *any* file, not just kept
+    # ones — the kept set isn't known until the file cap is applied, and this
+    # only decides how many slots to hold back, never which nodes fill them.
+    all_file_ids = {n["id"] for n in file_nodes}
+    external_candidates = [n for n in external_nodes if n["id"] in _adjacent_external_ids(all_edges, all_file_ids)]
+    reserve = min(MAX_EXTERNAL_NODE_RESERVE, len(external_candidates))
+
+    kept_file_nodes = file_nodes[: MAX_GRAPH_NODES - reserve]
     kept_file_ids = {n["id"] for n in kept_file_nodes}
 
-    remaining_budget = MAX_GRAPH_NODES - len(kept_file_nodes)
-    kept_external_nodes: list[dict] = []
-    if remaining_budget > 0:
-        adjacent_external_ids = {e["target"] for e in all_edges if e["source"] in kept_file_ids} | {
-            e["source"] for e in all_edges if e["target"] in kept_file_ids
-        }
-        kept_external_nodes = [n for n in external_nodes if n["id"] in adjacent_external_ids][:remaining_budget]
+    adjacent_to_kept = _adjacent_external_ids(all_edges, kept_file_ids)
+    kept_external_nodes = [n for n in external_candidates if n["id"] in adjacent_to_kept][
+        : MAX_GRAPH_NODES - len(kept_file_nodes)
+    ]
+
+    # Hand back whatever the reserve didn't actually spend (every external
+    # candidate was adjacent only to files that got cut, or there were fewer
+    # candidates than the cap). Safe to do after external selection: adding
+    # file nodes can only create adjacency, never remove it, so no
+    # already-kept external node stops being justified.
+    unspent = MAX_GRAPH_NODES - len(kept_file_nodes) - len(kept_external_nodes)
+    if unspent > 0:
+        kept_file_nodes += file_nodes[len(kept_file_nodes) : len(kept_file_nodes) + unspent]
+        kept_file_ids = {n["id"] for n in kept_file_nodes}
 
     nodes = kept_file_nodes + kept_external_nodes
     kept_ids = kept_file_ids | {n["id"] for n in kept_external_nodes}

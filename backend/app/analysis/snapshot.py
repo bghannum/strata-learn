@@ -52,7 +52,11 @@ def analyze_source(source_dir: Path) -> StructuralAnalysis:
             parsed_files.append(parsed)
 
     dependency_graph = build_dependency_graph(parsed_files, files)
-    entry_points = detect_entry_points(walked)
+    # Takes the parsed files too, not just the walked ones: Python entry points
+    # are read off tree-sitter facts from the parse above rather than re-derived
+    # from raw bytes (#12). No second parse — a file already parsed once here is
+    # matched back by relative_path.
+    entry_points = detect_entry_points(walked, parsed_files)
 
     return StructuralAnalysis(
         file_count=len(walked),

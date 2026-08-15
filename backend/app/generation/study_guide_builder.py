@@ -260,9 +260,7 @@ def _build_deep_dives(module_summaries: list[ModuleSummary]) -> SectionSpec | No
     # units, so their purpose/role_in_system can genuinely differ. Grouping
     # by file_path keeps one heading per file instead of repeating it once
     # per chunk with conflicting text (found via Codex's Phase 3 pre-push
-    # review; the underlying multi-row-per-file behavior is a known,
-    # already-deferred Phase 2 limitation — issue #14 — this only fixes how
-    # Phase 3 renders it).
+    # review).
     by_file: dict[str, list[ModuleSummary]] = {}
     for summary in module_summaries:
         by_file.setdefault(summary.file_path, []).append(summary)
@@ -270,11 +268,16 @@ def _build_deep_dives(module_summaries: list[ModuleSummary]) -> SectionSpec | No
     lines = []
     citations = []
     for file_path in sorted(by_file):
-        chunks = sorted(by_file[file_path], key=lambda s: s.line_start)
+        # Ordered by chunk_index, not line_start: every chunk of a file carries
+        # the identical whole-module line range, so the previous line_start sort
+        # had no real key to sort on and the "Part N of M" labels were assigned
+        # in whatever order Postgres returned the rows (#14, fixed by persisting
+        # the index rather than trying to recover it here).
+        chunks = sorted(by_file[file_path], key=lambda s: s.chunk_index)
         lines += [f"### `{file_path}` (lines {chunks[0].line_start}-{chunks[0].line_end})", ""]
-        for i, summary in enumerate(chunks):
+        for summary in chunks:
             if len(chunks) > 1:
-                lines.append(f"**Part {i + 1} of {len(chunks)}:**")
+                lines.append(f"**Part {summary.chunk_index} of {summary.chunk_count}:**")
             lines += [summary.purpose, "", summary.role_in_system, ""]
             # Both rendered sentences, not just purpose — they come from the
             # same LLM call grounded in the same line range, so both are

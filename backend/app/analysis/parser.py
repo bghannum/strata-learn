@@ -53,6 +53,16 @@ class ParsedFile:
     relative_path: str
     units: list[ParsedUnit]
     imports: list[ParsedImport]
+    # Dotted callee names of every call expression in the file, as written
+    # ("FastAPI", "uvicorn.run", "app.include_router"). Structural facts like
+    # units/imports, extracted in the same single parse rather than by a second
+    # pass over the source — entry_points.py is the first consumer (#12), which
+    # previously regex-matched raw bytes and so counted any *mention* of a
+    # framework in a comment, docstring, or string literal as a call to it.
+    called_names: tuple[str, ...] = ()
+    # A module-level `if __name__ == "__main__":`. Python-only; always False
+    # for JS/TS, which has no equivalent construct.
+    has_main_guard: bool = False
 
 
 def parse_file(path: Path, relative_path: str, language: Language) -> ParsedFile | None:
@@ -71,9 +81,13 @@ def parse_source(source: bytes, relative_path: str, language: Language) -> Parse
     tree = parser.parse(source)
     root = tree.root_node
 
+    called_names: tuple[str, ...] = ()
+    has_main_guard = False
     if language is Language.python:
         units, imports = _parse_python(root, source)
         module_doc = _block_docstring(root, source)
+        called_names = _python_called_names(root, source)
+        has_main_guard = _python_has_main_guard(root, source)
     else:
         units, imports = _parse_javascript(root, source)
         module_doc = _leading_jsdoc(root, source)
@@ -86,7 +100,13 @@ def parse_source(source: bytes, relative_path: str, language: Language) -> Parse
         signature=None,
         docstring=module_doc,
     )
-    return ParsedFile(relative_path=relative_path, units=[module_unit, *units], imports=imports)
+    return ParsedFile(
+        relative_path=relative_path,
+        units=[module_unit, *units],
+        imports=imports,
+        called_names=called_names,
+        has_main_guard=has_main_guard,
+    )
 
 
 def _text(node: Node | None, source: bytes) -> str:
@@ -195,6 +215,56 @@ def _python_string_content(string_node: Node, source: bytes) -> str | None:
     parts = [_text(c, source) for c in string_node.named_children if c.type == "string_content"]
     text = "".join(parts).strip()
     return text or None
+
+
+def _python_called_names(root: Node, source: bytes) -> tuple[str, ...]:
+    """Callee name of every `call` node in the file, deduplicated, in first-seen
+    order. `identifier` callees yield a bare name ("FastAPI"); `attribute`
+    callees yield the dotted text as written ("uvicorn.run"). Anything else —
+    a call on a subscript, a call on a call — is skipped rather than
+    approximated, since there's no stable name to report for it.
+
+    Scans the whole tree, not just module level: a Flask app built inside a
+    `create_app()` factory is every bit as real an instantiation as one at
+    import time, and the factory pattern is common enough that module-level-only
+    scanning would miss it routinely.
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def walk(node: Node) -> None:
+        if node.type == "call":
+            fn = node.child_by_field_name("function")
+            if fn is not None and fn.type in ("identifier", "attribute"):
+                name = _text(fn, source)
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    return tuple(names)
+
+
+def _python_has_main_guard(root: Node, source: bytes) -> bool:
+    """Module-level `if __name__ == "__main__":` only. Nested inside a function
+    it wouldn't run on import and isn't a script entry point, so the structural
+    position is part of what makes this fact true — checking for the comparison
+    anywhere would repeat the mistake this replaces.
+    """
+    for child in root.named_children:
+        if child.type != "if_statement":
+            continue
+        condition = child.child_by_field_name("condition")
+        if condition is None or condition.type != "comparison_operator":
+            continue
+        operands = condition.named_children
+        has_name = any(c.type == "identifier" and _text(c, source) == "__name__" for c in operands)
+        has_main = any(c.type == "string" and _python_string_content(c, source) == "__main__" for c in operands)
+        if has_name and has_main:
+            return True
+    return False
 
 
 def _python_plain_imports(node: Node, source: bytes) -> list[ParsedImport]:

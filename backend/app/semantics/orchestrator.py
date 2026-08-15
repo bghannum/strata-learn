@@ -70,6 +70,8 @@ async def run_layer_b(llm: LLMProvider, snapshot: AnalysisSnapshot, source_dir: 
                     key_concepts=summary.key_concepts,
                     line_start=summary.line_start,
                     line_end=summary.line_end,
+                    chunk_index=summary.chunk_index,
+                    chunk_count=summary.chunk_count,
                     prompt_version=summary.prompt_version,
                     model=summary.model,
                 )

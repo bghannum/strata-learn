@@ -83,6 +83,74 @@ def test_bound_graph_drops_external_nodes_not_adjacent_to_a_kept_file() -> None:
     assert kept_ids == {"src/a.py", "external:used"}
 
 
+def test_bound_graph_keeps_external_nodes_when_file_nodes_alone_fill_the_budget() -> None:
+    # #16: file nodes were capped at MAX_GRAPH_NODES first and external nodes
+    # got only the leftovers, so a repo with MAX_GRAPH_NODES or more files left
+    # exactly zero budget for externals — dropping every framework, database,
+    # and queue the system depends on, plus every imports_external edge, on
+    # precisely the large repos where knowing them matters most.
+    file_nodes = [
+        {"id": f"src/file_{i:04d}.py", "kind": "file", "language": "python"} for i in range(MAX_GRAPH_NODES + 50)
+    ]
+    external_nodes = [
+        {"id": f"external:package_{i:02d}", "kind": "external", "language": None} for i in range(20)
+    ]
+    edges = [
+        {"source": "src/file_0000.py", "target": n["id"], "kind": "imports_external"} for n in external_nodes
+    ]
+    dependency_graph = {"nodes": file_nodes + external_nodes, "edges": edges}
+
+    bounded = _bound_graph(dependency_graph)
+
+    kept_ids = {n["id"] for n in bounded["nodes"]}
+    assert {n["id"] for n in external_nodes} <= kept_ids
+    assert len(bounded["nodes"]) == MAX_GRAPH_NODES
+    # the evidence itself, not just the nodes: every imports_external edge
+    # survives, since both endpoints did
+    assert len(bounded["edges"]) == len(external_nodes)
+
+
+def test_bound_graph_reserve_is_capped_at_the_number_of_real_external_nodes() -> None:
+    # The reserve must not cost file slots it has no external nodes to spend
+    # them on — a repo with only a couple of dependencies still gets nearly the
+    # whole budget for its own files.
+    file_nodes = [
+        {"id": f"src/file_{i:04d}.py", "kind": "file", "language": "python"} for i in range(MAX_GRAPH_NODES + 50)
+    ]
+    external_nodes = [{"id": "external:redis", "kind": "external", "language": None}]
+    edges = [{"source": "src/file_0000.py", "target": "external:redis", "kind": "imports_external"}]
+    dependency_graph = {"nodes": file_nodes + external_nodes, "edges": edges}
+
+    bounded = _bound_graph(dependency_graph)
+
+    kept_file_ids = {n["id"] for n in bounded["nodes"] if n["kind"] == "file"}
+    assert "external:redis" in {n["id"] for n in bounded["nodes"]}
+    assert len(kept_file_ids) == MAX_GRAPH_NODES - 1
+    assert len(bounded["nodes"]) == MAX_GRAPH_NODES
+
+
+def test_bound_graph_hands_unspent_reserve_back_to_file_nodes() -> None:
+    # External candidates adjacent only to files that got cut leave the reserve
+    # unspent; that budget goes back to files rather than shrinking the graph.
+    file_nodes = [
+        {"id": f"src/file_{i:04d}.py", "kind": "file", "language": "python"} for i in range(MAX_GRAPH_NODES + 50)
+    ]
+    external_nodes = [
+        {"id": f"external:package_{i:02d}", "kind": "external", "language": None} for i in range(30)
+    ]
+    # every external hangs off a file that sorts last, so none survives the cut
+    edges = [
+        {"source": f"src/file_{MAX_GRAPH_NODES + 49:04d}.py", "target": n["id"], "kind": "imports_external"}
+        for n in external_nodes
+    ]
+    dependency_graph = {"nodes": file_nodes + external_nodes, "edges": edges}
+
+    bounded = _bound_graph(dependency_graph)
+
+    assert len(bounded["nodes"]) == MAX_GRAPH_NODES
+    assert all(n["kind"] == "file" for n in bounded["nodes"])
+
+
 def test_bound_graph_drops_edges_touching_a_truncated_node() -> None:
     # An edge referencing a node that got cut by the node cap must not
     # survive — otherwise the graph handed to the model references a node it

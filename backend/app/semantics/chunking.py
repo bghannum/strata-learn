@@ -34,6 +34,14 @@ class ModuleChunk:
     file_path: str
     module_unit: CodeUnit
     units: list[CodeUnit]
+    # Position of this chunk among the chunks actually emitted for its file, and
+    # how many there are. Both are 1 for the overwhelmingly common single-chunk
+    # file. Carried through to the persisted ModuleSummary (#14) so a consumer
+    # asking "the summary for file X" can tell a complete summary from one of N
+    # partial ones — every chunk of a file otherwise shares the same file_path
+    # and the same whole-module line range, making the rows indistinguishable.
+    chunk_index: int = 1
+    chunk_count: int = 1
 
 
 def chunk_by_module(units: list[CodeUnit]) -> list[ModuleChunk]:
@@ -45,9 +53,15 @@ def chunk_by_module(units: list[CodeUnit]) -> list[ModuleChunk]:
     # including on arq redelivery, not whatever order the DB happens to
     # return CodeUnit rows in (a plain SELECT has no ordering guarantee
     # without an explicit ORDER BY).
-    chunks: list[ModuleChunk] = []
+    #
+    # Built as (file_path, module_unit, units) triples first and only turned
+    # into ModuleChunks once the MAX_CHUNKS_PER_SNAPSHOT cap has been applied:
+    # chunk_count has to describe what was actually emitted, so a file cut off
+    # mid-way by the global cap reports "part 1 of 2" rather than claiming a
+    # part 3 that no summary will ever exist for.
+    raw: list[tuple[str, CodeUnit, list[CodeUnit]]] = []
     for file_path in sorted(by_file):
-        if len(chunks) >= MAX_CHUNKS_PER_SNAPSHOT:
+        if len(raw) >= MAX_CHUNKS_PER_SNAPSHOT:
             break
 
         file_units = by_file[file_path]
@@ -58,20 +72,31 @@ def chunk_by_module(units: list[CodeUnit]) -> list[ModuleChunk]:
         other_units = sorted((u for u in file_units if u is not module_unit), key=lambda u: u.line_start)
 
         if not other_units:
-            chunks.append(ModuleChunk(file_path=file_path, module_unit=module_unit, units=[]))
+            raw.append((file_path, module_unit, []))
             continue
 
         for i in range(0, len(other_units), MAX_UNITS_PER_CHUNK):
-            if len(chunks) >= MAX_CHUNKS_PER_SNAPSHOT:
+            if len(raw) >= MAX_CHUNKS_PER_SNAPSHOT:
                 # Stop mid-file too, not just between files — a single file
                 # with enough units could otherwise blow the budget alone.
                 break
-            chunks.append(
-                ModuleChunk(
-                    file_path=file_path,
-                    module_unit=module_unit,
-                    units=other_units[i : i + MAX_UNITS_PER_CHUNK],
-                )
-            )
+            raw.append((file_path, module_unit, other_units[i : i + MAX_UNITS_PER_CHUNK]))
 
+    counts: dict[str, int] = {}
+    for file_path, _module_unit, _chunk_units in raw:
+        counts[file_path] = counts.get(file_path, 0) + 1
+
+    chunks: list[ModuleChunk] = []
+    seen: dict[str, int] = {}
+    for file_path, module_unit, chunk_units in raw:
+        seen[file_path] = seen.get(file_path, 0) + 1
+        chunks.append(
+            ModuleChunk(
+                file_path=file_path,
+                module_unit=module_unit,
+                units=chunk_units,
+                chunk_index=seen[file_path],
+                chunk_count=counts[file_path],
+            )
+        )
     return chunks
