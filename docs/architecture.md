@@ -1,8 +1,8 @@
 # Current architecture
 
-**Status:** Current through Phase 5; Phase 5.5 design integration is next.
+**Status:** Current through Phase 6 (generation quality); Phase 7 versioning/hosting is next.
 
-Strata Learn is a Docker Compose-based modular monolith that ingests a Git repository or uploaded zip, extracts deterministic structural facts, enriches them with citation-grounded LLM analysis, assembles the result into a study guide, and lets a logged-in user generate and take a quiz against it — all through a working frontend. Applying the checked-in UI mockup to that functional baseline is the next phase; drawing questions, versioning/hosting polish, and voice learning follow it.
+Strata Learn is a Docker Compose-based modular monolith that ingests a Git repository or uploaded zip, extracts deterministic structural facts, enriches them with citation-grounded LLM analysis, assembles the result into a study guide, and lets a logged-in user generate and take a quiz against it — all through a working frontend styled to the checked-in UI mockup. Improving the quality of what gets generated — conceptual explanation over per-file indexing — is the current phase; versioning/hosting polish, voice learning, and drawing questions follow it.
 
 ## System components
 
@@ -10,10 +10,10 @@ Strata Learn is a Docker Compose-based modular monolith that ingests a Git repos
 |---|---|---|
 | API | FastAPI | Auth (register/login/session), repository ingestion, repository/snapshot lookup, progress WebSocket, study guide lookup, quiz generation trigger/lookup, and attempt taking/grading |
 | Worker | arq | Source preparation, Layer A analysis, Layer B analysis, study guide generation, quiz generation, persistence, and status publication |
-| Database | PostgreSQL 16 | Users/sessions, repositories, snapshots, code units, module summaries, pattern claims, trade-off cards, study guides/sections/citations, and quizzes/questions/attempts/answer submissions |
+| Database | PostgreSQL 16 | Users/sessions, repositories, snapshots, code units, module summaries, subsystems, pattern claims, trade-off cards, study guides/sections/citations, and quizzes/questions/attempts/answer submissions |
 | Queue/events | Redis 7 | arq jobs, temporary zip bytes, and snapshot progress pub/sub |
 | Frontend | React/Vite | Register/login, add repo, live indexing progress, study guide reading (diagram + citations), quiz generation + taking, and results |
-| LLM provider | Anthropic | Claude-backed structured output for Layer B tasks, quiz question generation, and fill-in-the-blank concept-mode grading |
+| LLM provider | Anthropic | Claude-backed structured output for Layer B tasks, the architecture narrative and diagram labels, quiz question generation, and fill-in-the-blank concept-mode grading |
 
 The code exposes an `LLMProvider` protocol and a deterministic `FakeLLMProvider` for tests. An OpenAI production provider is planned but not implemented.
 
@@ -51,11 +51,14 @@ Layer A walks supported source files, detects Python and JavaScript/TypeScript, 
 
 ### Layer B: semantic analysis
 
-Layer B runs after Layer A and currently uses one Anthropic model for three tasks:
+Layer B runs after Layer A and currently uses one Anthropic model for four tasks:
 
 - module summaries;
+- subsystem naming;
 - architectural pattern detection;
 - trade-off extraction.
+
+Subsystem naming is the narrowest of the four. `analysis/subsystems.py` partitions the snapshot's files into subsystems deterministically — directory structure decides membership, and the dependency graph decides only the outside-in ordering (BFS depth from the entry-point files) — and the model supplies a human name and one-line role per group, in a single call for the whole partition. Membership is never sent back for revision, so this stays inside ADR-006's "LLM adds labels/grouping" allowance. Directory structure rather than graph community detection is deliberate: community detection flips on small edge changes, which would surface as architectural churn between re-indexes of nearly identical code once Phase 7 diffs snapshots.
 
 The implementation bounds request volume, validates model-provided evidence against Layer A facts, and stores prompt version and model provenance with every result. Automated tests use `FakeLLMProvider`; real provider calls occur only during manual checkpoints or normal application use.
 
@@ -63,13 +66,19 @@ Versioned templates under [`docs/prompts/`](prompts/) are runtime inputs, not pa
 
 ### Study guide generation
 
-Runs after Layer B and assembles its output (plus Layer A facts) into a study guide: Overview, Architecture, Trade-offs, Glossary, and Deep-Dive sections, each with citations back to real source lines. The only new LLM call is short labels for a Mermaid component diagram built from the (already-deterministic) dependency graph; every other section is deterministic formatting of already-generated, already-cited Layer B rows. A crash between Layer B's commit and the guide's commit resumes on redelivery without re-running Layer B's billed calls, reacquiring source pinned to the originally analyzed commit rather than the branch's current tip.
+Runs after Layer B and assembles its output (plus Layer A facts) into a study guide: Overview, Architecture, Trade-offs, Glossary, and Deep-Dive sections, each with citations back to real source lines.
+
+Two LLM calls happen here. One produces short labels for a Mermaid component diagram built from the (already-deterministic) dependency graph. The other is the Architecture section's narrative (`generation/architecture_narrative.py`): a synthesis pass over the pattern claim, subsystems, trade-off cards, and entry points that explains how the system works and why it is built that way. Its citations are attached *after* drafting — the model writes, then names which of the files it was given back each part, and those paths resolve against real `CodeUnit` line ranges, with unresolvable paths dropped rather than persisted with a fabricated range. Before this existed the section was pure string templating over `PatternClaim`, which is why it read as a citation list rather than an explanation; the pattern label and evidence bullets are still rendered, below the narrative in a collapsed block.
+
+Every other section remains deterministic formatting of already-generated, already-cited rows. Deep Dives group by subsystem in the partition's outside-in order rather than listing files alphabetically.
+
+A crash between Layer B's commit and the guide's commit resumes on redelivery without re-running Layer B's billed calls, reacquiring source pinned to the originally analyzed commit rather than the branch's current tip. Study guide assembly itself does re-run on that path, including its own two LLM calls.
 
 ### Quiz generation and taking
 
 Runs on demand, well after study guide generation — the two are decoupled in time, not chained in the same job. `POST /quizzes/{repo_id}/generate` creates a `Quiz` row (`generating`) and enqueues a separate `generate_quiz` arq job, then the client polls `GET /quizzes/{id}` until it reaches a terminal status (no progress WebSocket for this stage — see `worker/quiz_pipeline.py`'s docstring for why polling is enough here).
 
-Quiz generation never re-reads the source repo (by this point the temp workspace is long gone, per ADR-008): it builds questions from `Citation` rows the study guide already persisted, each with a real snippet captured while the repo was still on disk. A bounded, deduped, priority-ranked subset of citations becomes "seeds," alternately fed to the MCQ and fill-in-the-blank generators (`quizzing/mcq_generator.py`, `quizzing/fill_blank_generator.py`); each `Question`'s `file_path`/`line_start`/`line_end` is taken directly from its seed citation rather than trusted from the model's own output, since there's no independent evidence to validate a free-form citation against here (unlike `tradeoff_extractor.py`'s `CodeUnit`-checked refs). `Question.source_citation_id` also keeps the seed `Citation`'s own id — the file/line range alone can't identify one specific `Citation` row when the same range is cited by more than one `Section` — so `AttemptResults` can show the real cited claim and snippet, not just a path. A guide too thin to seed any questions from (or a run where every generated result fails its generator's own validation) fails the quiz rather than persisting an empty `ready` one.
+Quiz generation never re-reads the source repo (by this point the temp workspace is long gone, per ADR-008): it builds questions from `Citation` rows the study guide already persisted, each with a real snippet captured while the repo was still on disk. A bounded, deduped, priority-ranked subset of citations becomes "seeds," alternately fed to the MCQ and fill-in-the-blank generators (`quizzing/mcq_generator.py`, `quizzing/fill_blank_generator.py`). Deduplication is by claim as well as by line range — a trade-off card gives every one of its evidence refs the same `claim_excerpt` at different ranges, so range-only dedup let one card seed several near-identical questions — and seeds spread across subsystems within each priority tier rather than taking an alphabetical prefix, so a quiz can't come entirely from whichever directory sorts first. each `Question`'s `file_path`/`line_start`/`line_end` is taken directly from its seed citation rather than trusted from the model's own output, since there's no independent evidence to validate a free-form citation against here (unlike `tradeoff_extractor.py`'s `CodeUnit`-checked refs). `Question.source_citation_id` also keeps the seed `Citation`'s own id — the file/line range alone can't identify one specific `Citation` row when the same range is cited by more than one `Section` — so `AttemptResults` can show the real cited claim and snippet, not just a path. A guide too thin to seed any questions from (or a run where every generated result fails its generator's own validation) fails the quiz rather than persisting an empty `ready` one.
 
 Grading is immediate, not deferred to quiz completion. `PATCH /attempts/{id}/answers/{qid}` grades the instant an answer is submitted: MCQ is a deterministic index comparison; fill-in-the-blank tries an exact/alternative-text match first, and only a concept-mode miss falls through to a real LLM-judge call — made directly from the API request (not a worker job), since it's one cheap call gating one HTTP response. The provider is constructed only when credentials exist, so deterministic MCQ, exact-match, and code-mode grading remain available without an API key; a concept-mode miss returns `503` when no provider is configured. The judge's own structured-output schema constrains its score to exactly `§10.2`'s rubric values (0.0/0.5/1.0), not just any float in range. `GET /quizzes/{id}` never includes the answer key (`correct_index`, `correct_answer`, `explanation`); those only appear in a `PATCH` response, after that specific question has been answered. `POST /attempts/{id}/complete` averages every question's score (unanswered counts as zero) into `Attempt.score`.
 
@@ -79,7 +88,7 @@ The app-level "reuse an existing in-flight attempt/quiz" checks above have their
 
 ### Frontend
 
-React + Vite + Tailwind, talking to the API over `fetch`/`WebSocket`, with every request carrying an `HttpOnly` session cookie (`credentials: 'include'`) as of Phase 4b. `Register`/`Login` handle account creation and session establishment; `AddRepo` submits a Git URL or zip upload; `Dashboard` and `RepoDetail` subscribe to `WS /repos/{id}/progress` and render a shared 5-stage status component (`IndexingProgress`, chip and stepper variants) — a failure shows which stage it happened at, not just a generic error. `StudyGuideView` renders `content_md` as Markdown, `diagram_mermaid` inline via the `mermaid` package, and each section's citations as a list that opens a `CitationPanel` slide-over with the real cited snippet. Citations render as a per-section list rather than markers inline on the specific claim — `claim_excerpt` isn't always a literal substring of `content_md` (e.g. the Architecture section's citations pair the primary-pattern headline with a specific evidence claim), so precise inline anchoring isn't reliable yet. `RepoDetail` also offers "Generate Quiz" once a study guide exists, polling until it's ready; `QuizTaker` walks one question at a time with immediate per-answer feedback; `AttemptResults` shows the final score and a per-question breakdown with its source reference, loaded fresh from `GET /attempts/{id}` so the page works on a direct visit or refresh, not only right after finishing.
+React + Vite + Tailwind, talking to the API over `fetch`/`WebSocket`, with every request carrying an `HttpOnly` session cookie (`credentials: 'include'`) as of Phase 4b. `Register`/`Login` handle account creation and session establishment; `AddRepo` submits a Git URL or zip upload; `Dashboard` and `RepoDetail` subscribe to `WS /repos/{id}/progress` and render a shared 5-stage status component (`IndexingProgress`, chip and stepper variants) — a failure shows which stage it happened at, not just a generic error. `StudyGuideView` renders `content_md` as Markdown, `diagram_mermaid` inline via the `mermaid` package, and each section's citations as a list that opens a `CitationPanel` slide-over with the real cited snippet. Citations render as a per-section list rather than markers inline on the specific claim — `claim_excerpt` isn't always a literal substring of `content_md` (e.g. the Architecture section's citations pair the primary-pattern headline with a specific evidence claim), so precise inline anchoring isn't reliable yet. `RepoDetail` also offers "Generate Quiz" once a study guide exists, polling until it's ready; `QuizTaker` walks one question at a time, with per-answer feedback shown immediately or withheld until the end depending on the quiz's `feedback_mode`; `AttemptResults` shows the final score and a per-question breakdown with its source reference, loaded fresh from `GET /attempts/{id}` so the page works on a direct visit or refresh, not only right after finishing.
 
 ## Persistence model
 
@@ -89,7 +98,7 @@ Implemented tables are:
 - `Repo` — an ingested source, its owning user, and a pointer to its latest snapshot;
 - `AnalysisSnapshot` — one indexed state plus status and Layer A graph data;
 - `CodeUnit` — a parsed module, class, or function;
-- `ModuleSummary`, `PatternClaim`, and `TradeoffCard` — citation-grounded Layer B output;
+- `ModuleSummary`, `Subsystem`, `PatternClaim`, and `TradeoffCard` — citation-grounded Layer B output;
 - `StudyGuide`, `Section`, and `Citation` — the assembled study guide and its per-claim citations;
 - `Quiz` and `Question` — a generated quiz and its MCQ/fill-in-the-blank questions, each grounded in one source `Citation`;
 - `Attempt` and `AnswerSubmission` — one user's pass at a quiz and their per-question answers/scores/feedback.
