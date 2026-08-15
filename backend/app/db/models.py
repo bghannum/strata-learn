@@ -11,13 +11,17 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _timestamptz_column(**kwargs: object) -> Column:
+def _timestamptz_column(*, nullable: bool = False, **kwargs: object) -> Column:
     # Field(default_factory=utcnow) alone produces a timezone-*aware* Python
     # datetime, but SQLModel's default DateTime column is TIMESTAMP WITHOUT TIME
     # ZONE — asyncpg then refuses to encode it ("can't subtract offset-naive and
     # offset-aware datetimes"). Store as TIMESTAMPTZ instead, matching the values
     # actually being written.
-    return Column(DateTime(timezone=True), nullable=False, **kwargs)
+    #
+    # nullable is explicit rather than passed through **kwargs so a nullable
+    # timestamp (one recording "has this ever happened?") can't collide with the
+    # hardcoded default.
+    return Column(DateTime(timezone=True), nullable=nullable, **kwargs)
 
 
 # SQLModel 0.0.39 can't turn a bare `typing.Literal` into a column type (it only
@@ -141,6 +145,13 @@ class Repo(SQLModel, table=True):
             nullable=True,
         ),
     )
+    # Result of the most recent explicit "check for updates" (#62). Only the
+    # raw observation is stored, never a derived "stale" flag: staleness is
+    # remote_head_commit vs. the latest snapshot's commit_hash, and a stored
+    # verdict would silently go wrong the moment a reindex changes the second
+    # half of that comparison without anyone re-running the check.
+    remote_head_commit: str | None = None
+    updates_checked_at: datetime | None = Field(default=None, sa_column=_timestamptz_column(nullable=True))
 
 
 class AnalysisSnapshot(SQLModel, table=True):
