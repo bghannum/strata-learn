@@ -14,8 +14,28 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.auth import get_current_user
-from app.db.models import AnalysisSnapshot, Citation, Repo, Section, StudyGuide, User
+from app.db.models import (
+    AnalysisSnapshot,
+    Citation,
+    PatternClaim,
+    Repo,
+    Section,
+    StudyGuide,
+    Subsystem,
+    TradeoffCard,
+    User,
+)
 from app.db.session import get_session
+from app.generation.diffing import (
+    DependencyDiff,
+    PatternDiff,
+    SubsystemDiff,
+    TradeoffDiff,
+    diff_dependencies,
+    diff_pattern,
+    diff_subsystems,
+    diff_tradeoffs,
+)
 
 router = APIRouter(prefix="/study-guides", tags=["study-guides"])
 
@@ -110,6 +130,80 @@ def _render_markdown(guide: StudyGuide, repo: Repo, snapshot_commit: str | None,
             lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+class StudyGuideDiffOut(BaseModel):
+    from_version: int
+    to_version: int
+    from_snapshot_id: UUID
+    to_snapshot_id: UUID
+    from_commit: str | None
+    to_commit: str | None
+    subsystems: SubsystemDiff
+    tradeoffs: TradeoffDiff
+    pattern: PatternDiff
+    dependencies: DependencyDiff
+
+
+async def _snapshot_facts(
+    session: AsyncSession, snapshot_id: UUID
+) -> tuple[list[Subsystem], list[TradeoffCard], PatternClaim | None]:
+    subsystems = list((await session.exec(select(Subsystem).where(Subsystem.snapshot_id == snapshot_id))).all())
+    cards = list((await session.exec(select(TradeoffCard).where(TradeoffCard.snapshot_id == snapshot_id))).all())
+    pattern = (await session.exec(select(PatternClaim).where(PatternClaim.snapshot_id == snapshot_id))).first()
+    return subsystems, cards, pattern
+
+
+@router.get("/{study_guide_id}/diff/{other_study_guide_id}", response_model=StudyGuideDiffOut)
+async def diff_study_guides(
+    study_guide_id: UUID,
+    other_study_guide_id: UUID,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> StudyGuideDiffOut:
+    """What changed between two indexings of the same repository.
+
+    Direction is by version, not by argument order: the lower-versioned guide
+    is always "before". A diff that reverses itself depending on which id the
+    caller happened to put first would be a trap, and there's no case where
+    reading the repository's history backwards is what someone meant.
+
+    Structure only, no prose summary — see generation/diffing.py for why
+    nothing here matches on generated text.
+    """
+    guide_a, repo = await _owned_guide_and_repo(session, study_guide_id, current_user)
+    guide_b, other_repo = await _owned_guide_and_repo(session, other_study_guide_id, current_user)
+
+    if repo.id != other_repo.id:
+        # Not an empty diff: comparing two repositories' architectures is a
+        # different question this endpoint doesn't answer, and silently
+        # returning "everything changed" would look like an answer.
+        raise HTTPException(400, "study guides belong to different repositories")
+
+    before, after = sorted((guide_a, guide_b), key=lambda g: g.version)
+
+    snapshot_before = await session.get(AnalysisSnapshot, before.snapshot_id)
+    snapshot_after = await session.get(AnalysisSnapshot, after.snapshot_id)
+    if snapshot_before is None or snapshot_after is None:
+        raise HTTPException(404, "snapshot not found")
+
+    subsystems_before, cards_before, pattern_before = await _snapshot_facts(session, before.snapshot_id)
+    subsystems_after, cards_after, pattern_after = await _snapshot_facts(session, after.snapshot_id)
+
+    return StudyGuideDiffOut(
+        from_version=before.version,
+        to_version=after.version,
+        from_snapshot_id=before.snapshot_id,
+        to_snapshot_id=after.snapshot_id,
+        from_commit=snapshot_before.commit_hash,
+        to_commit=snapshot_after.commit_hash,
+        subsystems=diff_subsystems(subsystems_before, subsystems_after),
+        tradeoffs=diff_tradeoffs(cards_before, cards_after),
+        pattern=diff_pattern(pattern_before, pattern_after),
+        dependencies=diff_dependencies(
+            snapshot_before.dependency_graph, subsystems_before, snapshot_after.dependency_graph, subsystems_after
+        ),
+    )
 
 
 @router.get("/{study_guide_id}/export.md")

@@ -2,7 +2,19 @@ import uuid
 
 from fastapi.testclient import TestClient
 
-from app.db.models import AnalysisSnapshot, Citation, Repo, Section, SectionType, SourceType, StudyGuide
+from app.db.models import (
+    AnalysisSnapshot,
+    Citation,
+    Confidence,
+    PatternClaim,
+    Repo,
+    Section,
+    SectionType,
+    SnapshotStatus,
+    SourceType,
+    StudyGuide,
+    Subsystem,
+)
 from app.db.session import async_session_factory
 from app.main import app
 from tests.conftest import login_as_new_user, register_test_user
@@ -189,3 +201,137 @@ def test_export_404_for_unknown_id() -> None:
         register_test_user(client)
         response = client.get("/study-guides/00000000-0000-0000-0000-000000000000/export.md")
     assert response.status_code == 404
+
+
+# --- #63: architectural diff ---
+
+
+async def _guide_with_facts(
+    repo_id: uuid.UUID,
+    version: int,
+    subsystem_files: dict[str, list[str]],
+    edges: list[tuple[str, str]],
+    pattern: str,
+) -> uuid.UUID:
+    """A snapshot with Layer B facts plus a study guide over it."""
+    async with async_session_factory() as session:
+        snapshot = AnalysisSnapshot(
+            repo_id=repo_id,
+            status=SnapshotStatus.ready,
+            dependency_graph={"nodes": [], "edges": [{"source": s, "target": t, "kind": "imports"} for s, t in edges]},
+        )
+        session.add(snapshot)
+        await session.flush()
+
+        for order, (key, paths) in enumerate(sorted(subsystem_files.items())):
+            session.add(
+                Subsystem(
+                    snapshot_id=snapshot.id, key=key, name=key.rsplit("/", 1)[-1].title(), role="r",
+                    file_paths=paths, depth=order, order=order, prompt_version="v1", model="fake",
+                )
+            )
+        session.add(
+            PatternClaim(
+                snapshot_id=snapshot.id, primary_pattern=pattern, confidence=Confidence.medium,
+                evidence=[], caveats=None, prompt_version="v1", model="fake",
+            )
+        )
+        guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot.id, version=version)
+        session.add(guide)
+        await session.commit()
+        return guide.id
+
+
+async def test_diff_reports_subsystem_pattern_and_dependency_changes(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, _snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=uuid.UUID(user["id"])
+        )
+        v1 = await _guide_with_facts(
+            repo_id, 1, {"app/api": ["app/api/a.py"]}, [], "modular monolith"
+        )
+        v2 = await _guide_with_facts(
+            repo_id,
+            2,
+            {"app/api": ["app/api/a.py"], "app/worker": ["app/worker/b.py"]},
+            [("app/api/a.py", "app/worker/b.py")],
+            "layered",
+        )
+
+        body = client.get(f"/study-guides/{v1}/diff/{v2}").json()
+
+    assert (body["from_version"], body["to_version"]) == (1, 2)
+    assert [s["key"] for s in body["subsystems"]["added"]] == ["app/worker"]
+    assert body["pattern"]["changed"] is True
+    assert body["pattern"]["pattern_after"] == "layered"
+    assert [(e["source"], e["target"]) for e in body["dependencies"]["edges_added"]] == [("app/api", "app/worker")]
+
+
+async def test_diff_direction_follows_version_not_argument_order(pending_repo_factory) -> None:
+    # A diff that reverses itself depending on which id the caller happened to
+    # put first would be a trap.
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, _snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=uuid.UUID(user["id"])
+        )
+        v1 = await _guide_with_facts(repo_id, 1, {"app/api": ["a.py"]}, [], "modular monolith")
+        v2 = await _guide_with_facts(repo_id, 2, {"app/api": ["a.py"]}, [], "layered")
+
+        forward = client.get(f"/study-guides/{v1}/diff/{v2}").json()
+        backward = client.get(f"/study-guides/{v2}/diff/{v1}").json()
+
+    assert forward == backward
+    assert forward["pattern"]["pattern_before"] == "modular monolith"
+
+
+async def test_diff_across_repositories_is_rejected(pending_repo_factory) -> None:
+    # Silently returning "everything changed" would look like an answer to a
+    # question this endpoint doesn't answer.
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_a, _ = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/a.git", user_id=uuid.UUID(user["id"])
+        )
+        repo_b, _ = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/b.git", user_id=uuid.UUID(user["id"])
+        )
+        guide_a = await _guide_with_facts(repo_a, 1, {"app": ["a.py"]}, [], "layered")
+        guide_b = await _guide_with_facts(repo_b, 1, {"app": ["a.py"]}, [], "layered")
+
+        response = client.get(f"/study-guides/{guide_a}/diff/{guide_b}")
+
+    assert response.status_code == 400
+
+
+async def test_diff_of_identical_snapshots_is_empty(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, _snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=uuid.UUID(user["id"])
+        )
+        subsystems = {"app/api": ["app/api/a.py"], "app/db": ["app/db/b.py"]}
+        edges = [("app/api/a.py", "app/db/b.py")]
+        v1 = await _guide_with_facts(repo_id, 1, subsystems, edges, "layered")
+        v2 = await _guide_with_facts(repo_id, 2, subsystems, edges, "layered")
+
+        body = client.get(f"/study-guides/{v1}/diff/{v2}").json()
+
+    assert body["subsystems"] == {"added": [], "removed": [], "changed": []}
+    assert body["dependencies"] == {"edges_added": [], "edges_removed": []}
+    assert body["pattern"]["changed"] is False
+
+
+async def test_diff_is_scoped_to_its_owner(pending_repo_factory) -> None:
+    with TestClient(app) as owner:
+        user = register_test_user(owner)
+        repo_id, _snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=uuid.UUID(user["id"])
+        )
+        v1 = await _guide_with_facts(repo_id, 1, {"app": ["a.py"]}, [], "layered")
+        v2 = await _guide_with_facts(repo_id, 2, {"app": ["a.py"]}, [], "layered")
+
+    with TestClient(app) as other:
+        await login_as_new_user(other)
+        assert other.get(f"/study-guides/{v1}/diff/{v2}").status_code == 404
