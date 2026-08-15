@@ -5,14 +5,17 @@ import pytest
 from sqlmodel import select
 
 from app.db.models import (
+    AnalysisSnapshot,
     Citation,
     Question,
     Quiz,
     QuizStatus,
     Section,
     SectionType,
+    SnapshotStatus,
     SourceType,
     StudyGuide,
+    Subsystem,
 )
 from app.db.session import async_session_factory
 from app.quizzing.fill_blank_generator import FillBlankOutput
@@ -70,6 +73,31 @@ async def _make_study_guide_with_two_citations(pending_repo_factory) -> tuple[uu
         )
         await session.commit()
         return repo_id, guide.id
+
+
+async def _make_guide_with_citations(
+    repo_id: uuid.UUID, snapshot_id: uuid.UUID, file_paths: list[str], version: int = 1
+) -> uuid.UUID:
+    """One deep-dive section citing each given path, with a distinct claim per
+    citation so #51's claim dedup doesn't collapse them."""
+    async with async_session_factory() as session:
+        guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=version)
+        session.add(guide)
+        await session.flush()
+        section = Section(
+            study_guide_id=guide.id, section_type=SectionType.deep_dive, title="Deep Dives", order=0, content_md="x",
+        )
+        session.add(section)
+        await session.flush()
+        for path in file_paths:
+            session.add(
+                Citation(
+                    section_id=section.id, file_path=path, line_start=1, line_end=2,
+                    claim_excerpt=f"{path} does something", snippet_text="import x",
+                )
+            )
+        await session.commit()
+        return guide.id
 
 
 async def _make_study_guide_with_no_citations(pending_repo_factory) -> tuple[uuid.UUID, uuid.UUID]:
@@ -166,3 +194,96 @@ async def test_generate_quiz_cancelled_marks_failed_and_reraises(pending_repo_fa
     async with async_session_factory() as session:
         quiz = await session.get(Quiz, quiz_id)
         assert quiz.status == QuizStatus.failed
+
+
+async def _add_subsystem(snapshot_id: uuid.UUID, key: str, name: str, file_paths: list[str]) -> None:
+    async with async_session_factory() as session:
+        session.add(
+            Subsystem(
+                snapshot_id=snapshot_id, key=key, name=name, role="r",
+                file_paths=file_paths, depth=0, order=0, prompt_version="v1", model="fake-model",
+            )
+        )
+        await session.commit()
+
+
+async def test_generated_questions_carry_their_subsystem_key(pending_repo_factory) -> None:
+    # #61: mastery aggregates on this key, because Section/Question ids are all
+    # replaced by a re-index and can't join scores across versions.
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, "https://example.com/repo.git")
+    guide_id = await _make_guide_with_citations(repo_id, snapshot_id, ["app/api/a.py", "app/worker/b.py"])
+    await _add_subsystem(snapshot_id, "app/api", "HTTP API", ["app/api/a.py"])
+    await _add_subsystem(snapshot_id, "app/worker", "Background worker", ["app/worker/b.py"])
+    quiz_id = await _make_pending_quiz(repo_id, guide_id)
+
+    await generate_quiz(
+        {}, quiz_id=quiz_id, study_guide_id=guide_id,
+        llm=FakeLLMProvider([_mcq_response(), _fill_blank_response()]),
+    )
+
+    async with async_session_factory() as session:
+        questions = list((await session.exec(select(Question).where(Question.quiz_id == quiz_id))).all())
+
+    by_path = {q.file_path: q.subsystem_key for q in questions}
+    assert by_path == {"app/api/a.py": "app/api", "app/worker/b.py": "app/worker"}
+
+
+async def test_question_from_an_unclaimed_file_has_no_subsystem_key(pending_repo_factory) -> None:
+    # A file in no subsystem, or a snapshot indexed before subsystems existed.
+    # Null rather than a guess — aggregation buckets these as "ungrouped".
+    repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, "https://example.com/repo.git")
+    guide_id = await _make_guide_with_citations(repo_id, snapshot_id, ["stray.py", "other.py"])
+    quiz_id = await _make_pending_quiz(repo_id, guide_id)
+
+    await generate_quiz(
+        {}, quiz_id=quiz_id, study_guide_id=guide_id,
+        llm=FakeLLMProvider([_mcq_response(), _fill_blank_response()]),
+    )
+
+    async with async_session_factory() as session:
+        questions = list((await session.exec(select(Question).where(Question.quiz_id == quiz_id))).all())
+
+    assert all(q.subsystem_key is None for q in questions)
+
+
+async def test_subsystem_keys_survive_a_reindex(pending_repo_factory) -> None:
+    # The whole point: a re-index replaces every Section, Citation, and Question
+    # row, so mastery can only span versions if the key it aggregates on is
+    # stable. Two snapshots of the same repo, quizzed separately, must produce
+    # the same keys for the same directories.
+    repo_id, first_snapshot_id = await pending_repo_factory(SourceType.git_url, "https://example.com/repo.git")
+    first_guide = await _make_guide_with_citations(repo_id, first_snapshot_id, ["app/api/a.py", "app/worker/b.py"])
+    await _add_subsystem(first_snapshot_id, "app/api", "HTTP API", ["app/api/a.py"])
+    await _add_subsystem(first_snapshot_id, "app/worker", "Background worker", ["app/worker/b.py"])
+    first_quiz = await _make_pending_quiz(repo_id, first_guide)
+    await generate_quiz(
+        {}, quiz_id=first_quiz, study_guide_id=first_guide,
+        llm=FakeLLMProvider([_mcq_response(), _fill_blank_response()]),
+    )
+
+    # Second snapshot for the same repo, with a differently-named subsystem for
+    # the same directory — the generated *name* can drift between runs; the key
+    # is what must not.
+    async with async_session_factory() as session:
+        second_snapshot = AnalysisSnapshot(repo_id=repo_id, status=SnapshotStatus.ready)
+        session.add(second_snapshot)
+        await session.commit()
+        await session.refresh(second_snapshot)
+    second_guide = await _make_guide_with_citations(
+        repo_id, second_snapshot.id, ["app/api/a.py", "app/worker/b.py"], version=2
+    )
+    await _add_subsystem(second_snapshot.id, "app/api", "Web layer", ["app/api/a.py"])
+    await _add_subsystem(second_snapshot.id, "app/worker", "Job runner", ["app/worker/b.py"])
+    second_quiz = await _make_pending_quiz(repo_id, second_guide)
+    await generate_quiz(
+        {}, quiz_id=second_quiz, study_guide_id=second_guide,
+        llm=FakeLLMProvider([_mcq_response(), _fill_blank_response()]),
+    )
+
+    async with async_session_factory() as session:
+        first_questions = list((await session.exec(select(Question).where(Question.quiz_id == first_quiz))).all())
+        second_questions = list((await session.exec(select(Question).where(Question.quiz_id == second_quiz))).all())
+
+    assert {q.file_path: q.subsystem_key for q in first_questions} == {
+        q.file_path: q.subsystem_key for q in second_questions
+    }
