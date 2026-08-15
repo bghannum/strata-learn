@@ -477,6 +477,61 @@ async def test_run_study_guide_generation_is_idempotent_under_redelivery(layer_a
     assert len(sections) == 5
 
 
+async def test_redelivery_reuses_cached_llm_artifacts_instead_of_rebilling(layer_a_ready_factory) -> None:
+    # #23: a crash between generating the narrative/diagram and committing the
+    # guide used to make the next redelivery pay for both again — and the
+    # narrative runs on the strongest model tier with the largest prompt in the
+    # system. The second run must make no LLM calls at all.
+    _repo_id, snapshot_id, source_dir = await layer_a_ready_factory(_FILES)
+    await _seed_layer_b(snapshot_id)
+
+    async with async_session_factory() as session:
+        snapshot = await session.get(AnalysisSnapshot, snapshot_id)
+        assert snapshot is not None
+
+    first = _diagram_llm()
+    await run_study_guide_generation(first, snapshot, source_dir)
+    assert len(first.calls) == 2  # narrative + diagram labels
+
+    # An empty provider raises if anything asks it for a response.
+    second = FakeLLMProvider([])
+    await run_study_guide_generation(second, snapshot, source_dir)
+    assert second.calls == []
+
+    # and the rehydrated artifacts still produce the same section content
+    _guide, sections = await _get_guide_with_sections(snapshot_id)
+    architecture = next(s for s in sections if s.section_type == SectionType.architecture)
+    assert architecture.content_md.startswith("The app takes a request")
+    assert architecture.diagram_mermaid is not None
+    assert architecture.diagram_mermaid.startswith("flowchart TD")
+
+
+async def test_cached_artifacts_are_scoped_to_their_own_snapshot(layer_a_ready_factory) -> None:
+    # A genuine re-index creates a new snapshot and must regenerate, not
+    # inherit the previous snapshot's narrative.
+    repo_id, first_snapshot_id, source_dir = await layer_a_ready_factory(_FILES)
+    await _seed_layer_b(first_snapshot_id)
+    async with async_session_factory() as session:
+        first_snapshot = await session.get(AnalysisSnapshot, first_snapshot_id)
+        assert first_snapshot is not None
+    await run_study_guide_generation(_diagram_llm(), first_snapshot, source_dir)
+
+    # Second snapshot for the same repo, built by hand the way the fixture does
+    # internally — see the version test below for the same pattern.
+    analysis = analyze_source(source_dir)
+    async with async_session_factory() as session:
+        second_snapshot = await create_pending_snapshot(session, repo_id)
+    async with async_session_factory() as session:
+        second_snapshot = await complete_snapshot(session, second_snapshot.id, None, analysis)
+        assert second_snapshot is not None
+    await _seed_layer_b(second_snapshot.id)
+
+    second_llm = _diagram_llm()
+    await run_study_guide_generation(second_llm, second_snapshot, source_dir)
+
+    assert len(second_llm.calls) == 2
+
+
 async def test_run_study_guide_generation_increments_version_across_snapshots(
     layer_a_ready_factory, tmp_path: Path
 ) -> None:

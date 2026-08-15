@@ -54,6 +54,22 @@ class DiagramResult:
     model: str
 
 
+def diagram_payload(diagram: DiagramResult) -> dict:
+    """Cache representation (generation/artifact_cache.py) — see
+    architecture_narrative.narrative_payload for why this is explicit."""
+    return {"mermaid": diagram.mermaid, "file_paths": diagram.file_paths, "labels": diagram.labels}
+
+
+def diagram_from_payload(payload: dict, prompt_version: str, model: str) -> DiagramResult:
+    return DiagramResult(
+        mermaid=payload["mermaid"],
+        file_paths=list(payload.get("file_paths", [])),
+        labels=dict(payload.get("labels", {})),
+        prompt_version=prompt_version,
+        model=model,
+    )
+
+
 def _select_nodes(dependency_graph: dict) -> tuple[list[str], list[dict]]:
     """Highest fan-in+fan-out files are the most architecturally significant —
     the same connectivity heuristic tradeoff_extractor.identify_decision_points

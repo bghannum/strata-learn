@@ -67,6 +67,45 @@ class ArchitectureNarrative:
     model: str
 
 
+def narrative_payload(narrative: "ArchitectureNarrative") -> dict:
+    """Cache representation (artifact_cache.py). Explicit rather than
+    dataclasses.asdict so the persisted shape is a deliberate contract — a
+    field renamed here would otherwise silently stop rehydrating."""
+    return {
+        "overview": narrative.overview,
+        "why_sections": [{"heading": s.heading, "body": s.body} for s in narrative.why_sections],
+        "citations": [
+            {
+                "file_path": c.file_path,
+                "line_start": c.line_start,
+                "line_end": c.line_end,
+                "claim_excerpt": c.claim_excerpt,
+            }
+            for c in narrative.citations
+        ],
+    }
+
+
+def narrative_from_payload(payload: dict, prompt_version: str, model: str) -> "ArchitectureNarrative":
+    return ArchitectureNarrative(
+        overview=payload.get("overview", ""),
+        why_sections=[
+            NarrativeSection(heading=s["heading"], body=s["body"]) for s in payload.get("why_sections", [])
+        ],
+        citations=[
+            NarrativeCitation(
+                file_path=c["file_path"],
+                line_start=c["line_start"],
+                line_end=c["line_end"],
+                claim_excerpt=c["claim_excerpt"],
+            )
+            for c in payload.get("citations", [])
+        ],
+        prompt_version=prompt_version,
+        model=model,
+    )
+
+
 def _pattern_summary(pattern_claim: PatternClaim | None) -> str:
     if pattern_claim is None:
         return "none detected"
