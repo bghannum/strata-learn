@@ -42,6 +42,19 @@ def test_load_prompt_architecture_narrative() -> None:
     assert "Detected pattern: modular monolith" in rendered
 
 
+def test_load_prompt_quiz_generators_default_to_v2() -> None:
+    # v2 shifted both from recall toward conceptual understanding (#51). v1
+    # stays on disk: Question rows generated before the bump record it, and a
+    # prompt_version that can't be loaded makes that provenance unreadable.
+    mcq = load_prompt("mcq_generator", "v2")
+    assert "UNDERSTANDS" in mcq.system
+    assert load_prompt("mcq_generator", "v1").version == "v1"
+
+    fill_blank = load_prompt("fill_blank_generator", "v2")
+    assert "CONCEPT is always an acceptable answer" in fill_blank.system
+    assert load_prompt("fill_blank_generator", "v1").version == "v1"
+
+
 def test_load_prompt_uses_overridden_prompts_dir(tmp_path, monkeypatch) -> None:
     # Regression test for the local-dev-vs-Docker path fix: load_prompt() must
     # read from settings.prompts_dir at call time, not a hardcoded relative

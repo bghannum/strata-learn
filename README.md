@@ -14,7 +14,11 @@ Phases 0 through 5 are complete:
 - a working frontend: register/log in, add a repo, watch it index live, and read the generated study guide with inline diagrams and clickable citations, all scoped to the logged-in user via cookie-based sessions;
 - quiz generation (MCQ + fill-in-the-blank, grounded in the study guide's own citations) and taking, with per-answer grading/feedback (either immediate or deferred to the end of the quiz, chosen per quiz), Previous navigation, retakes, and a results view showing each question's submitted and correct answer.
 
-Phase 5.5 (UI design integration) has applied the checked-in Organic mockup across every screen — shared primitives, tokens, and light-only styling replacing the earlier default Tailwind look — plus a real reindex/retry action for a failed run. Visual-regression screenshot baselines and a full manual responsive/keyboard sweep remain open. Remaining roadmap phases add drawing questions (Phase 6), versioning/diffing/hosting polish (Phase 7), and voice learning through read-aloud content plus spoken quiz answers (Phase 8).
+Phase 5.5 (UI design integration) applied the checked-in Organic mockup across every screen — shared primitives, tokens, and light-only styling replacing the earlier default Tailwind look — plus a real reindex/retry action for a failed run.
+
+Phase 6 (generation quality) is in progress. It repairs the Layer A/B facts that generation is built from, adds a subsystem layer between "one file" and "the whole repo", and replaces the string-templated Architecture section with a synthesized explanation of how the system works and why — aimed at conceptual understanding rather than a per-file index. Quiz seeding draws from that same conceptual material instead of clustering on whichever code spans sort first.
+
+Remaining roadmap phases add versioning/diffing/hosting polish (Phase 7), voice learning through read-aloud content plus spoken quiz answers (Phase 8), and drawing questions (Phase 9, deferred from its original Phase 6 slot).
 
 Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
 

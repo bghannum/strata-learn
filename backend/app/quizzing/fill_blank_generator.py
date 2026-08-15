@@ -45,7 +45,9 @@ def _valid(output: FillBlankOutput) -> bool:
 
 
 async def generate_fill_blank_questions(llm: LLMProvider, seeds: list[QuestionSeed]) -> list[FillBlankResult]:
-    template = load_prompt("fill_blank_generator")
+    # v2 makes CONCEPT mode the default and requires CODE mode to earn its use
+    # — see the prompt's own "Changes from v1" section.
+    template = load_prompt("fill_blank_generator", "v2")
     results: list[FillBlankResult] = []
 
     for seed in seeds:
