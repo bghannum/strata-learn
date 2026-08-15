@@ -37,9 +37,15 @@ from app.db.models import (
     UnitType,
 )
 from app.db.session import async_session_factory
-from app.generation.architecture_narrative import ArchitectureNarrative, build_architecture_narrative
+from app.generation.architecture_narrative import (
+    ArchitectureNarrative,
+    build_architecture_narrative,
+    narrative_from_payload,
+    narrative_payload,
+)
+from app.generation.artifact_cache import ARCHITECTURE_NARRATIVE, COMPONENT_DIAGRAM, load_artifact, save_artifact
 from app.generation.citation import read_snippet
-from app.generation.diagram_builder import build_component_diagram
+from app.generation.diagram_builder import build_component_diagram, diagram_from_payload, diagram_payload
 from app.semantics.llm_provider import LLMProvider
 
 
@@ -412,10 +418,40 @@ async def build_sections(
     for summary in module_summaries:
         module_purposes.setdefault(summary.file_path, summary.purpose)
 
-    narrative = await build_architecture_narrative(
-        llm, pattern_claim, subsystems, tradeoff_cards, snapshot.entry_points, code_units
-    )
-    diagram = await build_component_diagram(llm, snapshot.dependency_graph, module_purposes)
+    # Both calls are cached against the snapshot (#23): a crash between
+    # generating one and persist_study_guide's commit used to rebill it on the
+    # next redelivery, and the narrative runs on the strongest model tier with
+    # the largest prompt in the system. Load-before / save-after, each in its
+    # own short session — no session is alive while a call is in flight.
+    cached_narrative = await load_artifact(snapshot.id, ARCHITECTURE_NARRATIVE)
+    if cached_narrative is not None:
+        narrative = narrative_from_payload(
+            cached_narrative.payload, cached_narrative.prompt_version, cached_narrative.model
+        )
+    else:
+        narrative = await build_architecture_narrative(
+            llm, pattern_claim, subsystems, tradeoff_cards, snapshot.entry_points, code_units
+        )
+        if narrative is not None:
+            await save_artifact(
+                snapshot.id,
+                ARCHITECTURE_NARRATIVE,
+                narrative_payload(narrative),
+                narrative.prompt_version,
+                narrative.model,
+            )
+
+    cached_diagram = await load_artifact(snapshot.id, COMPONENT_DIAGRAM)
+    if cached_diagram is not None:
+        diagram = diagram_from_payload(
+            cached_diagram.payload, cached_diagram.prompt_version, cached_diagram.model
+        )
+    else:
+        diagram = await build_component_diagram(llm, snapshot.dependency_graph, module_purposes)
+        if diagram is not None:
+            await save_artifact(
+                snapshot.id, COMPONENT_DIAGRAM, diagram_payload(diagram), diagram.prompt_version, diagram.model
+            )
     # claim_excerpt names the actual generated label ("HTTP API routes"),
     # not just "included in the diagram" — the label itself is the LLM's
     # claim about this file's role, so the citation should say what it's

@@ -25,10 +25,12 @@ class FileInfo:
     language: Language
 
 
-def build_dependency_graph(parsed_files: list[ParsedFile], files: list[FileInfo]) -> dict:
+def build_dependency_graph(
+    parsed_files: list[ParsedFile], files: list[FileInfo], package_roots: set[str] | None = None
+) -> dict:
     language_by_path = {f.relative_path: f.language for f in files}
     file_set = set(language_by_path)
-    python_module_map = _build_python_module_map(files)
+    python_module_map = _build_python_module_map(files, package_roots or {""})
 
     nodes: list[dict] = [
         {"id": path, "kind": "file", "language": language.value} for path, language in language_by_path.items()
@@ -98,20 +100,104 @@ def build_dependency_graph(parsed_files: list[ParsedFile], files: list[FileInfo]
 # --- Python resolution ---
 
 
-def _build_python_module_map(files: list[FileInfo]) -> dict[str, str]:
-    """Maps a fully-qualified dotted module name (as if the repo root were on
-    sys.path) to the file that defines it. `pkg/__init__.py` maps under the
-    package's own dotted name (`pkg`), not `pkg.__init__`."""
+def _dotted_name(relative_path: str, root_prefix: str) -> str | None:
+    """Dotted module name for a file, as seen from `root_prefix` on sys.path.
+    `pkg/__init__.py` maps under the package's own dotted name (`pkg`), not
+    `pkg.__init__`."""
+    stem = relative_path.rsplit(".", 1)[0]
+    if root_prefix:
+        stem = stem[len(root_prefix) + 1 :]  # +1 drops the separator
+    parts = stem.split("/")
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+        if not parts:
+            return None  # an __init__.py at the root itself — no dotted name to assign
+    return ".".join(parts)
+
+
+# A directory holding one of these is a Python project root, so its own
+# directory — not the repo root — is what lands on sys.path.
+_PYTHON_PROJECT_MARKERS = frozenset({"pyproject.toml", "setup.py", "setup.cfg"})
+
+
+def detect_python_package_roots(relative_paths: list[str]) -> set[str]:
+    """Directory prefixes that could be on sys.path, "" meaning the repo root.
+
+    Resolving absolute imports against the repo root alone (#57) misses every
+    import in a repo whose Python doesn't live at the top: a monorepo with
+    `backend/pyproject.toml` writes `from app.config import settings`, not
+    `from backend.app.config import ...`, so nothing resolved and the entire
+    backend appeared to have no internal dependencies at all.
+
+    Three signals, because no single one covers real repos:
+
+    - A project marker file (`pyproject.toml` and friends) marks its own
+      directory. This is the one that catches namespace-package projects, which
+      have no `__init__.py` anywhere — including this repo, which is why the
+      `__init__.py` walk alone found nothing when it was tried first.
+    - `src/` beside a marker, for the src-layout convention.
+    - The parent of a topmost `__init__.py` chain, for projects that do use
+      them and have no marker file (a plain directory of packages).
+    """
+    roots = {""}
+    directories = set()
+    package_dirs = set()
+
+    for path in relative_paths:
+        directory = path.rsplit("/", 1)[0] if "/" in path else ""
+        directories.add(directory)
+        name = path.rsplit("/", 1)[-1]
+        if name in _PYTHON_PROJECT_MARKERS:
+            roots.add(directory)
+        elif name == "__init__.py":
+            package_dirs.add(directory)
+
+    # src-layout: `<project>/src/<package>/...` with the marker at <project>.
+    for marker_root in list(roots):
+        src = f"{marker_root}/src" if marker_root else "src"
+        if src in directories or any(d.startswith(f"{src}/") for d in directories):
+            roots.add(src)
+
+    # Topmost package's parent, for repos that use __init__.py and nothing else.
+    for package_dir in package_dirs:
+        parts = package_dir.split("/")
+        while parts and "/".join(parts) in package_dirs:
+            parts.pop()
+        roots.add("/".join(parts))
+
+    return roots
+
+
+def _build_python_module_map(files: list[FileInfo], package_roots: set[str]) -> dict[str, str]:
+    """Maps a dotted module name to the file that defines it.
+
+    A file is registered once per package root it sits under: `app.config` from
+    `backend/`, and `backend.app.config` from the repo root. Both are
+    legitimate names for the same module depending on what is on sys.path, and
+    a repo can genuinely contain imports written either way — its own code says
+    `app.config` while a top-level script might say `backend.app.config`.
+    """
+    python_files = sorted(f.relative_path for f in files if f.language is Language.python)
+
     module_map: dict[str, str] = {}
-    for f in files:
-        if f.language is not Language.python:
-            continue
-        parts = f.relative_path.rsplit(".", 1)[0].split("/")
-        if parts[-1] == "__init__":
-            parts = parts[:-1]
-            if not parts:
-                continue  # a root-level __init__.py — no dotted name to assign
-        module_map[".".join(parts)] = f.relative_path
+
+    # Repo-root names first, so pre-existing resolution always wins a collision
+    # and this can only add edges, never redirect one that already resolved.
+    for relative_path in python_files:
+        dotted = _dotted_name(relative_path, "")
+        if dotted is not None:
+            module_map[dotted] = relative_path
+
+    # Deeper roots first: for nested roots, the most specific one is the name
+    # the code inside it actually writes.
+    for root_prefix in sorted((r for r in package_roots if r), key=lambda r: (-r.count("/"), r)):
+        for relative_path in python_files:
+            if not relative_path.startswith(f"{root_prefix}/"):
+                continue
+            dotted = _dotted_name(relative_path, root_prefix)
+            if dotted is not None:
+                module_map.setdefault(dotted, relative_path)
+
     return module_map
 
 

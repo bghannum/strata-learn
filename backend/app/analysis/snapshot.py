@@ -12,7 +12,7 @@ from uuid import UUID
 from sqlmodel import delete
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.analysis.dependency_graph import FileInfo, build_dependency_graph
+from app.analysis.dependency_graph import FileInfo, build_dependency_graph, detect_python_package_roots
 from app.analysis.entry_points import detect_entry_points
 from app.analysis.parser import ParsedFile, parse_file
 from app.db.models import AnalysisSnapshot, CodeUnit, SnapshotStatus, UnitType
@@ -51,7 +51,11 @@ def analyze_source(source_dir: Path) -> StructuralAnalysis:
         if parsed is not None:
             parsed_files.append(parsed)
 
-    dependency_graph = build_dependency_graph(parsed_files, files)
+    # Package roots come from every walked file, not just the language-detected
+    # ones — the strongest signal is a pyproject.toml/setup.py, which isn't a
+    # source file and so never appears in `files` (#57).
+    package_roots = detect_python_package_roots([wf.relative_path for wf in walked])
+    dependency_graph = build_dependency_graph(parsed_files, files, package_roots)
     # Takes the parsed files too, not just the walked ones: Python entry points
     # are read off tree-sitter facts from the parse above rather than re-derived
     # from raw bytes (#12). No second parse — a file already parsed once here is

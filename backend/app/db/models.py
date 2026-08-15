@@ -197,6 +197,34 @@ class ModuleSummary(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
 
 
+class GeneratedArtifact(SQLModel, table=True):
+    """One expensive LLM-generated intermediate, cached against its snapshot so
+    a redelivery doesn't pay for it twice (#23).
+
+    Study-guide assembly makes two calls — the architecture narrative (strongest
+    model tier, largest prompt in the system) and the diagram labels. Both live
+    only in memory until `persist_study_guide` commits, so a crash anywhere in
+    between meant the next redelivery regenerated them from scratch and rebilled
+    both. Persisting each as soon as it's computed, in its own short
+    transaction, bounds that to at most one wasted call per artifact ever.
+
+    Deliberately generic rather than two typed tables: `payload` is whatever the
+    producing module needs to rehydrate its own result, and the alternative is a
+    new table every time a generated intermediate becomes expensive enough to
+    care about.
+    """
+
+    __table_args__ = (UniqueConstraint("snapshot_id", "kind", name="uq_generatedartifact_snapshot_kind"),)
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    snapshot_id: uuid.UUID = Field(foreign_key="analysissnapshot.id", index=True)
+    kind: str
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    prompt_version: str
+    model: str
+    created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
+
+
 class Subsystem(SQLModel, table=True):
     """A named group of files that do one job together (#53). Membership and
     ordering are LAYER A — analysis/subsystems.py derives them from directory

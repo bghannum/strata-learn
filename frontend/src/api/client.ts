@@ -106,13 +106,26 @@ function notifyUnauthorized(): void {
   window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+// A 401 from an endpoint that *checks* credentials means "those credentials
+// were wrong", not "your session died" — the two are indistinguishable at the
+// status code alone, and treating them the same logs out a perfectly valid
+// session (#44). /login isn't behind AppLayout's auth guard, so an
+// already-signed-in user can navigate there directly; one mistyped password
+// used to clear their AuthContext user while the backend session cookie stayed
+// untouched, leaving the client convinced it was logged out when it wasn't.
+interface RequestOptions {
+  /** Dispatch UNAUTHORIZED_EVENT on a 401. Default true; false for endpoints
+   *  where a 401 is an expected answer rather than an expired session. */
+  notifyOn401?: boolean
+}
+
+async function request<T>(path: string, init?: RequestInit, options?: RequestOptions): Promise<T> {
   // credentials: 'include' — every endpoint requires the session cookie as
   // of Phase 4b, and the API runs on a different port than the frontend
   // dev server, so the browser won't attach it without being told to.
   const response = await fetch(`${API_BASE_URL}${path}`, { ...init, credentials: 'include' })
   if (!response.ok) {
-    if (response.status === 401) notifyUnauthorized()
+    if (response.status === 401 && options?.notifyOn401 !== false) notifyUnauthorized()
     throw new ApiError(response.status, await parseErrorDetail(response))
   }
   return response.json()
@@ -127,19 +140,27 @@ export interface User {
 }
 
 export function register(email: string, password: string, registrationSecret: string): Promise<User> {
-  return request('/auth/register', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password, registration_secret: registrationSecret }),
-  })
+  return request(
+    '/auth/register',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, registration_secret: registrationSecret }),
+    },
+    { notifyOn401: false },
+  )
 }
 
 export function login(email: string, password: string): Promise<User> {
-  return request('/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-  })
+  return request(
+    '/auth/login',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    },
+    { notifyOn401: false },
+  )
 }
 
 export async function logout(): Promise<void> {

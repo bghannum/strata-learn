@@ -1,6 +1,6 @@
 from typing import ClassVar
 
-from app.analysis.dependency_graph import FileInfo, build_dependency_graph
+from app.analysis.dependency_graph import FileInfo, build_dependency_graph, detect_python_package_roots
 from app.analysis.parser import parse_source
 from app.ingestion.language_detect import Language
 
@@ -119,3 +119,105 @@ class TestJsTsResolution:
         files = {"src/App.tsx": b'import x from "./does-not-exist";\n'}
         graph = _build(files, Language.typescript)
         assert _edges(graph) == set()
+
+
+class TestPackageRootResolution:
+    """#57: absolute imports resolved only against the repo root, so a repo
+    whose Python lives one directory down — a monorepo, a src-layout — had
+    every absolute import fall through to an external node and appeared to have
+    no internal dependencies at all."""
+
+    def test_detects_marker_file_directory_as_a_root(self) -> None:
+        roots = detect_python_package_roots(
+            ["backend/pyproject.toml", "backend/app/main.py", "frontend/package.json"]
+        )
+        assert "backend" in roots
+        assert "" in roots  # repo root is always a candidate
+
+    def test_detects_src_layout(self) -> None:
+        roots = detect_python_package_roots(["pyproject.toml", "src/mypkg/__init__.py", "src/mypkg/mod.py"])
+        assert "src" in roots
+
+    def test_detects_topmost_package_parent_without_a_marker_file(self) -> None:
+        roots = detect_python_package_roots(["libs/pkg/__init__.py", "libs/pkg/sub/__init__.py"])
+        assert "libs" in roots
+
+    def test_monorepo_absolute_imports_resolve(self) -> None:
+        # No __init__.py anywhere: namespace packages, which is how this repo's
+        # own backend is laid out — the __init__.py walk alone found nothing.
+        files_src = {
+            "backend/app/main.py": b"from app.config import settings\n",
+            "backend/app/config.py": b"import os\n",
+        }
+        files = [FileInfo(relative_path=p, language=Language.python) for p in files_src]
+        parsed = [
+            p for path, src in files_src.items() if (p := parse_source(src, path, Language.python)) is not None
+        ]
+        roots = detect_python_package_roots([*files_src, "backend/pyproject.toml"])
+
+        graph = build_dependency_graph(parsed, files, roots)
+
+        assert ("backend/app/main.py", "backend/app/config.py", "imports") in _edges(graph)
+
+    def test_src_layout_absolute_imports_resolve(self) -> None:
+        files_src = {
+            "src/mypkg/__init__.py": b"",
+            "src/mypkg/cli.py": b"from mypkg.core import run\n",
+            "src/mypkg/core.py": b"def run():\n    pass\n",
+        }
+        files = [FileInfo(relative_path=p, language=Language.python) for p in files_src]
+        parsed = [
+            p for path, src in files_src.items() if (p := parse_source(src, path, Language.python)) is not None
+        ]
+        roots = detect_python_package_roots([*files_src, "pyproject.toml"])
+
+        graph = build_dependency_graph(parsed, files, roots)
+
+        assert ("src/mypkg/cli.py", "src/mypkg/core.py", "imports") in _edges(graph)
+
+    def test_repo_root_imports_still_resolve_and_win_collisions(self) -> None:
+        # A repo-root name that already resolved must keep resolving to the same
+        # file — the package-root pass only fills gaps, never redirects.
+        files_src = {
+            "app/config.py": b"TOP = 1\n",
+            "backend/app/config.py": b"NESTED = 1\n",
+            "caller.py": b"from app.config import TOP\n",
+        }
+        files = [FileInfo(relative_path=p, language=Language.python) for p in files_src]
+        parsed = [
+            p for path, src in files_src.items() if (p := parse_source(src, path, Language.python)) is not None
+        ]
+        roots = detect_python_package_roots([*files_src, "backend/pyproject.toml"])
+
+        graph = build_dependency_graph(parsed, files, roots)
+
+        assert ("caller.py", "app/config.py", "imports") in _edges(graph)
+        assert ("caller.py", "backend/app/config.py", "imports") not in _edges(graph)
+
+    def test_unresolvable_absolute_import_is_still_external(self) -> None:
+        files_src = {"backend/app/main.py": b"import requests\n"}
+        files = [FileInfo(relative_path=p, language=Language.python) for p in files_src]
+        parsed = [
+            p for path, src in files_src.items() if (p := parse_source(src, path, Language.python)) is not None
+        ]
+        roots = detect_python_package_roots([*files_src, "backend/pyproject.toml"])
+
+        graph = build_dependency_graph(parsed, files, roots)
+
+        assert ("backend/app/main.py", "external:requests", "imports_external") in _edges(graph)
+
+    def test_default_package_roots_preserve_repo_root_only_behavior(self) -> None:
+        # build_dependency_graph is called without roots in a few tests and
+        # from older code paths; that must still mean "repo root only".
+        files_src = {
+            "backend/app/main.py": b"from app.config import settings\n",
+            "backend/app/config.py": b"import os\n",
+        }
+        files = [FileInfo(relative_path=p, language=Language.python) for p in files_src]
+        parsed = [
+            p for path, src in files_src.items() if (p := parse_source(src, path, Language.python)) is not None
+        ]
+
+        graph = build_dependency_graph(parsed, files)
+
+        assert ("backend/app/main.py", "backend/app/config.py", "imports") not in _edges(graph)

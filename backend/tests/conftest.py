@@ -37,6 +37,7 @@ async def _clean_db() -> None:
         await session.exec(text("DELETE FROM patternclaim"))
         await session.exec(text("DELETE FROM modulesummary"))
         await session.exec(text("DELETE FROM subsystem"))
+        await session.exec(text("DELETE FROM generatedartifact"))
         await session.exec(text("DELETE FROM analysissnapshot"))
         await session.exec(text("DELETE FROM repo"))
         await session.exec(text("DELETE FROM session"))
