@@ -165,23 +165,48 @@ async def create_repo(
     return repo
 
 
+class ReindexRequest(BaseModel):
+    # Re-running the pipeline costs real Layer B money, so an unchanged repo is
+    # refused by default and this is the explicit override (#73).
+    force: bool = False
+
+
 @router.post("/{repo_id}/reindex", response_model=Repo, status_code=202)
 async def reindex_repo(
     repo_id: UUID,
+    body: ReindexRequest | None = None,
     session: AsyncSession = Depends(get_session),
     redis: ArqRedis = Depends(get_redis_pool),
     current_user: User = Depends(get_current_user),
 ) -> Repo:
-    """Retries a failed indexing run — ui-spec.md §6.2's "Retry" action,
-    deferred out of Phase 4 (#25) as a real scope expansion, tracked as #26.
+    """Re-runs the full pipeline against a fresh AnalysisSnapshot.
 
-    A retry from scratch, not a resume from checkpoint: Layer B's per-module/
-    pattern/trade-off work isn't persisted incrementally in a form safe to
-    resume mid-run, so this creates a fresh AnalysisSnapshot and re-enqueues
-    the full pipeline rather than mutating the failed one in place. Only a
-    `failed` latest snapshot is eligible — reindexing a `ready` repo to pick
-    up new commits is the Phase 7 diffing feature, out of scope here.
+    Two user intents, one mechanism: retrying a `failed` run (ui-spec.md §6.2,
+    #26) and re-indexing a `ready` repo to pick up new commits (#73). Both are
+    a run from scratch rather than a resume — Layer B's per-module/pattern/
+    trade-off work isn't persisted incrementally in a form safe to resume
+    mid-run.
+
+    Re-indexing a healthy repo was originally out of scope, which left the
+    versioning story with its middle step missing: staleness detection could
+    say "new commits on the remote" and offer no way to act, and the
+    architectural diff (#63) had no way to ever acquire a second snapshot to
+    compare.
+
+    Eligibility, in order:
+
+    - a non-terminal snapshot (pending/parsing/analyzing/generating) is a job
+      already in flight — a second one would race it for the same
+      latest_snapshot_id and double the billed work;
+    - a `failed` snapshot is always eligible, unchanged from #26;
+    - a `ready` snapshot is eligible only when the remote has actually moved,
+      or `force` is set. Re-indexing identical source spends the most expensive
+      part of the pipeline to regenerate what already exists, which is a
+      reasonable thing to ask for deliberately and a bad thing to do by
+      double-click.
     """
+    force = body.force if body is not None else False
+
     # SELECT ... FOR UPDATE, not session.get — found via Codex's PR #50
     # review: without a lock, two concurrent retries can both read the same
     # failed snapshot before either updates latest_snapshot_id, so both
@@ -196,8 +221,34 @@ async def reindex_repo(
         raise HTTPException(404, "repo has no snapshot yet")
 
     old_snapshot = await session.get(AnalysisSnapshot, repo.latest_snapshot_id)
-    if old_snapshot is None or old_snapshot.status != SnapshotStatus.failed:
-        raise HTTPException(409, "only a repo whose latest snapshot failed can be retried")
+    if old_snapshot is None:
+        raise HTTPException(404, "snapshot not found")
+    if old_snapshot.status not in (SnapshotStatus.ready, SnapshotStatus.failed):
+        raise HTTPException(409, "indexing is already in progress for this repository")
+
+    if old_snapshot.status == SnapshotStatus.ready and not force:
+        if repo.source_type != SourceType.git_url:
+            # A zip re-index would analyze the exact same bytes — there is no
+            # remote it could have drifted from, so "has anything changed?"
+            # has one honest answer.
+            raise HTTPException(409, "an uploaded zip has no remote to pick up changes from — pass force to re-index")
+
+        # A *fresh* check rather than the cached remote_head_commit: this is
+        # the request that spends the money, so it shouldn't act on an answer
+        # that may be hours old. Recording it also keeps update-status honest.
+        remote_head = await asyncio.to_thread(get_remote_head_commit, repo.source_uri)
+        repo.remote_head_commit = remote_head
+        repo.updates_checked_at = datetime.now(UTC)
+        session.add(repo)
+        await session.commit()
+
+        # An unreachable remote can't prove the repo is unchanged. Refusing on
+        # a network hiccup would block a legitimate action for the wrong
+        # reason, so an unknown answer allows the re-index.
+        if remote_head is not None and remote_head == old_snapshot.commit_hash:
+            raise HTTPException(
+                409, "already indexed at the remote's current commit — pass force to re-index anyway"
+            )
 
     zip_bytes: bytes | None = None
     if repo.source_type == SourceType.zip_upload:
@@ -209,7 +260,7 @@ async def reindex_repo(
         if zip_bytes is None:
             raise HTTPException(
                 410,
-                "The uploaded zip is no longer available for retry — add this repository again with a fresh upload.",
+                "The uploaded zip is no longer available — add this repository again with a fresh upload.",
             )
 
     new_snapshot = await create_pending_snapshot(session, repo.id)

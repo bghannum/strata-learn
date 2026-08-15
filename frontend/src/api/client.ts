@@ -187,8 +187,15 @@ export function getRepo(repoId: string): Promise<Repo> {
 
 // Only valid when the repo's latest snapshot is `failed` (backend 409s
 // otherwise) — retries indexing from scratch, not a resume from checkpoint.
-export function reindexRepo(repoId: string): Promise<Repo> {
-  return request(`/repos/${repoId}/reindex`, { method: 'POST' })
+/** Retries a failed run, or re-indexes a ready repo to pick up new commits —
+ *  one mechanism, two intents. `force` overrides the backend's refusal to
+ *  re-run the (paid) pipeline when the remote hasn't actually moved. */
+export function reindexRepo(repoId: string, force = false): Promise<Repo> {
+  return request(`/repos/${repoId}/reindex`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force }),
+  })
 }
 
 export function getSnapshot(repoId: string): Promise<AnalysisSnapshot> {

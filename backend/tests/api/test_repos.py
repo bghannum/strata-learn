@@ -657,3 +657,138 @@ async def test_mastery_is_scoped_to_its_owner(pending_repo_factory) -> None:
     with TestClient(app) as other:
         await login_as_new_user(other)
         assert other.get(f"/repos/{repo_id}/mastery").status_code == 404
+
+
+# --- #73: re-indexing a healthy repo ---
+
+
+async def _set_snapshot_status(snapshot_id: UUID, status: SnapshotStatus) -> None:
+    async with async_session_factory() as session:
+        snapshot = await session.get(AnalysisSnapshot, snapshot_id)
+        assert snapshot is not None
+        snapshot.status = status
+        session.add(snapshot)
+        await session.commit()
+
+
+async def test_ready_repo_reindexes_when_the_remote_moved(pending_repo_factory, monkeypatch) -> None:
+    # The middle step of the versioning story: staleness detection could
+    # previously say "new commits on the remote" and offer no way to act.
+    monkeypatch.setattr("app.api.repos.get_remote_head_commit", lambda *a, **k: "b" * 40)
+
+    with TestClient(app) as client:
+        repo_id, snapshot_id = await _git_repo(client, pending_repo_factory)
+        await _set_snapshot_status(snapshot_id, SnapshotStatus.ready)
+        await _set_snapshot_commit(snapshot_id, "a" * 40)
+
+        response = client.post(f"/repos/{repo_id}/reindex")
+
+    assert response.status_code == 202
+    assert response.json()["latest_snapshot_id"] != str(snapshot_id)
+
+
+async def test_ready_repo_at_the_same_commit_is_refused(pending_repo_factory, monkeypatch) -> None:
+    # Re-running the pipeline spends the most expensive part of it to
+    # regenerate what already exists — reasonable to ask for deliberately, bad
+    # to do by double-click.
+    monkeypatch.setattr("app.api.repos.get_remote_head_commit", lambda *a, **k: "a" * 40)
+
+    with TestClient(app) as client:
+        repo_id, snapshot_id = await _git_repo(client, pending_repo_factory)
+        await _set_snapshot_status(snapshot_id, SnapshotStatus.ready)
+        await _set_snapshot_commit(snapshot_id, "a" * 40)
+
+        response = client.post(f"/repos/{repo_id}/reindex")
+
+    assert response.status_code == 409
+    assert "force" in response.json()["detail"]
+
+
+async def test_force_reindexes_an_unchanged_repo(pending_repo_factory, monkeypatch) -> None:
+    monkeypatch.setattr("app.api.repos.get_remote_head_commit", lambda *a, **k: "a" * 40)
+
+    with TestClient(app) as client:
+        repo_id, snapshot_id = await _git_repo(client, pending_repo_factory)
+        await _set_snapshot_status(snapshot_id, SnapshotStatus.ready)
+        await _set_snapshot_commit(snapshot_id, "a" * 40)
+
+        response = client.post(f"/repos/{repo_id}/reindex", json={"force": True})
+
+    assert response.status_code == 202
+
+
+async def test_an_unreachable_remote_does_not_block_a_reindex(pending_repo_factory, monkeypatch) -> None:
+    # An unreachable remote can't prove the repo is unchanged; refusing on a
+    # network hiccup would block a legitimate action for the wrong reason.
+    monkeypatch.setattr("app.api.repos.get_remote_head_commit", lambda *a, **k: None)
+
+    with TestClient(app) as client:
+        repo_id, snapshot_id = await _git_repo(client, pending_repo_factory)
+        await _set_snapshot_status(snapshot_id, SnapshotStatus.ready)
+        await _set_snapshot_commit(snapshot_id, "a" * 40)
+
+        response = client.post(f"/repos/{repo_id}/reindex")
+
+    assert response.status_code == 202
+
+
+async def test_the_freshness_check_is_recorded(pending_repo_factory, monkeypatch) -> None:
+    # The request that spends the money does its own check rather than trusting
+    # a cached answer, and keeps update-status honest by storing the result.
+    monkeypatch.setattr("app.api.repos.get_remote_head_commit", lambda *a, **k: "b" * 40)
+
+    with TestClient(app) as client:
+        repo_id, snapshot_id = await _git_repo(client, pending_repo_factory)
+        await _set_snapshot_status(snapshot_id, SnapshotStatus.ready)
+        await _set_snapshot_commit(snapshot_id, "a" * 40)
+        client.post(f"/repos/{repo_id}/reindex")
+
+        body = client.get(f"/repos/{repo_id}/update-status").json()
+
+    assert body["remote_commit"] == "b" * 40
+    assert body["checked_at"] is not None
+
+
+async def test_in_flight_indexing_blocks_a_reindex(pending_repo_factory) -> None:
+    # A second job would race the first for the same latest_snapshot_id and
+    # double the billed work.
+    with TestClient(app) as client:
+        repo_id, snapshot_id = await _git_repo(client, pending_repo_factory)
+        await _set_snapshot_status(snapshot_id, SnapshotStatus.analyzing)
+
+        response = client.post(f"/repos/{repo_id}/reindex")
+
+    assert response.status_code == 409
+    assert "already in progress" in response.json()["detail"]
+
+
+async def test_failed_repo_still_retries_without_a_remote_check(pending_repo_factory, monkeypatch) -> None:
+    # #26's retry semantics are unchanged: a failed run is always eligible, and
+    # must not be gated behind "has the remote moved" — the point is to retry
+    # the same commit.
+    def _boom(*args, **kwargs):
+        raise AssertionError("a failed retry must not check the remote")
+
+    monkeypatch.setattr("app.api.repos.get_remote_head_commit", _boom)
+
+    with TestClient(app) as client:
+        repo_id, snapshot_id = await _git_repo(client, pending_repo_factory)
+        await _set_snapshot_status(snapshot_id, SnapshotStatus.failed)
+
+        response = client.post(f"/repos/{repo_id}/reindex")
+
+    assert response.status_code == 202
+
+
+async def test_ready_zip_upload_requires_force(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, snapshot_id = await pending_repo_factory(
+            SourceType.zip_upload, "upload.zip", user_id=UUID(user["id"])
+        )
+        await _set_snapshot_status(snapshot_id, SnapshotStatus.ready)
+
+        response = client.post(f"/repos/{repo_id}/reindex")
+
+    assert response.status_code == 409
+    assert "no remote" in response.json()["detail"]

@@ -331,7 +331,19 @@ function RepoDetail() {
               {checkingUpdates ? 'Checking…' : 'Check for updates'}
             </Button>
           )}
+          {/* #73: the banner used to say "new commits on the remote" and offer
+          nothing to do about it. Re-index is the same mechanism as the failure
+          Retry, but a different intent, so it gets its own wording. */}
+          {updateStatus.status === 'stale' && (
+            <Button onClick={handleRetry} disabled={reindexing}>
+              {reindexing ? 'Re-indexing…' : 'Re-index'}
+            </Button>
+          )}
           {updateError && <p className="text-sm text-organic-danger">{updateError}</p>}
+          {/* The stepper's own retryError only renders inside its failure
+          card, which isn't showing for a ready repo — so a refused re-index
+          would otherwise fail silently here. */}
+          {reindexError && <p className="text-sm text-organic-danger">{reindexError}</p>}
         </div>
       )}
 
