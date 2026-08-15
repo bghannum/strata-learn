@@ -26,6 +26,13 @@ def test_load_prompt_tradeoff_extractor() -> None:
     assert "Decision point: d" in rendered
 
 
+def test_load_prompt_subsystem_namer() -> None:
+    template = load_prompt("subsystem_namer")
+    assert "naming the parts of a codebase" in template.system
+    rendered = template.render_input(subsystems_json="[]")
+    assert "Subsystems:\n[]" in rendered
+
+
 def test_load_prompt_uses_overridden_prompts_dir(tmp_path, monkeypatch) -> None:
     # Regression test for the local-dev-vs-Docker path fix: load_prompt() must
     # read from settings.prompts_dir at call time, not a hardcoded relative

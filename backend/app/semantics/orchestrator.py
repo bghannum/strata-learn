@@ -1,17 +1,19 @@
 """Layer B persistence orchestrator. Mirrors the analyze_source (pure) /
 complete_snapshot (persist) split in app/analysis/snapshot.py — module
-summarizer, pattern detector, and trade-off extractor all stay pure/testable,
-this module owns reading CodeUnit rows and writing the three new tables.
+summarizer, subsystem namer, pattern detector, and trade-off extractor all stay
+pure/testable, this module owns reading CodeUnit rows and writing the four
+tables they produce.
 
-Runs the three passes sequentially (no concurrency in Phase 2, matching the
-project's "boring, debuggable" bias — revisit if the Phase 2 checkpoint shows
-indexing real repos is too slow).
+Runs the passes sequentially (no concurrency in Phase 2, matching the project's
+"boring, debuggable" bias — revisit if a checkpoint shows indexing real repos is
+too slow).
 """
 
 from pathlib import Path
 
 from sqlmodel import delete, select
 
+from app.analysis.subsystems import partition_subsystems
 from app.db.models import (
     AnalysisSnapshot,
     CodeUnit,
@@ -19,6 +21,7 @@ from app.db.models import (
     ModuleSummary,
     PatternClaim,
     SnapshotStatus,
+    Subsystem,
     TradeoffCard,
 )
 from app.db.session import async_session_factory
@@ -26,6 +29,7 @@ from app.semantics.chunking import chunk_by_module
 from app.semantics.llm_provider import LLMProvider
 from app.semantics.module_summarizer import summarize_modules
 from app.semantics.pattern_detector import detect_pattern
+from app.semantics.subsystem_namer import name_subsystems
 from app.semantics.tradeoff_extractor import extract_tradeoffs, identify_decision_points
 
 
@@ -45,6 +49,14 @@ async def run_layer_b(llm: LLMProvider, snapshot: AnalysisSnapshot, source_dir: 
 
     chunks = chunk_by_module(code_units)
     summaries = await summarize_modules(llm, chunks, snapshot.dependency_graph)
+    # Named after module summaries specifically so the naming call can see each
+    # file's generated purpose — a directory of files named only by path is much
+    # harder to characterize than one where every file already says what it does.
+    partitions = partition_subsystems(snapshot.dependency_graph, snapshot.entry_points)
+    module_purposes: dict[str, str] = {}
+    for summary in summaries:
+        module_purposes.setdefault(summary.file_path, summary.purpose)
+    subsystems = await name_subsystems(llm, partitions, module_purposes)
     pattern = await detect_pattern(llm, snapshot.dependency_graph, code_units, snapshot.entry_points)
     decision_points = identify_decision_points(snapshot.dependency_graph, code_units, snapshot.entry_points)
     tradeoffs = await extract_tradeoffs(llm, decision_points, source_dir, snapshot.dependency_graph, code_units)
@@ -59,6 +71,22 @@ async def run_layer_b(llm: LLMProvider, snapshot: AnalysisSnapshot, source_dir: 
         await session.exec(delete(ModuleSummary).where(ModuleSummary.snapshot_id == snapshot.id))
         await session.exec(delete(PatternClaim).where(PatternClaim.snapshot_id == snapshot.id))
         await session.exec(delete(TradeoffCard).where(TradeoffCard.snapshot_id == snapshot.id))
+        await session.exec(delete(Subsystem).where(Subsystem.snapshot_id == snapshot.id))
+
+        for subsystem in subsystems:
+            session.add(
+                Subsystem(
+                    snapshot_id=snapshot.id,
+                    key=subsystem.key,
+                    name=subsystem.name,
+                    role=subsystem.role,
+                    file_paths=list(subsystem.file_paths),
+                    depth=subsystem.depth,
+                    order=subsystem.order,
+                    prompt_version=subsystem.prompt_version,
+                    model=subsystem.model,
+                )
+            )
 
         for summary in summaries:
             session.add(
