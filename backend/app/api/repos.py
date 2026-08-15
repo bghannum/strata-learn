@@ -36,7 +36,20 @@ from app.analysis.snapshot import create_pending_snapshot, fail_snapshot
 from app.api.auth import get_current_user
 from app.auth.session import get_user_from_token
 from app.config import settings
-from app.db.models import AnalysisSnapshot, Quiz, Repo, SnapshotStatus, SourceType, StudyGuide, User
+from app.db.models import (
+    AnalysisSnapshot,
+    AnswerSubmission,
+    Attempt,
+    AttemptStatus,
+    Question,
+    Quiz,
+    Repo,
+    SnapshotStatus,
+    SourceType,
+    StudyGuide,
+    Subsystem,
+    User,
+)
 from app.db.session import get_session
 from app.ingestion.source import (
     SourcePreparationError,
@@ -44,6 +57,7 @@ from app.ingestion.source import (
     get_remote_head_commit,
     validate_zip_upload,
 )
+from app.quizzing.mastery import CountedAttempt, GradedAnswer, compute_mastery, select_counted_attempts
 from app.redis_pool import get_redis_pool
 from app.worker.pipeline import progress_channel
 
@@ -334,6 +348,117 @@ async def check_updates(
     await session.commit()
     await session.refresh(repo)
     return await _update_status(session, repo)
+
+
+class MasteryPointOut(BaseModel):
+    completed_at: datetime
+    answered: int
+    average_score: float
+
+
+class MasteryBucketOut(BaseModel):
+    subsystem_key: str
+    name: str
+    attempts: int
+    answered: int
+    average_score: float
+    history: list[MasteryPointOut]
+
+
+class MasteryOut(BaseModel):
+    # Distinguishes "no quizzes taken yet" from "quizzes taken, nothing to
+    # aggregate" — the first is a prompt to go take one, the second would be a
+    # bug worth noticing.
+    completed_attempts: int
+    buckets: list[MasteryBucketOut]
+
+
+@router.get("/{repo_id}/mastery", response_model=MasteryOut)
+async def get_repo_mastery(
+    repo_id: UUID, session: AsyncSession = Depends(get_session), current_user: User = Depends(get_current_user)
+) -> MasteryOut:
+    """Quiz performance per subsystem, across every study-guide version of this
+    repo (#64).
+
+    Only *completed* attempts count: an abandoned in_progress attempt is not
+    evidence of anything, and counting its partial answers would drag an
+    average down for a quiz the learner never actually finished.
+    """
+    repo = await session.get(Repo, repo_id)
+    if repo is None or repo.user_id != current_user.id:
+        raise HTTPException(404, "repo not found")
+
+    quiz_ids = list((await session.exec(select(Quiz.id).where(Quiz.repo_id == repo_id))).all())
+    if not quiz_ids:
+        return MasteryOut(completed_attempts=0, buckets=[])
+
+    attempts = list(
+        (
+            await session.exec(
+                select(Attempt).where(
+                    Attempt.quiz_id.in_(quiz_ids),
+                    Attempt.user_id == current_user.id,
+                    Attempt.status == AttemptStatus.completed,
+                )
+            )
+        ).all()
+    )
+    attempts = [a for a in attempts if a.completed_at is not None]
+    if not attempts:
+        return MasteryOut(completed_attempts=0, buckets=[])
+
+    rows = list(
+        (
+            await session.exec(
+                select(AnswerSubmission.attempt_id, Question.subsystem_key, AnswerSubmission.score)
+                .join(Question, Question.id == AnswerSubmission.question_id)
+                .where(AnswerSubmission.attempt_id.in_([a.id for a in attempts]))
+            )
+        ).all()
+    )
+    answers_by_attempt: dict[UUID, list[GradedAnswer]] = {}
+    for attempt_id, subsystem_key, score in rows:
+        if score is None:
+            # Only possible in the instant between insert and grading within one
+            # request (see AnswerSubmission.score) — not a graded result.
+            continue
+        answers_by_attempt.setdefault(attempt_id, []).append(
+            GradedAnswer(subsystem_key=subsystem_key, score=score)
+        )
+
+    counted = [
+        CountedAttempt(quiz_id=a.quiz_id, completed_at=a.completed_at, answers=answers_by_attempt.get(a.id, []))
+        for a in attempts
+    ]
+
+    # Names come from the latest snapshot: keys are the join identity, names are
+    # what a person reads, and the current name is the one that matches what
+    # they'd see elsewhere in the app.
+    subsystem_names: dict[str, str] = {}
+    if repo.latest_snapshot_id is not None:
+        subsystems = list(
+            (await session.exec(select(Subsystem).where(Subsystem.snapshot_id == repo.latest_snapshot_id))).all()
+        )
+        subsystem_names = {s.key: s.name for s in subsystems}
+
+    buckets = compute_mastery(counted, subsystem_names)
+    return MasteryOut(
+        completed_attempts=len(select_counted_attempts(counted)),
+        buckets=[
+            MasteryBucketOut(
+                subsystem_key=b.subsystem_key,
+                name=b.name,
+                attempts=b.attempts,
+                answered=b.answered,
+                average_score=b.average_score,
+                history=[
+                    MasteryPointOut(completed_at=p.completed_at, answered=p.answered, average_score=p.average_score)
+                    for p in b.history
+                ],
+            )
+            for b in buckets
+        ],
+    )
 
 
 @router.get("/{repo_id}/snapshot", response_model=AnalysisSnapshot)
