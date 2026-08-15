@@ -16,11 +16,21 @@ Phases 0 through 5 are complete:
 
 Phase 5.5 (UI design integration) applied the checked-in Organic mockup across every screen — shared primitives, tokens, and light-only styling replacing the earlier default Tailwind look — plus a real reindex/retry action for a failed run.
 
-Phase 6 (generation quality) is in progress. It repairs the Layer A/B facts that generation is built from, adds a subsystem layer between "one file" and "the whole repo", and replaces the string-templated Architecture section with a synthesized explanation of how the system works and why — aimed at conceptual understanding rather than a per-file index. Quiz seeding draws from that same conceptual material instead of clustering on whichever code spans sort first.
+Phase 6 (generation quality) repaired the Layer A/B facts that generation is built from, added a subsystem layer between "one file" and "the whole repo", and replaced the string-templated Architecture section with a synthesized explanation of how the system works and why — aimed at conceptual understanding rather than a per-file index. Quiz seeding draws from that same conceptual material instead of clustering on whichever code spans sort first.
 
-Remaining roadmap phases add versioning/diffing/hosting polish (Phase 7), voice learning through read-aloud content plus spoken quiz answers (Phase 8), and drawing questions (Phase 9, deferred from its original Phase 6 slot).
+Phase 7 (versioning and mastery) is in progress: detect when a study guide has gone stale against its repository, diff two snapshots architecturally, and track mastery per subsystem across guide versions.
+
+Remaining roadmap phases add voice learning through read-aloud content plus spoken quiz answers (Phase 8) and drawing questions (Phase 9, deferred from its original Phase 6 slot).
 
 Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
+
+## Deliberately out of scope for now
+
+**Productionization — running this as a hosted service.** Deploying to a VPS behind Caddy with automatic TLS, a production Compose topology (built frontend, no published database ports, no source bind mounts), secret handling, migrations as an explicit deploy step, and backups. Also the security work that only matters once the app is reachable: CSRF protection, login rate limiting, and expired-session cleanup.
+
+Deferred rather than blocked. The plan's [§13 hosting sequence](docs/design/original-project-plan.md) gated deployment on the tool being *stable*, not merely on reaching a particular phase, and generation is still being reworked. Hosting also adds no product value for a single user running locally, while adding real ongoing cost, maintenance, and exposure — including an Anthropic API key sitting on a public box. The reason to do it eventually is the operational learning (Linux, Docker in production, TLS, firewalls), which doesn't expire.
+
+The recommended first step when it is picked up is to run the production topology *locally* — Caddy in front, frontend built as static files, same-origin, Caddy's internal CA for local HTTPS — which validates the cookie/CORS/same-origin interactions and the migration step with zero public exposure. Tracked in the [Productionization milestone](https://github.com/bghannum/strata-learn/milestones).
 
 See the [documentation index](docs/README.md) for current architecture, development workflow, decisions, planned UX, and historical design material.
 

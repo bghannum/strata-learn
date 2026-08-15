@@ -16,3 +16,8 @@ class QuestionSeed:
     file_path: str
     line_start: int
     line_end: int
+    # Which subsystem this seed's file belongs to, resolved at generation time.
+    # Carried onto the persisted Question so mastery can be aggregated across
+    # study-guide versions (#61) — Section/Question ids are all replaced by a
+    # re-index, while a subsystem key is stable by construction.
+    subsystem_key: str | None = None

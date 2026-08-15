@@ -363,6 +363,19 @@ class Question(SQLModel, table=True):
     file_path: str
     line_start: int
     line_end: int
+    # The subsystem this question's source file belongs to (#61). Denormalized
+    # onto the Question rather than resolved through the citation at read time
+    # because it is the *join key mastery aggregates on*, and the chain it would
+    # otherwise be resolved through — Question -> Citation -> Section ->
+    # StudyGuide -> AnalysisSnapshot -> Subsystem — is replaced wholesale by
+    # every re-index. A subsystem key is stable across snapshots by
+    # construction (analysis/subsystems.py), so copying it here is what lets
+    # scores from before and after a re-index describe the same topic.
+    #
+    # Nullable on purpose: a snapshot indexed before subsystems existed has
+    # none, and a file in no subsystem has no key. Aggregation buckets those as
+    # "ungrouped" rather than dropping them.
+    subsystem_key: str | None = None
     # The seed Citation's own id, not just its file_path/line range copied
     # above — a range alone can't be traced back to one specific Citation
     # row when the same range is cited by more than one Section (e.g. a

@@ -162,6 +162,7 @@ def identify_question_seeds(
             file_path=c.file_path,
             line_start=c.line_start,
             line_end=c.line_end,
+            subsystem_key=subsystem_key_by_file.get(c.file_path),
         )
         for c in ranked[:limit]
     ]
@@ -295,6 +296,7 @@ async def run_quiz_generation(llm: LLMProvider, quiz_id: UUID, study_guide_id: U
                     file_path=result.seed.file_path,
                     line_start=result.seed.line_start,
                     line_end=result.seed.line_end,
+                    subsystem_key=result.seed.subsystem_key,
                     source_citation_id=result.seed.citation_id,
                     prompt_version=result.prompt_version,
                     model=result.model,
@@ -311,6 +313,7 @@ async def run_quiz_generation(llm: LLMProvider, quiz_id: UUID, study_guide_id: U
                     file_path=result.seed.file_path,
                     line_start=result.seed.line_start,
                     line_end=result.seed.line_end,
+                    subsystem_key=result.seed.subsystem_key,
                     source_citation_id=result.seed.citation_id,
                     prompt_version=result.prompt_version,
                     model=result.model,
