@@ -79,6 +79,8 @@ A crash between Layer B's commit and the guide's commit resumes on redelivery wi
 Re-indexing accumulates snapshots rather than replacing them, so a repository
 carries its own history. Three features read that history.
 
+Re-indexing is the same mechanism for two intents: retrying a `failed` run and picking up new commits on a `ready` one. A ready repo is refused unless the remote has actually moved, or `force` is passed — re-running the pipeline spends its most expensive part to regenerate what already exists, which is a reasonable thing to ask for deliberately and a bad thing to do by double-click. A snapshot still indexing is refused outright, since a second job would race the first.
+
 **Staleness** compares a snapshot's `commit_hash` to the remote's current HEAD.
 Checking is an explicit user action, never a page load: `git ls-remote` is a
 network round trip to a third party that can hang, so `POST
@@ -94,7 +96,7 @@ code produce differently-worded output, and a naive text diff would report
 churn that isn't real. Subsystems match on their stable key, trade-off cards on
 the set of files their evidence cites, and dependency edges are projected up to
 subsystem level before diffing so a refactor reads as one line rather than
-forty. API-only so far; there is no UI for it yet.
+forty. API-only so far; the UI is tracked as a clean-up item.
 
 **Mastery** (`quizzing/mastery.py`) aggregates graded answers by
 `Question.subsystem_key`, which is copied onto the question at generation time
@@ -161,7 +163,7 @@ The worker commits final Layer B rows with `generating` atomically, and the stud
 | `GET` | `/repos/{repo_id}/snapshot` | Fetch its latest analysis snapshot |
 | `GET` | `/repos/{repo_id}/study-guide` | Redirect to its generated study guide |
 | `GET` | `/repos/{repo_id}/quiz` | Redirect to its most recently generated quiz, whatever its status |
-| `POST` | `/repos/{repo_id}/reindex` | Retry a failed indexing run against a fresh snapshot |
+| `POST` | `/repos/{repo_id}/reindex` | Retry a failed run, or re-index a ready repo to pick up new commits |
 | `GET` | `/repos/{repo_id}/update-status` | Read the cached staleness answer (no network I/O) |
 | `POST` | `/repos/{repo_id}/check-updates` | Ask the remote for its HEAD and record the result |
 | `GET` | `/repos/{repo_id}/mastery` | Quiz performance per subsystem, across study-guide versions |

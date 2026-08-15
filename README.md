@@ -18,7 +18,7 @@ Phase 5.5 (UI design integration) applied the checked-in Organic mockup across e
 
 Phase 6 (generation quality) repaired the Layer A/B facts that generation is built from, added a subsystem layer between "one file" and "the whole repo", and replaced the string-templated Architecture section with a synthesized explanation of how the system works and why — aimed at conceptual understanding rather than a per-file index. Quiz seeding draws from that same conceptual material instead of clustering on whichever code spans sort first.
 
-Phase 7 (versioning and mastery) added staleness detection against a repository's remote, an architectural diff between two snapshots, mastery tracking per subsystem across study-guide versions, and Markdown export. The diff is API-only so far — there is no UI for it yet.
+Phase 7 (versioning and mastery) added staleness detection against a repository's remote, an architectural diff between two snapshots, mastery tracking per subsystem across study-guide versions, and Markdown export. A ready repository can now be re-indexed to pick up new commits, which is what produces the second snapshot a diff compares against. The diff itself is API-only so far; its UI is tracked as a clean-up item.
 
 Remaining roadmap phases add voice learning through read-aloud content plus spoken quiz answers (Phase 8) and drawing questions (Phase 9, deferred from its original Phase 6 slot).
 
