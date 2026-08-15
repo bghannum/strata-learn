@@ -46,6 +46,7 @@ from app.semantics.llm_provider import FakeLLMProvider, LLMResponse, Message
 from app.semantics.module_summarizer import ModuleSummaryOutput
 from app.semantics.orchestrator import run_layer_b
 from app.semantics.pattern_detector import PatternClaimOutput, PatternEvidenceItem
+from app.semantics.subsystem_namer import SubsystemNameOutput
 from app.semantics.tradeoff_extractor import EvidenceRef, TradeoffCardOutput
 from app.worker.pipeline import index_repo, progress_channel
 
@@ -54,6 +55,21 @@ def _module_summary_response() -> LLMResponse:
     return LLMResponse(
         text="",
         parsed=ModuleSummaryOutput(purpose="does a thing", role_in_system="a module", key_concepts=["concept"]),
+        model="fake-model",
+        stop_reason="end_turn",
+        usage={"input_tokens": 1, "output_tokens": 1},
+    )
+
+
+def _subsystem_name_response() -> LLMResponse:
+    # subsystem_namer runs between module summaries and pattern detection, and
+    # makes exactly one call for the whole partition. The keys it returns don't
+    # have to match: an unmatched partition falls back to a deterministic name
+    # rather than disappearing, which is the behavior these pipeline tests
+    # actually depend on.
+    return LLMResponse(
+        text="",
+        parsed=SubsystemNameOutput(subsystems=[]),
         model="fake-model",
         stop_reason="end_turn",
         usage={"input_tokens": 1, "output_tokens": 1},
@@ -97,11 +113,13 @@ def _tradeoff_card_response(file_path: str = "worker.py", line_end: int = 5) -> 
 
 
 def _no_decision_point_llm(file_path: str = "app.py") -> FakeLLMProvider:
-    """For a single-file fixture repo with no imports: module_summarizer and
-    pattern_detector each make one call; identify_decision_points finds
-    nothing (no fan-in/out, no infra imports), so extract_tradeoffs never
-    calls the LLM at all."""
-    return FakeLLMProvider([_module_summary_response(), _pattern_claim_response(file_path)])
+    """For a single-file fixture repo with no imports: module_summarizer,
+    subsystem_namer, and pattern_detector each make one call;
+    identify_decision_points finds nothing (no fan-in/out, no infra imports),
+    so extract_tradeoffs never calls the LLM at all."""
+    return FakeLLMProvider(
+        [_module_summary_response(), _subsystem_name_response(), _pattern_claim_response(file_path)]
+    )
 
 
 class _BoomLLMProvider:
@@ -246,7 +264,12 @@ async def test_index_repo_runs_layer_b_and_persists_all_three_tables(
     await redis_pool.set(zip_redis_key, buf.getvalue())
 
     llm = FakeLLMProvider(
-        [_module_summary_response(), _pattern_claim_response("worker.py"), _tradeoff_card_response("worker.py")]
+        [
+            _module_summary_response(),
+            _subsystem_name_response(),
+            _pattern_claim_response("worker.py"),
+            _tradeoff_card_response("worker.py"),
+        ]
     )
 
     await index_repo(
@@ -355,7 +378,9 @@ async def test_index_repo_layer_b_reads_source_before_cleanup(
     git_url = git_fixture_repo.as_uri()
     repo_id, snapshot_id = await pending_repo_factory(SourceType.git_url, git_url)
 
-    probe = _ProbeLLMProvider(snapshot_id, [_module_summary_response(), _pattern_claim_response()])
+    probe = _ProbeLLMProvider(
+        snapshot_id, [_module_summary_response(), _subsystem_name_response(), _pattern_claim_response()]
+    )
 
     await index_repo(
         {"redis": redis_pool},

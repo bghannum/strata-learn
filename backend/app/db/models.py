@@ -197,6 +197,26 @@ class ModuleSummary(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
 
 
+class Subsystem(SQLModel, table=True):
+    """A named group of files that do one job together (#53). Membership and
+    ordering are LAYER A — analysis/subsystems.py derives them from directory
+    structure and the dependency graph; only `name`/`role` come from an LLM
+    (ADR-006's "labels/grouping" allowance), which is why prompt_version/model
+    are recorded here the same way they are for any other generated claim."""
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    snapshot_id: uuid.UUID = Field(foreign_key="analysissnapshot.id", index=True)
+    key: str  # the directory prefix defining it, stable across re-indexes
+    name: str
+    role: str
+    file_paths: list = Field(default_factory=list, sa_column=Column(JSON))
+    depth: int  # edges from the nearest entry point; large sentinel if unreachable
+    order: int  # outside-in position, so consumers can't disagree about it
+    prompt_version: str
+    model: str
+    created_at: datetime = Field(default_factory=utcnow, sa_column=_timestamptz_column())
+
+
 class PatternClaim(SQLModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     snapshot_id: uuid.UUID = Field(foreign_key="analysissnapshot.id", index=True)

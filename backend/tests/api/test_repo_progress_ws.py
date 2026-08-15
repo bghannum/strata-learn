@@ -25,6 +25,7 @@ from app.main import app
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 from app.semantics.module_summarizer import ModuleSummaryOutput
 from app.semantics.pattern_detector import PatternClaimOutput
+from app.semantics.subsystem_namer import SubsystemNameOutput
 from app.worker.pipeline import index_repo
 from tests.conftest import register_test_user
 
@@ -43,6 +44,15 @@ def _fake_llm() -> FakeLLMProvider:
             LLMResponse(
                 text="",
                 parsed=ModuleSummaryOutput(purpose="p", role_in_system="r", key_concepts=["c"]),
+                model="fake-model",
+                stop_reason="end_turn",
+                usage={},
+            ),
+            # subsystem_namer's one call, between module summaries and pattern
+            # detection
+            LLMResponse(
+                text="",
+                parsed=SubsystemNameOutput(subsystems=[]),
                 model="fake-model",
                 stop_reason="end_turn",
                 usage={},
