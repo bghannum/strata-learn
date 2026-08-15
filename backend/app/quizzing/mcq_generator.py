@@ -42,7 +42,11 @@ def _valid(output: MCQOutput) -> bool:
 
 
 async def generate_mcq_questions(llm: LLMProvider, seeds: list[QuestionSeed]) -> list[MCQResult]:
-    template = load_prompt("mcq_generator")
+    # v2 asks for conceptual questions rather than recall — see the prompt's own
+    # "Changes from v1" section. The persisted prompt_version on each Question
+    # records which one produced it, so a quiz generated before this still
+    # reports v1.
+    template = load_prompt("mcq_generator", "v2")
     results: list[MCQResult] = []
 
     for seed in seeds:

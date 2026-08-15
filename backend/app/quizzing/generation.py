@@ -32,6 +32,8 @@ from app.db.models import (
     QuizStatus,
     Section,
     SectionType,
+    StudyGuide,
+    Subsystem,
 )
 from app.db.session import async_session_factory
 from app.quizzing.fill_blank_generator import FillBlankResult, generate_fill_blank_questions
@@ -46,25 +48,56 @@ from app.semantics.llm_provider import LLMProvider
 # a more useful study tool than a focused one. Retune against real repos.
 MAX_QUESTIONS_PER_QUIZ = 12
 
-# Deep-dive/trade-off/architecture citations ground a specific, substantive
-# claim about the code; glossary citations just mark where a term was first
-# defined, and overview citations are one-line entry-point blurbs — thinner
-# material to build a real question from. Lower sorts first.
+# Trade-off and architecture citations ground the "why" material — a decision
+# and its reasoning, or one of the architecture narrative's why-sections (#52).
+# Deep dives describe what one file does. Glossary citations just mark where a
+# term was first defined, and overview citations are one-line entry-point
+# blurbs. Lower sorts first.
+#
+# Architecture moved up from its own tier to join trade-offs when the narrative
+# landed: before that, an architecture citation grounded a bullet in an evidence
+# list, which really was thinner material than a deep dive.
 _SECTION_PRIORITY = {
-    SectionType.deep_dive: 0,
     SectionType.tradeoffs: 0,
-    SectionType.architecture: 1,
+    SectionType.architecture: 0,
+    SectionType.deep_dive: 1,
     SectionType.glossary: 2,
     SectionType.overview: 3,
 }
+
+
+def _normalized_claim(claim_excerpt: str) -> str:
+    return " ".join(claim_excerpt.split()).casefold()
+
+
+def _round_robin(buckets: dict[str, list[Citation]]) -> list[Citation]:
+    """One citation from each bucket in turn, buckets in key order. Taking a
+    flat prefix of a sorted list instead is what let a whole quiz come from
+    whichever directory sorts first (#51)."""
+    ordered: list[Citation] = []
+    keys = sorted(buckets)
+    index = 0
+    while True:
+        added = False
+        for key in keys:
+            bucket = buckets[key]
+            if index < len(bucket):
+                ordered.append(bucket[index])
+                added = True
+        if not added:
+            return ordered
+        index += 1
 
 
 def identify_question_seeds(
     citations: list[Citation],
     section_type_by_id: dict[UUID, SectionType],
     *,
+    subsystem_key_by_file: dict[str, str] | None = None,
     limit: int = MAX_QUESTIONS_PER_QUIZ,
 ) -> list[QuestionSeed]:
+    subsystem_key_by_file = subsystem_key_by_file or {}
+
     # Many citations share the same (file_path, line_start, line_end) — a
     # glossary entry and a deep-dive paragraph both cite the same module
     # range, the same dedup case study_guide_builder.py's snippet_cache
@@ -80,10 +113,47 @@ def identify_question_seeds(
             best_priority[key] = priority
             best_by_range[key] = citation
 
-    ranked = sorted(
-        best_by_range.values(),
-        key=lambda c: (best_priority[(c.file_path, c.line_start, c.line_end)], c.file_path, c.line_start),
-    )
+    # Then dedup by the claim itself, which the range check above can't catch
+    # (#51). study_guide_builder gives every evidence_ref of a trade-off card
+    # the same claim_excerpt — the whole card text — and every supporting path
+    # of an architecture why-section likewise. Those are different line ranges
+    # carrying identical claims, so all of them used to survive and generate
+    # several questions from one piece of material, phrased differently. That
+    # is exactly the reported symptom.
+    best_by_claim: dict[str, Citation] = {}
+    for citation in best_by_range.values():
+        claim = _normalized_claim(citation.claim_excerpt)
+        priority = best_priority[(citation.file_path, citation.line_start, citation.line_end)]
+        current = best_by_claim.get(claim)
+        if current is None:
+            best_by_claim[claim] = citation
+            continue
+        current_priority = best_priority[(current.file_path, current.line_start, current.line_end)]
+        if (priority, citation.file_path, citation.line_start) < (
+            current_priority,
+            current.file_path,
+            current.line_start,
+        ):
+            best_by_claim[claim] = citation
+
+    # Spread within each priority tier across subsystems, then concatenate the
+    # tiers in priority order — so the best material still comes first, but a
+    # quiz drawn from it reaches more than one part of the system. Files with
+    # no subsystem (a snapshot indexed before subsystems existed) share one
+    # bucket rather than being dropped.
+    by_tier: dict[int, dict[str, list[Citation]]] = {}
+    for citation in best_by_claim.values():
+        priority = best_priority[(citation.file_path, citation.line_start, citation.line_end)]
+        bucket_key = subsystem_key_by_file.get(citation.file_path, "")
+        by_tier.setdefault(priority, {}).setdefault(bucket_key, []).append(citation)
+
+    ranked: list[Citation] = []
+    for priority in sorted(by_tier):
+        buckets = by_tier[priority]
+        for bucket in buckets.values():
+            bucket.sort(key=lambda c: (c.file_path, c.line_start))
+        ranked.extend(_round_robin(buckets))
+
     return [
         QuestionSeed(
             citation_id=c.id,
@@ -162,7 +232,21 @@ async def run_quiz_generation(llm: LLMProvider, quiz_id: UUID, study_guide_id: U
                 (await session.exec(select(Citation).where(Citation.section_id.in_(section_ids)))).all()
             )
 
-    seeds = identify_question_seeds(citations, section_type_by_id)
+        # Subsystems hang off the snapshot, not the study guide, so this needs
+        # the guide's own row to get there. Used only to spread seeds across
+        # the codebase (#51) — a missing or empty set degrades to the previous
+        # single-bucket behavior rather than failing.
+        guide = await session.get(StudyGuide, study_guide_id)
+        subsystem_key_by_file: dict[str, str] = {}
+        if guide is not None:
+            subsystems = list(
+                (await session.exec(select(Subsystem).where(Subsystem.snapshot_id == guide.snapshot_id))).all()
+            )
+            for subsystem in subsystems:
+                for file_path in subsystem.file_paths:
+                    subsystem_key_by_file[file_path] = subsystem.key
+
+    seeds = identify_question_seeds(citations, section_type_by_id, subsystem_key_by_file=subsystem_key_by_file)
     # Alternate by seed position so both question types draw from across the
     # whole ranked list rather than mcq claiming every high-priority seed —
     # simpler than round-robin-ing generator calls, and generator functions

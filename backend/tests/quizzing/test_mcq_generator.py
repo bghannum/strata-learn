@@ -38,7 +38,7 @@ async def test_generate_mcq_questions_builds_result_from_parsed_output() -> None
     assert result.prompt == "What does this module use for background jobs?"
     assert result.correct_index == 0
     assert result.seed.file_path == "app/worker.py"
-    assert result.prompt_version == "v1"
+    assert result.prompt_version == "v2"
     assert result.model == "fake-model"
 
     # source_fact/code_snippet from the seed reached the prompt
