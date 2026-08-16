@@ -69,7 +69,7 @@ Add a repository from the Dashboard, watch it index, and open the generated stud
 
 The first visit lands on **Set up your account**: pick an email and password, and that's the app's single account (ADR-007). Setup closes permanently once it exists; later visits use the normal login flow, and a session lasts 30 days unless you log out. Forgot the password? `./scripts/reset-password you@example.com` sets a new one and signs out every open session — there's deliberately no email-based reset, since shell access to the install is the only proof it's you. If you ever expose the app beyond localhost, set `REGISTRATION_SECRET` in `.env` first; the setup form then requires it, so a stranger who reaches a fresh install before you can't claim the account.
 
-The API and frontend containers hot-reload from the mounted source, but the **worker does not** — arq loads the code once at start. After changing anything under `app/quizzing/`, `app/generation/`, `app/semantics/`, or `app/worker/`, run `docker compose restart worker` or the next indexing/quiz job will run the old code.
+The API and frontend containers hot-reload from the mounted source, but the **worker does not** — arq loads the code once at start. After changing anything under `app/quizzing/`, `app/generation/`, `app/semantics/`, or `app/worker/`, run `docker compose restart worker` or the next indexing/quiz job will run the old code. Changes to `.env` need more than a restart: `restart` reuses the container's original environment, so run `docker compose up -d api worker` to recreate the containers with the new values.
 
 Stop the stack with `docker compose down`. Add `-v` only when you intentionally want to delete the local PostgreSQL volume.
 
