@@ -513,6 +513,50 @@ export function getAttempt(attemptId: string): Promise<AttemptResults> {
   return request(`/attempts/${attemptId}`)
 }
 
+// --- Voice (Phase 8, ADR-010) ---
+
+/** Booleans only, never a backend name — which backend a deployment uses is
+ *  operator config the UI is deliberately kept ignorant of. The frontend
+ *  reads this once and hides any control whose capability is off, so a
+ *  learner is never shown a mic button that 503s on click. */
+export interface VoiceCapabilities {
+  transcription: boolean
+  speech: boolean
+}
+
+export function getVoiceCapabilities(): Promise<VoiceCapabilities> {
+  return request('/voice/capabilities')
+}
+
+export interface Transcription {
+  text: string
+  duration_ms: number
+}
+
+/** Uploads a finished recording and returns an *editable* transcript. Writes
+ *  nothing server-side: the learner corrects the text and only the confirmed
+ *  version goes through submitAnswer, exactly like a typed answer. Plain
+ *  fetch + FormData rather than createRepo's XHR — a mic clip is small enough
+ *  that upload progress isn't worth the extra machinery, and the browser sets
+ *  the multipart boundary itself when no Content-Type header is given. */
+export function transcribeAnswer(attemptId: string, questionId: string, recording: Blob): Promise<Transcription> {
+  const form = new FormData()
+  // The extension is derived from the blob's own type — the backend sniffs
+  // the container from the bytes anyway, but the SDK on the far side reads
+  // the format from the filename, so it has to be right rather than a
+  // hardcoded ".webm" that Safari's mp4 recordings would then contradict.
+  form.append('file', recording, `answer.${extensionFor(recording.type)}`)
+  return request(`/attempts/${attemptId}/answers/${questionId}/transcription`, { method: 'POST', body: form })
+}
+
+function extensionFor(mimeType: string): string {
+  const base = mimeType.split(';')[0].trim().toLowerCase()
+  if (base === 'audio/mp4' || base === 'video/mp4') return 'mp4'
+  if (base === 'audio/wav' || base === 'audio/x-wav') return 'wav'
+  if (base === 'audio/ogg') return 'ogg'
+  return 'webm'
+}
+
 export class PollTimeoutError extends Error {}
 
 export function isAbortError(err: unknown): boolean {

@@ -6,11 +6,13 @@ import {
   createAttempt,
   getAttempt,
   getQuiz,
+  getVoiceCapabilities,
   submitAnswer,
   type AnswerResult,
   type Attempt,
   type Quiz,
 } from '../api/client'
+import SpokenAnswer from '../components/SpokenAnswer'
 import Button from '../components/ui/Button'
 import { Input } from '../components/ui/Field'
 import Tag from '../components/ui/Tag'
@@ -45,6 +47,19 @@ function QuizTaker() {
   const [submitting, setSubmitting] = useState(false)
   const [finishing, setFinishing] = useState(false)
   const [answeredCache, setAnsweredCache] = useState<Record<string, CachedAnswer>>({})
+  // Whether this deployment can transcribe at all. Read once; the mic
+  // control isn't rendered until this says yes, so a learner is never shown
+  // a button that 503s (ADR-010). A failed read just means no mic button —
+  // the quiz works exactly as before.
+  const [canTranscribe, setCanTranscribe] = useState(false)
+
+  useEffect(() => {
+    getVoiceCapabilities()
+      .then((caps) => setCanTranscribe(caps.transcription))
+      .catch(() => {
+        // Voice is an addition to a text-first flow; its absence is not an error.
+      })
+  }, [])
 
   useEffect(() => {
     if (!quizId) return
@@ -281,6 +296,18 @@ function QuizTaker() {
               disabled={!!result}
               placeholder="Your answer"
             />
+            {/* The transcript never goes anywhere on its own: "Use this
+            answer" copies it into the same answerText the Input above is
+            bound to, and the ordinary Submit button grades it. Keyed on
+            question.id so a transcript can't bleed across Previous/Next. */}
+            {canTranscribe && attempt && (
+              <SpokenAnswer
+                attemptId={attempt.id}
+                questionId={question.id}
+                onUseTranscript={setAnswerText}
+                disabled={!!result}
+              />
+            )}
           </div>
         )}
 
