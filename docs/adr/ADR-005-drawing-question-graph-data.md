@@ -1,6 +1,6 @@
 # ADR-005: Drawing questions use structured graph data, not raster images
 
-**Status:** Accepted
+**Status:** Accepted — not yet implemented. Drawing questions were deferred from the original Phase 6 to [Phase 9](https://github.com/bghannum/strata-learn/milestone/8); `DrawingCanvas.tsx` is a stub and no drawing generator/grader exists. This ADR is the design to build against when it's picked up.
 
 ## Context
 

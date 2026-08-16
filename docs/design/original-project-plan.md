@@ -733,7 +733,7 @@ GET    /attempts/{id}                  # attempt detail with per-question feedba
 
 ### Phase 5.5 — UI Design Integration — 1-2 weeks
 
-**Scope:** Apply the interactive prototype and Organic design system in the checked-in [`Strata-Learn UI mockups.zip`](../../Strata-Learn%20UI%20mockups.zip) to the working Phase 4–5 React application before expanding the interaction surface with drawing questions. The archive is the visual reference; the real APIs, authorization rules, persisted state, and behavior documented in the UI spec remain canonical.
+**Scope:** Apply the interactive prototype and Organic design system in the checked-in [`strata-learn-ui-mockups.zip`](strata-learn-ui-mockups.zip) to the working Phase 4–5 React application before expanding the interaction surface with drawing questions. The archive is the visual reference; the real APIs, authorization rules, persisted state, and behavior documented in the UI spec remain canonical.
 
 - [ ] Extract the mockup's color, typography, spacing, radius, elevation, and interaction tokens into version-controlled frontend styles. Do not make the production app depend on loading assets from the zip at runtime.
 - [ ] Add the required font and icon dependencies deliberately, with local/system fallbacks and no silent dependency on the prototype's support script.

@@ -1,18 +1,18 @@
 # Current architecture
 
-**Status:** Current through Phase 7 (versioning and mastery); Phase 8 voice learning is next. Hosting moved to a separate Productionization milestone — see the README.
+**Status:** Current through the MVP (Phases 0–8 plus first-run auth, August 2026). Hosting is a separate Productionization milestone and drawing questions are deferred (Phase 9) — see the README's [roadmap](../README.md#roadmap).
 
-Strata Learn is a Docker Compose-based modular monolith that ingests a Git repository or uploaded zip, extracts deterministic structural facts, enriches them with citation-grounded LLM analysis, assembles the result into a study guide, and lets a logged-in user generate and take a quiz against it — all through a working frontend styled to the checked-in UI mockup. Improving the quality of what gets generated — conceptual explanation over per-file indexing — is the current phase; versioning/hosting polish, voice learning, and drawing questions follow it.
+Strata Learn is a Docker Compose-based modular monolith that ingests a Git repository or uploaded zip, extracts deterministic structural facts, enriches them with citation-grounded LLM analysis, assembles the result into a study guide, and lets a logged-in user generate and take a quiz against it — all through a working frontend styled to the checked-in UI mockup. The MVP is complete; what follows it is the README's roadmap (study-guide depth, richer assessment, drawing questions, productionization, multi-user, more languages).
 
 ## System components
 
 | Component | Technology | Current responsibility |
 |---|---|---|
-| API | FastAPI | Auth (register/login/session), repository ingestion, repository/snapshot lookup, progress WebSocket, study guide lookup, quiz generation trigger/lookup, and attempt taking/grading |
+| API | FastAPI | Auth (first-run setup/login/session), repository ingestion, repository/snapshot lookup, progress WebSocket, study guide lookup, quiz generation trigger/lookup, and attempt taking/grading |
 | Worker | arq | Source preparation, Layer A analysis, Layer B analysis, study guide generation, quiz generation, persistence, and status publication |
 | Database | PostgreSQL 16 | Users/sessions, repositories, snapshots, code units, module summaries, subsystems, pattern claims, trade-off cards, cached generated artifacts, study guides/sections/citations, and quizzes/questions/attempts/answer submissions |
 | Queue/events | Redis 7 | arq jobs, temporary zip bytes, and snapshot progress pub/sub |
-| Frontend | React/Vite | Register/login, add repo, live indexing progress, study guide reading (diagram + citations), quiz generation + taking, and results |
+| Frontend | React/Vite | First-run setup/login, add repo, live indexing progress, study guide reading (diagram + citations), quiz generation + taking, and results |
 | LLM provider | Anthropic | Claude-backed structured output for Layer B tasks, the architecture narrative and diagram labels, quiz question generation, and written-answer grading (short-answer rubric judging; fill-in-the-blank concept-mode fallback for older quizzes) |
 
 The code exposes an `LLMProvider` protocol and a deterministic `FakeLLMProvider` for tests. An OpenAI production provider is planned but not implemented.
@@ -137,7 +137,7 @@ The app-level "reuse an existing in-flight attempt/quiz" checks above have their
 
 ### Frontend
 
-React + Vite + Tailwind, talking to the API over `fetch`/`WebSocket`, with every request carrying an `HttpOnly` session cookie (`credentials: 'include'`) as of Phase 4b. `Register`/`Login` handle account creation and session establishment; `AddRepo` submits a Git URL or zip upload; `Dashboard` and `RepoDetail` subscribe to `WS /repos/{id}/progress` and render a shared 5-stage status component (`IndexingProgress`, chip and stepper variants) — a failure shows which stage it happened at, not just a generic error. `StudyGuideView` renders `content_md` as Markdown, `diagram_mermaid` inline via the `mermaid` package, and each section's citations as a list that opens a `CitationPanel` slide-over with the real cited snippet. Citations render as a per-section list rather than markers inline on the specific claim — `claim_excerpt` isn't always a literal substring of `content_md` (e.g. the Architecture section's citations pair the primary-pattern headline with a specific evidence claim), so precise inline anchoring isn't reliable yet. `RepoDetail` follows the mockup's layout: title and the two actions worth taking (open the guide, view the raw analysis) above the indexing stepper, then a study-guide panel (section chips, counts, age, "Read it", quiz generation) beside a quiz-history panel listing recent completed sittings from `GET /repos/{id}/attempts` (bounded, with a "show all" that raises the request to the API's own ceiling), with the per-subsystem mastery bars below both. Between the staleness banner and those panels sits the "What changed" architectural diff, so "this is stale" → "re-index" → "here's what changed" reads as one sequence; it renders nothing at all until a repo has a second version to compare against. It offers "Generate quiz" once a study guide exists, polling until it's ready; `QuizTaker` walks one question at a time, with per-answer feedback shown immediately or withheld until the end depending on the quiz's `feedback_mode`; `AttemptResults` shows the final score and a per-question breakdown with its source reference, loaded fresh from `GET /attempts/{id}` so the page works on a direct visit or refresh, not only right after finishing.
+React + Vite + Tailwind, talking to the API over `fetch`/`WebSocket`, with every request carrying an `HttpOnly` session cookie (`credentials: 'include'`) as of Phase 4b. `Setup` (first run only, per `GET /auth/status`) and `Login` handle account creation and session establishment; `AddRepo` submits a Git URL or zip upload; `Dashboard` and `RepoDetail` subscribe to `WS /repos/{id}/progress` and render a shared 5-stage status component (`IndexingProgress`, chip and stepper variants) — a failure shows which stage it happened at, not just a generic error. `StudyGuideView` renders `content_md` as Markdown, `diagram_mermaid` inline via the `mermaid` package, and each section's citations as a list that opens a `CitationPanel` slide-over with the real cited snippet. Citations render as a per-section list rather than markers inline on the specific claim — `claim_excerpt` isn't always a literal substring of `content_md` (e.g. the Architecture section's citations pair the primary-pattern headline with a specific evidence claim), so precise inline anchoring isn't reliable yet. `RepoDetail` follows the mockup's layout: title and the two actions worth taking (open the guide, view the raw analysis) above the indexing stepper, then a study-guide panel (section chips, counts, age, "Read it", quiz generation) beside a quiz-history panel listing recent completed sittings from `GET /repos/{id}/attempts` (bounded, with a "show all" that raises the request to the API's own ceiling), with the per-subsystem mastery bars below both. Between the staleness banner and those panels sits the "What changed" architectural diff, so "this is stale" → "re-index" → "here's what changed" reads as one sequence; it renders nothing at all until a repo has a second version to compare against. It offers "Generate quiz" once a study guide exists, polling until it's ready; `QuizTaker` walks one question at a time, with per-answer feedback shown immediately or withheld until the end depending on the quiz's `feedback_mode`; `AttemptResults` shows the final score and a per-question breakdown with its source reference, loaded fresh from `GET /attempts/{id}` so the page works on a direct visit or refresh, not only right after finishing.
 
 ## Persistence model
 
@@ -152,7 +152,7 @@ Implemented tables are:
 - `Quiz` and `Question` — a generated quiz and its MCQ/short-answer questions (fill-in-the-blank for older quizzes), each grounded in one source `Citation`; a short-answer question carries its model answer in `correct_answer` and its key points in `rubric`;
 - `Attempt` and `AnswerSubmission` — one user's pass at a quiz and their per-question answers/scores/feedback.
 
-Drawing-question tables (§12 Phase 6) are not implemented yet.
+Drawing-question tables (original plan §12; now Phase 9, deferred) are not implemented.
 
 ## Status lifecycle
 
@@ -206,7 +206,7 @@ The broader API in the [original project plan](design/original-project-plan.md) 
 
 ## Deployment topology
 
-Local Docker Compose starts five services: PostgreSQL, Redis, API, worker, and web. Both the API and worker containers mount `docs/prompts` read-only, because prompt templates live outside the backend image — the worker needed this from Phase 2 for its own generation jobs, and the API needed the same mount added in Phase 5 once `PATCH /attempts/{id}/answers/{qid}`'s fill-in-the-blank concept-mode grading started calling `load_prompt()` directly from the request path rather than only from a worker job. The current deployment target is local development; VPS hosting remains planned for Phase 7.
+Local Docker Compose starts five services: PostgreSQL, Redis, API, worker, and web. Both the API and worker containers mount `docs/prompts` read-only, because prompt templates live outside the backend image — the worker needed this from Phase 2 for its own generation jobs, and the API needed the same mount added in Phase 5 once `PATCH /attempts/{id}/answers/{qid}`'s fill-in-the-blank concept-mode grading started calling `load_prompt()` directly from the request path rather than only from a worker job. The current deployment target is local development; hosting is the separate Productionization milestone.
 
 ## Phase 8 voice layer
 

@@ -16,7 +16,7 @@ git push -u origin HEAD
 gh pr create --fill
 ```
 
-Never commit directly to `main`. The repository is private on a GitHub plan that does not provide branch protection, so this is enforced by convention rather than a server-side rule.
+Never commit directly to `main`. Branch protection on `main` (PR required, CI green) backs this up server-side now that the repository is public; the habit predates it and still applies to anyone with admin rights.
 
 Use squash merge and delete the feature branch afterward:
 
@@ -34,15 +34,18 @@ pytest -q
 
 cd ../frontend
 npm run lint
+npm test
 npm run build
+npm run test:e2e   # Playwright; `npx playwright install chromium` once
 ```
 
-Backend tests use real PostgreSQL and Redis services. CI provisions both in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml). If another stateful dependency is introduced, update CI at the same time.
+Backend tests use real PostgreSQL and Redis services, against a dedicated `strata_learn_test` database (never the app's). CI provisions both in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml). If another stateful dependency is introduced, update CI at the same time.
 
 Every PR update runs:
 
 - backend migrations and the full pytest suite;
-- frontend lint and production build.
+- frontend lint, Vitest, and production build;
+- Playwright end-to-end smoke tests.
 
 These deterministic checks are the only automatic review gates.
 
@@ -74,7 +77,7 @@ When a PR resolves an issue, include `Fixes #<number>` in the PR description. Ke
 ## Merge checklist
 
 - Full backend tests pass locally.
-- Frontend lint and build pass locally.
+- Frontend lint, Vitest, and build pass locally.
 - CI is green on the final pushed commit.
 - The manual Codex review was run once when the change warranted it.
 - All validated `BLOCK` findings are resolved with coverage.

@@ -1,104 +1,101 @@
 # Strata Learn
 
-Strata Learn ingests a repository from a Git URL or zip upload, extracts its structure, uses citation-grounded semantic analysis to help a developer understand the codebase, and generates a study guide plus a quiz to verify that understanding.
+Point Strata Learn at a Git repository and it produces a citation-grounded **study guide** — architecture narrative, subsystem deep-dives, trade-offs, glossary, Mermaid diagram — and then a **quiz** that checks you understood *why* the code is the way it is, not just that it runs. It's built for the "I've just been handed a codebase" moment.
 
-## Current status
+<p align="center">
+  <img src="docs/screenshots/study-guide.png" alt="A generated study guide for psf/requests: the synthesised Architecture section, with read-aloud and section navigation" width="820">
+</p>
+<p align="center">
+  <img src="docs/screenshots/repo-detail.png" alt="Repository page: indexing stepper, study-guide panel, quiz history, and mastery per subsystem" width="405">
+  <img src="docs/screenshots/quiz-results.png" alt="Quiz results: a short-answer question with the learner's answer, a model answer, and which rubric key points landed" width="405">
+</p>
+<p align="center"><sub>Shown: <a href="https://github.com/psf/requests">psf/requests</a> indexed and quizzed end to end.</sub></p>
 
-Phases 0 through 8 are complete. Phases 0 through 5 built the core:
+## What it does
 
-- project scaffolding and local Docker environment;
-- repository ingestion and deterministic Layer A analysis;
-- Redis/arq background processing and WebSocket progress;
-- Anthropic-backed Layer B module summaries, architecture-pattern detection, and trade-off extraction;
-- citation-grounded study guide generation (Overview, Architecture, Trade-offs, Glossary, Deep-Dives) plus a Mermaid architecture diagram, served via `GET /repos/{id}/study-guide`;
-- a working frontend: first-run account setup and login, add a repo, watch it index live, and read the generated study guide with inline diagrams and clickable citations, all scoped to the logged-in user via cookie-based sessions;
-- quiz generation (MCQ + short-answer questions, grounded in the study guide's own citations — short answer replaced fill-in-the-blank after Phase 8, so a quiz asks *why* and *how* in a sentence or three, graded by an LLM judge against a rubric of key points, rather than "guess the blanked word") and taking, with per-answer grading/feedback (either immediate or deferred to the end of the quiz, chosen per quiz), Previous navigation, retakes, and a results view showing each question's submitted answer, a model answer, and which key points landed.
+- **Ingest** a public Git URL or a zip upload; the source is analysed in a scoped temp workspace and never re-read afterwards ([ADR-008](docs/adr/ADR-008-no-local-filesystem-ingestion.md)).
+- **Analyse** in two layers: deterministic structure first (tree-sitter parse, module/class/function extraction, dependency graph, entry points, subsystem partition), then LLM semantics over those facts — module summaries, subsystem naming, architecture-pattern detection, trade-off extraction — with every claim validated against the deterministic layer and cited to a real file/line range ([ADR-006](docs/adr/ADR-006-layer-a-layer-b-separation.md)).
+- **Generate a study guide**: Overview, a synthesised Architecture explanation with a Mermaid diagram, Trade-offs, Glossary, and per-subsystem Deep-Dives, every section carrying clickable citations to the cited snippet. Export as Markdown.
+- **Quiz you** with multiple-choice and short-answer questions seeded from the guide's own citations. Short answers are graded by an LLM judge against a rubric of key points, with a model answer and teaching-style feedback (immediate or end-of-quiz, your choice). Mastery is tracked per subsystem across attempts.
+- **Keep up with the repo**: staleness detection against the remote, one-click re-index, and a "What changed" architectural diff between snapshots.
+- **Voice**: read any section or feedback aloud, and dictate short answers into an editable transcript. Runs locally by default (faster-whisper + Kokoro), no key or bill required ([ADR-010](docs/adr/ADR-010-voice-providers-and-self-hosted-backends.md)).
+- **Single-tenant, cookie-session auth** hand-built as a learning exercise ([ADR-007](docs/adr/ADR-007-self-implemented-auth.md)); first run walks you through creating the one account.
 
-Phase 5.5 (UI design integration) applied the checked-in Organic mockup across every screen — shared primitives, tokens, and light-only styling replacing the earlier default Tailwind look — plus a real reindex/retry action for a failed run.
+**Supported languages:** the deterministic layer parses **Python** and **JavaScript/TypeScript**. Repositories in other languages will index but produce a thin guide; more grammars are on the [roadmap](#roadmap).
 
-Phase 6 (generation quality) repaired the Layer A/B facts that generation is built from, added a subsystem layer between "one file" and "the whole repo", and replaced the string-templated Architecture section with a synthesized explanation of how the system works and why — aimed at conceptual understanding rather than a per-file index. Quiz seeding draws from that same conceptual material instead of clustering on whichever code spans sort first.
-
-Phase 7 (versioning and mastery) added staleness detection against a repository's remote, an architectural diff between two snapshots, mastery tracking per subsystem across study-guide versions, and Markdown export. A ready repository can now be re-indexed to pick up new commits, which is what produces the second snapshot a diff compares against, and the repo page's "What changed" panel reads that diff back — subsystems, trade-offs, dependencies, and the primary pattern — directly under the staleness banner that prompted the re-index.
-
-Phase 8 (voice learning) adds read-aloud for study-guide sections and quiz feedback, and spoken answers for written questions — transcribed into an editable transcript the learner confirms before it's graded through the ordinary path. Each capability sits behind its own provider protocol with an in-process self-hosted backend (faster-whisper; Kokoro via ONNX) *and* a hosted OpenAI one, selected per capability by `TRANSCRIPTION_BACKEND` / `SPEECH_BACKEND`. **Local is the default**, so voice works out of the box with no key and no bill: the api image ships the runtimes, and the models (~500 MB) download on first start into a named volume while the API is already serving. Set `INSTALL_VOICE=false` for a slimmer image, or point either switch at `openai` with an `OPENAI_API_KEY`. `./scripts/voice-eval` compares the transcription backends on this repository's own vocabulary and writes [a committed report](docs/history/voice-backend-evaluation.md). See [ADR-010](docs/adr/ADR-010-voice-providers-and-self-hosted-backends.md) for why both backends, and the deliberate reversal of the original hosted-only scope.
-
-With first-run auth in place — a fresh install lands on "Set up your account" with no secret to copy out of `.env`, sessions last 30 days, and `./scripts/reset-password` recovers a forgotten password without wiping the database — the MVP is complete. Drawing questions (Phase 9, deferred from its original Phase 6 slot) are deferred scope, not a remaining milestone; [ADR-005](docs/adr/ADR-005-drawing-question-graph-data.md) keeps the design if it's ever picked up.
-
-Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
-
-## Deliberately out of scope for now
-
-**Productionization — running this as a hosted service.** Deploying to a VPS behind Caddy with automatic TLS, a production Compose topology (built frontend, no published database ports, no source bind mounts), secret handling, migrations as an explicit deploy step, and backups. Also the security work that only matters once the app is reachable: CSRF protection, login rate limiting, and expired-session cleanup.
-
-Deferred rather than blocked. The plan's [§13 hosting sequence](docs/design/original-project-plan.md) gated deployment on the tool being *stable*, not merely on reaching a particular phase, and generation is still being reworked. Hosting also adds no product value for a single user running locally, while adding real ongoing cost, maintenance, and exposure — including an Anthropic API key sitting on a public box. The reason to do it eventually is the operational learning (Linux, Docker in production, TLS, firewalls), which doesn't expire.
-
-The recommended first step when it is picked up is to run the production topology *locally* — Caddy in front, frontend built as static files, same-origin, Caddy's internal CA for local HTTPS — which validates the cookie/CORS/same-origin interactions and the migration step with zero public exposure. Tracked in the [Productionization milestone](https://github.com/bghannum/strata-learn/milestones).
-
-See the [documentation index](docs/README.md) for current architecture, development workflow, decisions, planned UX, and historical design material.
-
-## Prerequisites
-
-For the recommended Docker workflow:
-
-- Docker 24+ with Compose v2;
-- Git;
-- an Anthropic API key for Layer B indexing.
-
-For host-based development, also install Python 3.12 and Node.js 20 or newer.
-
-OpenAI support remains part of the provider-abstraction plan, but only the Anthropic production provider is currently implemented. `OPENAI_API_KEY` is therefore not required.
+**Cost:** semantic analysis, study-guide generation, and quiz generation/grading call Anthropic (`claude-sonnet-5`, one model for everything). Indexing a small repository and generating and taking a quiz has come to roughly **$1** in API usage; larger repositories cost more, and re-indexing costs a full index again (incremental re-index is [#114](https://github.com/bghannum/strata-learn/issues/114)). Nothing calls a paid API without you starting an index, a quiz, or a grading — automated tests use a fake provider.
 
 ## Quickstart
 
+Prerequisites: Docker 24+ with Compose v2, Git, and an [Anthropic API key](https://console.anthropic.com/).
+
 ```bash
+git clone https://github.com/bghannum/strata-learn.git
+cd strata-learn
 cp .env.example .env
-# Set ANTHROPIC_API_KEY before indexing. Nothing else is required.
+# Set ANTHROPIC_API_KEY in .env. Nothing else is required.
 docker compose up --build
 ```
 
-Compose starts PostgreSQL, Redis, the FastAPI service, the arq worker, and the React/Vite development server. On first start the API also downloads the local voice models (~500 MB) in the background — read-aloud and spoken answers become available once `docker compose logs api` shows `voice.speech warm` and `voice.transcription warm`; everything else works immediately.
+Then open <http://localhost:5173>. Compose starts PostgreSQL, Redis, the FastAPI service, the arq worker, and the Vite dev server; `curl http://localhost:8000/health` returns `{"status":"ok"}` and interactive API docs are at <http://localhost:8000/docs>.
 
-Verify the API and open the frontend:
+The first visit lands on **Set up your account**: pick an email and password and that becomes the app's single account. Setup closes permanently once it exists; later visits log in normally and a session lasts 30 days. Forgot the password? `./scripts/reset-password you@example.com` sets a new one and signs out every open session — there's deliberately no email-based reset, since shell access to the install is the only proof it's you.
 
-```bash
-curl http://localhost:8000/health   # {"status":"ok"}
-open http://localhost:5173
-```
+Add a repository from the Dashboard, watch it index live, open the study guide when it's ready, then generate a quiz from the repo page.
 
-Add a repository from the Dashboard, watch it index, and open the generated study guide once it's ready. Interactive API documentation is available at `http://localhost:8000/docs`.
-
-The first visit lands on **Set up your account**: pick an email and password, and that's the app's single account (ADR-007). Setup closes permanently once it exists; later visits use the normal login flow, and a session lasts 30 days unless you log out. Forgot the password? `./scripts/reset-password you@example.com` sets a new one and signs out every open session — there's deliberately no email-based reset, since shell access to the install is the only proof it's you. If you ever expose the app beyond localhost, set `REGISTRATION_SECRET` in `.env` first; the setup form then requires it, so a stranger who reaches a fresh install before you can't claim the account.
-
-The API and frontend containers hot-reload from the mounted source, but the **worker does not** — arq loads the code once at start. After changing anything under `app/quizzing/`, `app/generation/`, `app/semantics/`, or `app/worker/`, run `docker compose restart worker` or the next indexing/quiz job will run the old code. Changes to `.env` need more than a restart: `restart` reuses the container's original environment, so run `docker compose up -d api worker` to recreate the containers with the new values.
+On first start the API also downloads the local voice models (~500 MB) in the background; read-aloud and spoken answers appear once `docker compose logs api` shows `voice.speech warm` and `voice.transcription warm`. Everything else works immediately. Set `INSTALL_VOICE=false` for a slimmer image, point `TRANSCRIPTION_BACKEND` / `SPEECH_BACKEND` at `openai` with an `OPENAI_API_KEY`, or leave them blank to turn voice off.
 
 Stop the stack with `docker compose down`. Add `-v` only when you intentionally want to delete the local PostgreSQL volume.
 
-## Local development without Docker
+## Security posture — read before exposing it
 
-Start PostgreSQL and Redis separately, for example:
+Strata Learn is a **localhost tool**. It has not been hardened for the open internet: there is no CSRF protection, no login rate limiting, and no expired-session cleanup yet (all tracked in the [Productionization milestone](https://github.com/bghannum/strata-learn/milestone/9)). If you must reach it from anywhere but your own machine, at minimum set `REGISTRATION_SECRET` in `.env` *before* the first start so a stranger who reaches a fresh install can't claim the account, and put it behind a reverse proxy with TLS — the microphone features require a secure context anyway. See [`SECURITY.md`](SECURITY.md).
 
-```bash
-docker compose up postgres redis
+## How it works
+
+```mermaid
+flowchart LR
+    Client -->|POST /repos| API
+    API -->|enqueue| Redis --> Worker
+    Worker -->|clone / unzip| Source[scoped temp workspace]
+    Source --> LayerA[Layer A: tree-sitter structure]
+    LayerA --> LayerB[Layer B: LLM semantics, cited + validated]
+    LayerB --> Guide[Study guide + diagram]
+    Guide --> Quiz[Quiz seeded from citations]
+    LayerA & LayerB & Guide & Quiz --> PostgreSQL
+    Worker -->|progress| Redis -->|WebSocket| Client
 ```
 
-Then run the backend:
+A modular monolith ([ADR-001](docs/adr/ADR-001-modular-monolith.md)): FastAPI API, an arq worker on Redis ([ADR-002](docs/adr/ADR-002-async-job-queue.md)), PostgreSQL, and a React/Vite frontend. LLM prompts are versioned Markdown under [`docs/prompts/`](docs/prompts/) and loaded at runtime. The full component, pipeline, data-model, and endpoint reference is [`docs/architecture.md`](docs/architecture.md); the [documentation index](docs/README.md) says which document is canonical for what.
+
+## Roadmap
+
+The MVP is complete (August 2026; the phase-by-phase story is in [`docs/history/build-phases.md`](docs/history/build-phases.md)). What's next, roughly in order — each is a GitHub Milestone with concrete issues:
+
+1. **[Study-guide depth](https://github.com/bghannum/strata-learn/milestone/11)** — per-subsystem deep-dives with a request-flow walkthrough, a data-model section, a "how to run/test/extend" section, and a learner-chosen focus that biases what gets written. Cheapest big win: quizzes seed from the guide, so depth compounds.
+2. **[Assessment: question types, tests, spaced repetition](https://github.com/bghannum/strata-learn/milestone/12)** — code-reading, ordering, and spot-the-trade-off questions; a real timed *test* mode with a pass threshold distinct from practice quizzes; spaced repetition over the existing per-subsystem mastery; flag/regenerate a bad question; adaptive difficulty.
+3. **[Drawing questions](https://github.com/bghannum/strata-learn/milestone/8)** — sketch the architecture on a constrained tldraw canvas, graded by a deterministic graph diff against the reference. The design is already written ([ADR-005](docs/adr/ADR-005-drawing-question-graph-data.md)); this was the original Phase 6 and was deferred.
+4. **[Productionization](https://github.com/bghannum/strata-learn/milestone/9)** — Caddy/TLS, a production Compose topology, CSRF, rate limiting, session cleanup, backups. Prerequisite for the next item.
+5. **[Multi-user support](https://github.com/bghannum/strata-learn/milestone/13)** — real registration or invites, an admin role, shared study guides so a team indexes once, GitHub OAuth. Supersedes the single-account rule in ADR-007.
+6. **[Broader language support](https://github.com/bghannum/strata-learn/milestone/14)** — Go, Rust, Java via tree-sitter, and an honest fallback for everything else.
+7. Smaller items: an [OpenAI / local Ollama text-LLM provider](https://github.com/bghannum/strata-learn/issues/112), [private-repo ingestion](https://github.com/bghannum/strata-learn/issues/113), [incremental re-index](https://github.com/bghannum/strata-learn/issues/114).
+
+Everything actionable lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues); [`docs/history/resolved-engineering-issues.md`](docs/history/resolved-engineering-issues.md) is a log of non-obvious bugs already fixed, not a backlog.
+
+## Development
+
+### Without Docker
+
+Start PostgreSQL and Redis (`docker compose up postgres redis`), then:
 
 ```bash
 cd backend
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev,voice]"   # drop `voice` to skip the local audio runtimes
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,voice]"     # drop `voice` to skip the local audio runtimes
 alembic upgrade head
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload     # API
+arq app.worker.tasks.WorkerSettings   # worker, in a second terminal
 ```
-
-In another terminal, run the worker from `backend/` with the same virtual environment active:
-
-```bash
-arq app.worker.tasks.WorkerSettings
-```
-
-Run the frontend separately:
 
 ```bash
 cd frontend
@@ -106,52 +103,46 @@ npm install
 npm run dev
 ```
 
-The root `.env` is resolved regardless of whether backend commands run from the repository root or `backend/`.
+The root `.env` is resolved whether backend commands run from the repository root or `backend/`. Python 3.12 and Node.js 20+ are required.
 
-## Tests and review
+### Hot reload caveats (Docker)
 
-Backend tests use real PostgreSQL and Redis services rather than mocked database layers:
+The API and frontend containers hot-reload from the mounted source, but the **worker does not** — arq loads the code once at start. After changing anything under `app/quizzing/`, `app/generation/`, `app/semantics/`, or `app/worker/`, run `docker compose restart worker`. Changes to `.env` need `docker compose up -d api worker` (recreate), not `restart`.
 
-```bash
-cd backend
-pytest -q
-
-cd ../frontend
-npm run lint
-npm run build
-```
-
-Deterministic checks run automatically on every pull-request update. AI review is intentional rather than push-triggered: once a change is complete, committed, and passing the full suite, run:
+### Tests
 
 ```bash
-./scripts/codex-review
+cd backend && pytest -q                     # real PostgreSQL + Redis, FakeLLMProvider — no paid calls
+cd frontend && npm run lint && npm test && npm run build
+cd frontend && npm run test:e2e             # Playwright; needs `npx playwright install chromium` once
 ```
 
-The report is written to the gitignored `CODEX_CODE_REVIEW.md`. The complete blocker/defer policy is in the [development workflow](docs/development/workflow.md).
+Backend tests run against a dedicated `strata_learn_test` database — derived from `DATABASE_URL`, created and migrated automatically on the first run, overridable with `TEST_DATABASE_URL` — and refuse to start if it resolves to the same database as `DATABASE_URL`, so a test run never touches your indexed repos.
 
-## Database migrations
+CI runs all of the above on every pull request. AI code review is deliberate rather than push-triggered: `./scripts/codex-review` writes a gitignored `CODEX_CODE_REVIEW.md`. The branch/PR/review process is in [`docs/development/workflow.md`](docs/development/workflow.md); contribution expectations are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-Run Alembic commands from `backend/` with the virtual environment active:
+### Database migrations
 
-```bash
-alembic upgrade head
-alembic revision --autogenerate -m "message"
-```
+From `backend/` with the virtual environment active: `alembic upgrade head`, `alembic revision --autogenerate -m "message"`.
 
 ## Repository map
 
 ```text
 strata-learn/
-├── backend/             FastAPI, analysis pipeline, arq worker, and tests
-├── frontend/            React/Vite app: ingest repos, read guides, and take quizzes
+├── backend/             FastAPI, analysis pipeline, arq worker, tests, voice-eval harness
+├── frontend/            React/Vite app: ingest repos, read guides, take quizzes
 ├── docs/
 │   ├── adr/             Architecture decision records
-│   ├── design/          Planned and historical design documents
-│   ├── development/     Current contributor workflow
-│   ├── history/         Resolved issues and retired experiments
-│   └── prompts/         Versioned runtime LLM prompt templates
-├── scripts/             Explicit developer utilities
+│   ├── architecture.md  Implemented system, data model, and API surface
+│   ├── design/          UI spec, original plan, checked-in mockups
+│   ├── development/     Contributor workflow
+│   ├── history/         Build phases, resolved issues, retired experiments, voice eval report
+│   ├── prompts/         Versioned runtime LLM prompt templates
+│   └── screenshots/     README images
+├── scripts/             codex-review, reset-password, voice-eval
 └── docker-compose.yml   Local service topology
 ```
 
-For the implemented pipeline and API surface, read [Current architecture](docs/architecture.md).
+## License
+
+[MIT](LICENSE).
