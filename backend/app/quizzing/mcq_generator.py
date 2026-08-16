@@ -10,13 +10,16 @@ satisfiable if we don't check this now, or would grade a bogus answer as
 "correct" if paired with a coincidentally-matching one).
 """
 
+import logging
 from dataclasses import dataclass
 
 from pydantic import BaseModel
 
 from app.quizzing.seeds import QuestionSeed
-from app.semantics.llm_provider import LLMProvider, Message
+from app.semantics.llm_provider import LLMOutputError, LLMProvider, Message, require_parsed
 from app.semantics.prompts import load_prompt
+
+logger = logging.getLogger(__name__)
 
 
 class MCQOutput(BaseModel):
@@ -56,8 +59,13 @@ async def generate_mcq_questions(llm: LLMProvider, seeds: list[QuestionSeed]) ->
             messages=[Message(role="user", content=input_text)],
             response_schema=MCQOutput,
         )
-        output = response.parsed
-        assert isinstance(output, MCQOutput)
+        try:
+            output = require_parsed(response, MCQOutput)
+        except LLMOutputError as exc:
+            # Same disposition as the _valid() drop just below: one seed that
+            # didn't yield a usable question shouldn't cost the whole quiz.
+            logger.warning("Skipping MCQ for seed %s: %s", seed.claim_excerpt[:60], exc)
+            continue
 
         if not _valid(output):
             # Drop, don't fix up — a model that got the shape of its own

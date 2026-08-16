@@ -16,13 +16,16 @@ pattern_detector.py and dependency_graph.py already follow.
 """
 
 import json
+import logging
 from dataclasses import dataclass
 
 from pydantic import BaseModel
 
 from app.db.models import CodeUnit, PatternClaim, Subsystem, TradeoffCard, UnitType
-from app.semantics.llm_provider import LLMProvider, Message
+from app.semantics.llm_provider import LLMOutputError, LLMProvider, Message, require_parsed
 from app.semantics.prompts import load_prompt
+
+logger = logging.getLogger(__name__)
 
 # Bounds on what reaches the prompt. The persisted inputs are each bounded by
 # their own producer (MAX_SUBSYSTEMS, identify_decision_points' limit,
@@ -177,8 +180,15 @@ async def build_architecture_narrative(
         messages=[Message(role="user", content=input_text)],
         response_schema=ArchitectureNarrativeOutput,
     )
-    output = response.parsed
-    assert isinstance(output, ArchitectureNarrativeOutput)
+    try:
+        output = require_parsed(response, ArchitectureNarrativeOutput)
+    except LLMOutputError as exc:
+        # Unlike subsystem names or diagram labels, there is no deterministic
+        # substitute here — the narrative *is* the model's prose. None is
+        # already the declared return for "no narrative", so the study guide
+        # renders without the why-sections rather than not at all.
+        logger.warning("No architecture narrative for this snapshot: %s", exc)
+        return None
 
     module_units_by_path = {u.file_path: u for u in code_units if u.unit_type == UnitType.module}
 

@@ -105,3 +105,23 @@ async def test_build_component_diagram_strips_embedded_newlines_from_labels() ->
     assert '["App Entry Point"]' in result.mermaid
     lines = result.mermaid.splitlines()
     assert len(lines) == 1 + 2 + 1  # header + 2 nodes + 1 edge, no extra lines from a split label
+
+
+async def test_build_component_diagram_falls_back_to_path_labels_when_truncated() -> None:
+    # Nodes and edges are derived from the dependency graph; only the labels
+    # came from the model. A truncated response should cost the nicer names,
+    # not the whole diagram.
+    graph = _graph(
+        [{"id": "app/main.py", "kind": "file"}, {"id": "app/config.py", "kind": "file"}],
+        [{"source": "app/main.py", "target": "app/config.py", "kind": "imports"}],
+    )
+    llm = FakeLLMProvider(
+        [LLMResponse(text="", parsed=None, model="fake-model", stop_reason="max_tokens", usage={"output_tokens": 8192})]
+    )
+
+    result = await build_component_diagram(llm, graph, {})
+
+    assert result is not None
+    assert "Main" in result.mermaid  # _fallback_label("app/main.py")
+    assert "Config" in result.mermaid
+    assert "-->" in result.mermaid  # the edge still renders

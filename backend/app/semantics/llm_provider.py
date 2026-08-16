@@ -34,6 +34,46 @@ class LLMResponse:
     usage: dict[str, int]
 
 
+class LLMOutputError(RuntimeError):
+    """A structured-output call returned nothing usable against its schema.
+
+    The dominant cause is truncation: `.parse()` yields `parsed_output=None`
+    when generation stops mid-JSON, which `stop_reason="max_tokens"` names
+    exactly. Carrying the response metadata on the exception is the whole
+    point — the previous `assert isinstance(...)` at each call site raised a
+    bare AssertionError that said nothing about *which* call failed or why,
+    and `python -O` would have stripped it entirely and let `None` propagate.
+    """
+
+    def __init__(self, schema: type[BaseModel], response: LLMResponse) -> None:
+        self.schema = schema
+        self.stop_reason = response.stop_reason
+        self.model = response.model
+        self.output_tokens = response.usage.get("output_tokens")
+        detail = (
+            " — generation hit the max_tokens ceiling, so the JSON was cut off mid-object"
+            if response.stop_reason == "max_tokens"
+            else ""
+        )
+        super().__init__(
+            f"{schema.__name__}: no parsable structured output "
+            f"(model={response.model}, stop_reason={response.stop_reason}, "
+            f"output_tokens={self.output_tokens}){detail}"
+        )
+
+
+def require_parsed[SchemaT: BaseModel](response: LLMResponse, schema: type[SchemaT]) -> SchemaT:
+    """Return the parsed output, or raise `LLMOutputError` describing why it's missing.
+
+    Callers are expected to catch this and degrade — drop the one item, or
+    return None for the whole optional artifact — rather than let a single
+    unparsable response discard an entire indexing run's completed work.
+    """
+    if isinstance(response.parsed, schema):
+        return response.parsed
+    raise LLMOutputError(schema, response)
+
+
 class LLMProvider(Protocol):
     async def complete(
         self, system: str, messages: list[Message], response_schema: type[BaseModel] | None = None

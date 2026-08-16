@@ -422,3 +422,19 @@ async def test_detect_pattern_returns_none_when_no_evidence_resolves() -> None:
     result = await detect_pattern(llm, dependency_graph, code_units, entry_points=[])
 
     assert result is None
+
+
+async def test_detect_pattern_returns_none_when_output_is_truncated() -> None:
+    # None is already this function's "no confident pattern" answer, so every
+    # caller handles it — a truncated response costs the pattern claim and
+    # nothing else, rather than aborting the indexing run.
+    code_units = [_module_unit("app/api.py", 10)]
+    dependency_graph = {
+        "nodes": [{"id": "app/api.py", "kind": "file", "language": "python"}],
+        "edges": [],
+    }
+    llm = FakeLLMProvider(
+        [LLMResponse(text="", parsed=None, model="fake-model", stop_reason="max_tokens", usage={"output_tokens": 8192})]
+    )
+
+    assert await detect_pattern(llm, dependency_graph, code_units, entry_points=[]) is None

@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from app.db.models import FillBlankMode, Question
-from app.semantics.llm_provider import LLMProvider, Message
+from app.semantics.llm_provider import LLMProvider, Message, require_parsed
 from app.semantics.prompts import load_prompt
 
 
@@ -61,6 +61,11 @@ async def grade_fill_blank(llm: LLMProvider | None, question: Question, answer_t
         messages=[Message(role="user", content=input_text)],
         response_schema=FillBlankGradeOutput,
     )
-    output = response.parsed
-    assert isinstance(output, FillBlankGradeOutput)
+    # Deliberately *not* caught here, unlike the indexing-pipeline call sites:
+    # there is no honest fallback for a grade. Defaulting to 0.0 would record
+    # a wrong score against the student for what is an infrastructure failure,
+    # and 1.0 would do the reverse. LLMOutputError propagates to the endpoint,
+    # which returns 503 so nothing is persisted and the answer can be
+    # resubmitted (same disposition as FillBlankLLMUnavailableError).
+    output = require_parsed(response, FillBlankGradeOutput)
     return output.score, output.feedback

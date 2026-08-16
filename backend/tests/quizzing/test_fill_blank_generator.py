@@ -58,3 +58,25 @@ async def test_generate_fill_blank_questions_drops_empty_correct_answer() -> Non
     results = await generate_fill_blank_questions(llm, [_seed()])
 
     assert results == []
+
+
+async def test_generate_fill_blank_questions_skips_a_truncated_response() -> None:
+    truncated = LLMResponse(text="", parsed=None, model="fake-model", stop_reason="max_tokens", usage={"output_tokens": 8192})
+    llm = FakeLLMProvider(
+        [
+            truncated,
+            _response(
+                FillBlankOutput(
+                    mode="concept",
+                    blanked_text="This module uses ___ for background jobs.",
+                    correct_answer="arq",
+                    acceptable_alternatives=[],
+                )
+            ),
+        ]
+    )
+
+    results = await generate_fill_blank_questions(llm, [_seed(), _seed()])
+
+    assert len(results) == 1
+    assert len(llm.calls) == 2

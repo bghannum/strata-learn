@@ -9,7 +9,7 @@ from app.quizzing.grading.fill_blank_grader import (
     FillBlankLLMUnavailableError,
     grade_fill_blank,
 )
-from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
+from app.semantics.llm_provider import FakeLLMProvider, LLMOutputError, LLMResponse
 
 
 def _question(mode: FillBlankMode, correct_answer: str = "arq", alternatives: list[str] | None = None) -> Question:
@@ -87,3 +87,16 @@ def test_fill_blank_grade_output_rejects_off_rubric_score() -> None:
     # unchanged).
     with pytest.raises(ValidationError):
         FillBlankGradeOutput(score=0.7, feedback="approximately right")
+
+
+async def test_grade_fill_blank_propagates_truncated_judge_output() -> None:
+    # Deliberately not swallowed like the pipeline call sites: there is no
+    # honest fallback for a grade. 0.0 would penalize the student for an
+    # infrastructure failure and 1.0 would reward them for one, so the error
+    # reaches the endpoint (which returns 503 and persists nothing).
+    llm = FakeLLMProvider(
+        [LLMResponse(text="", parsed=None, model="fake-model", stop_reason="max_tokens", usage={"output_tokens": 8192})]
+    )
+
+    with pytest.raises(LLMOutputError):
+        await grade_fill_blank(llm, _question(FillBlankMode.concept), "a background job runner")
