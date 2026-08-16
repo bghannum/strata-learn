@@ -17,6 +17,9 @@ frontend/.vite/
 # Docker
 docker-compose.override.yml
 
+# Local voice model weights (Phase 8, ADR-010) — downloaded on first use
+.voice-models/
+
 # Local Codex review output (generated intentionally by scripts/codex-review)
 CODEX_CODE_REVIEW.md
 

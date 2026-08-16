@@ -20,7 +20,9 @@ Phase 6 (generation quality) repaired the Layer A/B facts that generation is bui
 
 Phase 7 (versioning and mastery) added staleness detection against a repository's remote, an architectural diff between two snapshots, mastery tracking per subsystem across study-guide versions, and Markdown export. A ready repository can now be re-indexed to pick up new commits, which is what produces the second snapshot a diff compares against, and the repo page's "What changed" panel reads that diff back — subsystems, trade-offs, dependencies, and the primary pattern — directly under the staleness banner that prompted the re-index.
 
-Remaining roadmap phases add voice learning through read-aloud content plus spoken quiz answers (Phase 8) and drawing questions (Phase 9, deferred from its original Phase 6 slot).
+Phase 8 (voice learning, in progress) adds read-aloud for study-guide sections and quiz feedback, and spoken answers for fill-in-the-blank questions — transcribed into an editable transcript the learner confirms before it's graded through the ordinary path. Each capability sits behind its own provider protocol with a hosted OpenAI backend *and* an in-process self-hosted one (faster-whisper; Kokoro via ONNX), selected per capability by `TRANSCRIPTION_BACKEND` / `SPEECH_BACKEND` and off by default. The self-hosted runtimes are an opt-in build (`INSTALL_VOICE=true docker compose build api`); weights download on first use into a named volume. See [ADR-010](docs/adr/ADR-010-voice-providers-and-self-hosted-backends.md) for why both backends, and the deliberate reversal of the original hosted-only scope.
+
+The remaining roadmap phase adds drawing questions (Phase 9, deferred from its original Phase 6 slot).
 
 Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
 

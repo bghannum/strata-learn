@@ -88,7 +88,7 @@ def speech_status() -> BackendStatus:
         case "openai":
             return _openai_status(settings.openai_speech_model)
         case "local":
-            return _local_status("kokoro", runtime_module="kokoro_onnx", package="kokoro-onnx")
+            return _local_status("kokoro-base-onnx", runtime_module="ttstokenizer", package="ttstokenizer/onnxruntime")
     return BackendStatus(enabled=False, backend=None, model=None, reason="unknown SPEECH_BACKEND")
 
 
@@ -107,7 +107,7 @@ def get_transcription_provider() -> TranscriptionProvider | None:
     if status.backend == "local":
         from app.audio.local_backend import LocalTranscriptionProvider
 
-        return LocalTranscriptionProvider(model_name=settings.local_whisper_model)
+        return LocalTranscriptionProvider(model_name=settings.local_whisper_model, models_dir=settings.voice_models_dir)
     return None
 
 
@@ -127,7 +127,7 @@ def get_speech_provider() -> SpeechProvider | None:
     if status.backend == "local":
         from app.audio.local_backend import LocalSpeechProvider
 
-        return LocalSpeechProvider()
+        return LocalSpeechProvider(models_dir=settings.voice_models_dir, voice=settings.local_speech_voice)
     return None
 
 
