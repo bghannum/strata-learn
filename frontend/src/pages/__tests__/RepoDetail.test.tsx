@@ -158,6 +158,17 @@ describe('RepoDetail', () => {
     await waitFor(() => expect(screen.getByText(/No completed quizzes yet/)).toBeInTheDocument())
   })
 
+  it('says the history failed to load instead of sitting on "Loading…"', async () => {
+    // Found via Codex's review of this change: the panel's catch used to
+    // swallow the failure, leaving a spinner-equivalent on screen forever.
+    stubApi({ '/attempts': jsonResponse({ detail: 'database is on fire' }, 500) })
+    renderPage()
+
+    await waitFor(() => expect(screen.getByText('database is on fire')).toBeInTheDocument())
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
+  })
+
   it('offers the guide from the header as well as the panel', async () => {
     stubApi()
     renderPage()

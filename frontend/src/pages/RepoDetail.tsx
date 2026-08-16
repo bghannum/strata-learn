@@ -161,12 +161,31 @@ function sectionChips(guide: StudyGuide): string[] {
   return chips
 }
 
-function QuizHistory({ attempts }: { attempts: AttemptSummary[] | null }) {
+function QuizHistory({
+  attempts,
+  error,
+  onRetry,
+}: {
+  attempts: AttemptSummary[] | null
+  error: string | null
+  onRetry: () => void
+}) {
   return (
     <section className="rounded-[32px] bg-organic-surface p-7">
       <h2 className="text-lg font-semibold">Quiz history</h2>
-      {attempts === null && <p className="mt-3.5 text-[13px] opacity-55">Loading…</p>}
-      {attempts !== null && attempts.length === 0 && (
+      {/* An explicit failure, not a permanent "Loading…" — ui-spec.md §8 asks
+      every data-bearing view for a real error state, and this one is the most
+      tempting to skip because the rest of the page still works without it. */}
+      {error && (
+        <div className="mt-3.5 rounded-2xl bg-organic-danger-bg p-3.5">
+          <p className="text-sm text-organic-danger">{error}</p>
+          <button type="button" onClick={onRetry} className="mt-1.5 text-sm font-semibold underline">
+            Try again
+          </button>
+        </div>
+      )}
+      {!error && attempts === null && <p className="mt-3.5 text-[13px] opacity-55">Loading…</p>}
+      {!error && attempts !== null && attempts.length === 0 && (
         <p className="mt-3.5 text-[13px] leading-relaxed opacity-70">
           No completed quizzes yet. Scores and dates land here once you finish one.
         </p>
@@ -220,6 +239,10 @@ function RepoDetail() {
   const [reindexError, setReindexError] = useState<string | null>(null)
   const [mastery, setMastery] = useState<Mastery | null>(null)
   const [attempts, setAttempts] = useState<AttemptSummary[] | null>(null)
+  const [attemptsError, setAttemptsError] = useState<string | null>(null)
+  // Bumped by the panel's "Try again", which is the only way to re-run the
+  // fetch below without a full page reload.
+  const [attemptsReload, setAttemptsReload] = useState(0)
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const [updateError, setUpdateError] = useState<string | null>(null)
@@ -364,13 +387,14 @@ function RepoDetail() {
   // the one event that adds a row here.
   useEffect(() => {
     if (status !== 'ready' || !repoId) return
+    setAttemptsError(null)
     listRepoAttempts(repoId)
       .then(setAttempts)
-      .catch(() => {
-        // An unreachable history panel shouldn't take the page down; it stays
-        // in its loading state rather than claiming "no quizzes yet".
-      })
-  }, [status, repoId, quiz])
+      // Scoped to the panel — an unreachable history shouldn't take the page
+      // down with it, but it does have to say so rather than sit on "Loading…"
+      // forever (found via Codex's review of this change).
+      .catch((err) => setAttemptsError(err instanceof ApiError ? err.message : 'Could not load quiz history.'))
+  }, [status, repoId, quiz, attemptsReload])
 
   function handleCheckUpdates() {
     if (!repoId) return
@@ -582,7 +606,11 @@ function RepoDetail() {
             )}
           </section>
 
-          <QuizHistory attempts={attempts} />
+          <QuizHistory
+            attempts={attempts}
+            error={attemptsError}
+            onRetry={() => setAttemptsReload((count) => count + 1)}
+          />
         </div>
       )}
 
