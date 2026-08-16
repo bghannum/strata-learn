@@ -25,7 +25,6 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.db.models import (
     Citation,
     FeedbackMode,
-    FillBlankMode,
     Question,
     QuestionType,
     Quiz,
@@ -36,9 +35,12 @@ from app.db.models import (
     Subsystem,
 )
 from app.db.session import async_session_factory
-from app.quizzing.fill_blank_generator import FillBlankResult, generate_fill_blank_questions
 from app.quizzing.mcq_generator import MCQResult, generate_mcq_questions
 from app.quizzing.seeds import QuestionSeed
+from app.quizzing.short_answer_generator import (
+    ShortAnswerResult,
+    generate_short_answer_questions,
+)
 from app.semantics.llm_provider import LLMProvider
 
 # JUDGMENT CALL — the original plan doesn't say how many questions a quiz
@@ -253,24 +255,30 @@ async def run_quiz_generation(llm: LLMProvider, quiz_id: UUID, study_guide_id: U
     # simpler than round-robin-ing generator calls, and generator functions
     # already take a list per Phase 2's summarize_modules/extract_tradeoffs
     # shape (one LLM call per item, not one call for the whole batch).
+    #
+    # short_answer replaced fill_blank here: a blanked term, however well
+    # chosen, still tests "guess the word I'm thinking of" more than
+    # understanding. The open how/why question graded against a rubric is
+    # the quiz counterpart to Phase 6's architecture narrative. fill_blank
+    # stays gradable for quizzes generated before this; nothing new is made.
     mcq_seeds = seeds[0::2]
-    fill_blank_seeds = seeds[1::2]
+    short_answer_seeds = seeds[1::2]
 
     mcq_results = await generate_mcq_questions(llm, mcq_seeds)
-    fill_blank_results = await generate_fill_blank_questions(llm, fill_blank_seeds)
+    short_answer_results = await generate_short_answer_questions(llm, short_answer_seeds)
 
     # Re-sorted back into the seeds' original (file_path, line_start) order —
     # generating the two types via separate calls above means their results
     # come back in two separate lists, not the interleaved order a reader of
     # the source study guide would encounter them in.
-    combined: list[MCQResult | FillBlankResult] = [*mcq_results, *fill_blank_results]
+    combined: list[MCQResult | ShortAnswerResult] = [*mcq_results, *short_answer_results]
     combined.sort(key=lambda r: (r.seed.file_path, r.seed.line_start))
 
     if not combined:
         # No usable citations (a guide too thin to seed any questions from),
         # or every generated result failed its own generator's validation
-        # (mcq_generator.py's correct_index check, fill_blank_generator.py's
-        # blank-marker check). Marking `ready` with zero questions would let
+        # (mcq_generator.py's correct_index check, short_answer_generator.py's
+        # rubric check). Marking `ready` with zero questions would let
         # the client poll into a "successful" quiz QuizTaker can't render —
         # it indexes straight into questions[0] (found via the Phase 5 Codex
         # review). Raising here routes through quiz_pipeline.py's normal
@@ -304,12 +312,14 @@ async def run_quiz_generation(llm: LLMProvider, quiz_id: UUID, study_guide_id: U
             else:
                 question = Question(
                     quiz_id=quiz_id,
-                    question_type=QuestionType.fill_blank,
+                    question_type=QuestionType.short_answer,
                     order=order,
-                    prompt=result.blanked_text,
-                    fill_blank_mode=FillBlankMode(result.mode),
-                    correct_answer=result.correct_answer,
-                    acceptable_alternatives=result.acceptable_alternatives,
+                    prompt=result.prompt,
+                    # The model answer rides in correct_answer (shown after
+                    # grading, never matched against); the rubric is what
+                    # the grader actually judges.
+                    correct_answer=result.model_answer,
+                    rubric=result.rubric,
                     file_path=result.seed.file_path,
                     line_start=result.seed.line_start,
                     line_end=result.seed.line_end,

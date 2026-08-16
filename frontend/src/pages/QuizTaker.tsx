@@ -12,9 +12,10 @@ import {
   type Attempt,
   type Quiz,
 } from '../api/client'
+import RubricCoverage from '../components/RubricCoverage'
 import SpokenAnswer from '../components/SpokenAnswer'
 import Button from '../components/ui/Button'
-import { Input } from '../components/ui/Field'
+import { Input, Textarea } from '../components/ui/Field'
 import Tag from '../components/ui/Tag'
 
 // #35: the earlier-answered question's own submission + graded result,
@@ -220,6 +221,7 @@ function QuizTaker() {
       .finally(() => setSubmitting(false))
   }
 
+  const isWritten = question.question_type === 'fill_blank' || question.question_type === 'short_answer'
   const canSubmit = question.question_type === 'mcq' ? selectedIndex !== null : !!answerText.trim()
   const showingResult = isImmediate && !!result
   const primaryLabel = showingResult
@@ -287,17 +289,36 @@ function QuizTaker() {
           </fieldset>
         )}
 
-        {question.question_type === 'fill_blank' && (
+        {isWritten && (
           <div className="mt-4.5">
-            <Input
-              type="text"
-              value={answerText}
-              onChange={(event) => setAnswerText(event.target.value)}
-              disabled={!!result}
-              placeholder="Your answer"
-            />
+            {question.question_type === 'short_answer' ? (
+              <>
+                {/* A paragraph, not a term: the question asks how or why, and
+                the judge grades ideas against a rubric — so the box invites a
+                few sentences and says so. */}
+                <Textarea
+                  value={answerText}
+                  onChange={(event) => setAnswerText(event.target.value)}
+                  disabled={!!result}
+                  placeholder="Answer in a sentence or three, in your own words…"
+                  className="min-h-[110px]"
+                  aria-label="Your answer"
+                />
+                <p className="mt-1.5 text-[12px] opacity-60">
+                  Explain the reasoning — you're graded on the ideas, not the wording.
+                </p>
+              </>
+            ) : (
+              <Input
+                type="text"
+                value={answerText}
+                onChange={(event) => setAnswerText(event.target.value)}
+                disabled={!!result}
+                placeholder="Your answer"
+              />
+            )}
             {/* The transcript never goes anywhere on its own: "Use this
-            answer" copies it into the same answerText the Input above is
+            answer" copies it into the same answerText the field above is
             bound to, and the ordinary Submit button grades it. Keyed on
             question.id so a transcript can't bleed across Previous/Next. */}
             {canTranscribe && attempt && (
@@ -327,9 +348,25 @@ function QuizTaker() {
               className={`text-sm font-semibold ${(result.score ?? 0) > 0 ? 'text-organic-accent-2-700' : 'text-organic-danger'}`}
             >
               {(result.score ?? 0) >= 1 ? 'Correct' : (result.score ?? 0) > 0 ? 'Partially correct' : 'Incorrect'}
+              {question.question_type === 'short_answer' && result.rubric_hits && (
+                <span className="ml-2 font-normal opacity-70">
+                  {result.rubric_hits.filter(Boolean).length} of {result.rubric_hits.length} key points
+                </span>
+              )}
             </p>
             <p className="mt-1 text-sm opacity-80">{result.feedback}</p>
-            {result.correct_answer && (result.score ?? 0) < 1 && (
+            {result.rubric && result.rubric.length > 0 && (
+              <div className="mt-3">
+                <RubricCoverage rubric={result.rubric} hits={result.rubric_hits} />
+              </div>
+            )}
+            {question.question_type === 'short_answer' && result.correct_answer && (
+              <div className="mt-3">
+                <p className="text-[10px] font-medium tracking-[0.1em] uppercase opacity-70">A strong answer</p>
+                <p className="mt-1 text-sm leading-relaxed opacity-80">{result.correct_answer}</p>
+              </div>
+            )}
+            {question.question_type !== 'short_answer' && result.correct_answer && (result.score ?? 0) < 1 && (
               <p className="mt-1 text-sm opacity-60">
                 Correct answer: <span className="font-medium">{result.correct_answer}</span>
               </p>

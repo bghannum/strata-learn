@@ -129,7 +129,7 @@ async def test_submit_fill_blank_concept_miss_returns_503_without_llm_credential
         )
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "concept-mode grading is unavailable until an LLM provider is configured"
+    assert response.json()["detail"] == "written-answer grading is unavailable until an LLM provider is configured"
 
 
 async def test_submit_fill_blank_concept_mode_miss_uses_llm_judge(pending_repo_factory) -> None:

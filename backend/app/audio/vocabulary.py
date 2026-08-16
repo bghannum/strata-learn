@@ -138,6 +138,14 @@ def build_vocabulary(
     return chosen
 
 
+def technical_terms(text: str) -> list[str]:
+    """The identifier-shaped tokens in a piece of prose — for callers that
+    need to *exclude* what a rubric or answer key names, rather than build
+    hints from it. Same shape test as the hint selection above, so the two
+    agree on what counts."""
+    return [term for term in _TOKEN.findall(text or "") if _looks_technical(term)]
+
+
 def build_vocabulary_prompt(terms: Sequence[str]) -> str:
     """The one string both backends condition on. Whisper-family models
     treat the prompt as preceding context, so a short lead-in and a comma

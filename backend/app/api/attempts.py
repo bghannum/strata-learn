@@ -25,7 +25,7 @@ from app.audio.errors import AudioProviderError, AudioValidationError
 from app.audio.providers import AudioClip, SpeechProvider, TranscriptionProvider
 from app.audio.speech_response import stream_speech
 from app.audio.validation import validate_audio_upload
-from app.audio.vocabulary import build_vocabulary
+from app.audio.vocabulary import build_vocabulary, technical_terms
 from app.config import settings
 from app.db.models import (
     AnswerSubmission,
@@ -47,6 +47,11 @@ from app.quizzing.grading.fill_blank_grader import (
     grade_fill_blank,
 )
 from app.quizzing.grading.mcq_grader import grade_mcq
+from app.quizzing.grading.short_answer_grader import (
+    ShortAnswerLLMUnavailableError,
+    ShortAnswerRubricMismatchError,
+    grade_short_answer,
+)
 from app.redis_pool import get_redis_pool
 from app.semantics.llm_provider import AnthropicProvider, LLMOutputError, LLMProvider
 
@@ -101,6 +106,11 @@ class AnswerResultOut(BaseModel):
     feedback: str | None
     correct_index: int | None
     correct_answer: str | None
+    # short_answer only, revealed on the same terms as feedback: the rubric
+    # points and which ones the judge found in the answer, so the UI can show
+    # coverage ("2 of 3 key points") rather than a bare score.
+    rubric: list[str] | None = None
+    rubric_hits: list[bool] | None = None
 
 
 class QuestionResultOut(BaseModel):
@@ -135,6 +145,11 @@ class QuestionResultOut(BaseModel):
     # about rather than leaking it question-by-question.
     submitted_answer: str | None = None
     correct_answer: str | None = None
+    # short_answer only. rubric follows correct_answer's gate (completed
+    # only — the key points *are* the answer key); rubric_hits follows
+    # feedback's gate (it's a property of the graded submission).
+    rubric: list[str] | None = None
+    rubric_hits: list[bool] | None = None
 
 
 class AttemptResultsOut(BaseModel):
@@ -251,6 +266,10 @@ async def _build_results(session: AsyncSession, attempt: Attempt) -> AttemptResu
                 if is_completed and q.id in submission_by_question
                 else None,
                 correct_answer=_correct_answer_display_text(q) if is_completed else None,
+                rubric=list(q.rubric) if is_completed and q.rubric else None,
+                rubric_hits=list(submission_by_question[q.id].rubric_hits)
+                if q.id in submission_by_question and reveal_score_feedback and submission_by_question[q.id].rubric_hits
+                else None,
             )
             for q in questions
         ],
@@ -367,32 +386,43 @@ async def submit_answer(
             feedback=existing.feedback if reveal else None,
             correct_index=question.correct_index if reveal else None,
             correct_answer=question.correct_answer if reveal else None,
+            rubric=list(question.rubric) if reveal and question.rubric else None,
+            rubric_hits=list(existing.rubric_hits) if reveal and existing.rubric_hits else None,
         )
 
+    rubric_hits: list[bool] | None = None
     if question.question_type == QuestionType.mcq:
         if body.selected_index is None or not (0 <= body.selected_index < len(question.choices or [])):
             raise HTTPException(422, "selected_index is required and must be a valid choice index for an mcq question")
         score, feedback = grade_mcq(question, body.selected_index)
     else:
+        # fill_blank and short_answer both take free text; only the grader
+        # differs. The same length cap bounds what's interpolated into the
+        # paid judge call either way (generous for a three-sentence answer).
         if not body.answer_text or not body.answer_text.strip():
-            raise HTTPException(422, "answer_text is required for a fill_blank question")
+            raise HTTPException(422, f"answer_text is required for a {question.question_type.value} question")
         if len(body.answer_text) > MAX_ANSWER_TEXT_CHARS:
             raise HTTPException(422, f"answer_text exceeds the {MAX_ANSWER_TEXT_CHARS}-character limit")
         try:
-            score, feedback = await grade_fill_blank(llm, question, body.answer_text)
-        except FillBlankLLMUnavailableError as exc:
-            raise HTTPException(503, "concept-mode grading is unavailable until an LLM provider is configured") from exc
-        except LLMOutputError as exc:
+            if question.question_type == QuestionType.short_answer:
+                score, feedback, rubric_hits = await grade_short_answer(llm, question, body.answer_text)
+            else:
+                score, feedback = await grade_fill_blank(llm, question, body.answer_text)
+        except (FillBlankLLMUnavailableError, ShortAnswerLLMUnavailableError) as exc:
+            raise HTTPException(503, "written-answer grading is unavailable until an LLM provider is configured") from exc
+        except (LLMOutputError, ShortAnswerRubricMismatchError) as exc:
             # The judge returned nothing gradable (typically a truncated
-            # response). 503 rather than a fabricated score: no submission is
-            # written, so the same answer can simply be sent again.
-            raise HTTPException(503, "concept-mode grading did not return a usable result; please retry") from exc
+            # response, or a rubric verdict list that doesn't line up). 503
+            # rather than a fabricated score: no submission is written, so
+            # the same answer can simply be sent again.
+            raise HTTPException(503, "written-answer grading did not return a usable result; please retry") from exc
 
     submission = existing or AnswerSubmission(attempt_id=attempt_id, question_id=question_id)
     submission.selected_index = body.selected_index
     submission.answer_text = body.answer_text
     submission.score = score
     submission.feedback = feedback
+    submission.rubric_hits = rubric_hits
     session.add(submission)
     await session.commit()
 
@@ -402,6 +432,8 @@ async def submit_answer(
         feedback=feedback if reveal else None,
         correct_index=question.correct_index if reveal else None,
         correct_answer=question.correct_answer if reveal else None,
+        rubric=list(question.rubric) if reveal and question.rubric else None,
+        rubric_hits=rubric_hits if reveal else None,
     )
 
 
@@ -438,11 +470,23 @@ async def _vocabulary_for_question(session: AsyncSession, question: Question, qu
             ).first()
             subsystem_name = subsystem.name if subsystem is not None else None
 
+    # What counts as "the answer key" differs by type. fill_blank: the exact
+    # term and its alternatives — priming those is an answer oracle for
+    # exact-match grading. short_answer: the rubric's key phrases — the judge
+    # grades meaning, so a hint can't *decode into* the answer the way it can
+    # for exact match, but the rubric's own wording is still the thing the
+    # learner is supposed to produce unprompted. The model answer paragraph
+    # is not excluded: it would subtract most of the useful vocabulary.
+    if question.question_type == QuestionType.short_answer:
+        excluded: list[str] = [term for point in (question.rubric or []) for term in technical_terms(str(point))]
+    else:
+        excluded = [question.correct_answer or "", *(question.acceptable_alternatives or [])]
+
     return build_vocabulary(
         snippet_text=snippet,
         file_path=question.file_path,
         subsystem_name=subsystem_name,
-        excluded_terms=[question.correct_answer or "", *(question.acceptable_alternatives or [])],
+        excluded_terms=excluded,
         max_terms=settings.transcription_vocab_max_terms,
         max_chars=settings.transcription_vocab_max_chars,
     )
@@ -481,8 +525,8 @@ async def transcribe_answer(
     question = await session.get(Question, question_id)
     if question is None or question.quiz_id != attempt.quiz_id:
         raise HTTPException(404, "question not found on this attempt's quiz")
-    if question.question_type != QuestionType.fill_blank:
-        raise HTTPException(422, "only fill_blank questions accept a spoken answer")
+    if question.question_type not in (QuestionType.fill_blank, QuestionType.short_answer):
+        raise HTTPException(422, "only written-answer questions accept a spoken answer")
     # 5. Capability check before reading the body — a 503 for a disabled
     #    feature shouldn't cost a 2 MiB upload first. Generic detail: which
     #    backend (or none) is operator config, not something a caller learns

@@ -13,6 +13,7 @@ import {
   type Quiz,
 } from '../api/client'
 import ReadAloudButton from '../components/ReadAloudButton'
+import RubricCoverage from '../components/RubricCoverage'
 import Button from '../components/ui/Button'
 import Tag from '../components/ui/Tag'
 
@@ -172,7 +173,11 @@ function AttemptResultsPage() {
                 <Tag variant={badge.variant}>{badge.label}</Tag>
                 <span className="text-xs opacity-55">Question {questionIndex + 1}</span>
                 <Tag variant="neutral" className="ml-auto">
-                  {question.question_type === 'mcq' ? 'Multiple choice' : 'Fill in the blank'}
+                  {question.question_type === 'mcq'
+                    ? 'Multiple choice'
+                    : question.question_type === 'short_answer'
+                      ? 'Short answer'
+                      : 'Fill in the blank'}
                 </Tag>
               </div>
               <p className="mb-3 text-[15.5px] font-semibold whitespace-pre-wrap">{question.prompt}</p>
@@ -183,14 +188,24 @@ function AttemptResultsPage() {
                     <div className="mb-1 text-[10px] tracking-[0.1em] text-organic-neutral-700 uppercase">
                       You said
                     </div>
-                    {question.submitted_answer ?? <span className="opacity-55">Not answered</span>}
+                    <span className="whitespace-pre-wrap">
+                      {question.submitted_answer ?? <span className="opacity-55">Not answered</span>}
+                    </span>
                   </div>
                   <div className="rounded-2xl bg-organic-accent-2-100 p-3.5">
                     <div className="mb-1 text-[10px] tracking-[0.1em] text-organic-accent-2-700 uppercase">
-                      Correct
+                      {/* For a short answer there's no single "correct" string
+                      — the model answer is one strong way to say it. */}
+                      {question.question_type === 'short_answer' ? 'A strong answer' : 'Correct'}
                     </div>
-                    {question.correct_answer ?? <span className="opacity-55">—</span>}
+                    <span className="leading-relaxed">{question.correct_answer ?? <span className="opacity-55">—</span>}</span>
                   </div>
+                </div>
+              )}
+
+              {question.rubric && question.rubric.length > 0 && (
+                <div className="mb-3 rounded-2xl border border-organic-divider p-3.5">
+                  <RubricCoverage rubric={question.rubric} hits={question.rubric_hits} />
                 </div>
               )}
 
