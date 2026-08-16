@@ -1,6 +1,12 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The two audio backends each capability can be pointed at (ADR-010). `None`
+# on the *_backend settings below means the capability is off entirely, which
+# is the default and the state CI always runs in.
+AudioBackend = Literal["openai", "local"]
 
 
 class Settings(BaseSettings):
@@ -51,6 +57,47 @@ class Settings(BaseSettings):
     # walker per-file size cap — skip individual files above this (generated
     # bundles, data dumps, etc.) rather than feeding them to tree-sitter
     max_file_size_bytes: int = 1 * 1024 * 1024
+
+    # --- Phase 8: voice (ADR-010) ---
+    #
+    # One switch per capability, independent of each other, `None` = off. A
+    # selected backend whose prerequisites are missing (no OPENAI_API_KEY, or
+    # the `voice` extra not installed for `local`) also resolves to off — see
+    # app/audio/dependencies.py, which is the single place that decision is
+    # made. Nothing here is required for any non-audio feature.
+    transcription_backend: AudioBackend | None = None
+    speech_backend: AudioBackend | None = None
+
+    openai_transcription_model: str = "gpt-4o-mini-transcribe"
+    openai_speech_model: str = "gpt-4o-mini-tts"
+    openai_speech_voice: str = "alloy"
+    # faster-whisper model name. base.en is comfortably faster than realtime
+    # on CPU for short clips; small.en roughly triples the latency, which is
+    # where a request-path transcription stops being acceptable.
+    local_whisper_model: str = "base.en"
+
+    # Bytes are the enforcement boundary for a microphone upload; duration is
+    # deliberately *not* measured server-side (MediaRecorder output is a live
+    # stream with no reliable duration header, and measuring means decoding).
+    # 2 MiB of Opus at MediaRecorder's default bitrate is roughly eight
+    # minutes — ~25x the intended answer length — so it bounds duration
+    # transitively. audio_upload_max_seconds is the *client's* countdown, a
+    # UX bound rather than a security one.
+    audio_upload_max_bytes: int = 2 * 1024 * 1024
+    audio_upload_max_seconds: int = 60
+    # OpenAI's TTS `input` ceiling is 4096 characters; enforced here, before
+    # the paid call, rather than by eating a 400 from the provider.
+    speech_max_chars: int = 4000
+    # Vocabulary hints handed to the transcription backend (app/audio/
+    # vocabulary.py) are bounded twice — by term count and by joined length —
+    # because they're interpolated into a paid request.
+    transcription_vocab_max_terms: int = 24
+    transcription_vocab_max_chars: int = 300
+    voice_calls_per_hour: int = 60
+    # A timeout, not retries: an auto-retried paid audio call doubles the
+    # bill, and the established disposition (api/attempts.py) is "persist
+    # nothing, return 503, let the user resubmit".
+    audio_provider_timeout_seconds: float = 30.0
 
 
 settings = Settings()

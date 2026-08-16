@@ -196,6 +196,7 @@ The worker commits final Layer B rows with `generating` atomically, and the stud
 | `PATCH` | `/attempts/{attempt_id}/answers/{question_id}` | Submit and immediately grade one answer |
 | `POST` | `/attempts/{attempt_id}/complete` | Finalize an attempt's score and return full results |
 | `GET` | `/attempts/{attempt_id}` | Fetch an attempt's current results (supports a direct visit or refresh) |
+| `GET` | `/voice/capabilities` | Whether transcription and speech are on for this deployment — booleans only, never the backend |
 
 The broader API in the [original project plan](design/original-project-plan.md) is a target surface, not a description of current routes.
 
@@ -203,11 +204,13 @@ The broader API in the [original project plan](design/original-project-plan.md) 
 
 Local Docker Compose starts five services: PostgreSQL, Redis, API, worker, and web. Both the API and worker containers mount `docs/prompts` read-only, because prompt templates live outside the backend image — the worker needed this from Phase 2 for its own generation jobs, and the API needed the same mount added in Phase 5 once `PATCH /attempts/{id}/answers/{qid}`'s fill-in-the-blank concept-mode grading started calling `load_prompt()` directly from the request path rather than only from a worker job. The current deployment target is local development; VPS hosting remains planned for Phase 7.
 
-## Planned Phase 8 voice extension
+## Phase 8 voice layer (in progress)
 
-Phase 8 adds two request-based audio capabilities after the hosted application is hardened in Phase 7: read-aloud controls for persisted study-guide and quiz-feedback text, and microphone-recorded answers for fill-in-the-blank questions. Spoken answers are transcribed into editable text and then submitted through the existing grading endpoint, keeping text, citations, and grading behavior canonical.
+Phase 8 adds two request-based audio capabilities: read-aloud for persisted study-guide sections and quiz feedback, and microphone-recorded answers for fill-in-the-blank questions. Spoken answers are transcribed into an editable transcript the learner confirms; only that confirmed text is submitted, through the existing grading endpoint, so text, citations, and grading stay canonical.
 
-Audio uses separate transcription and speech provider boundaries rather than widening the text-oriented `LLMProvider`. The initial plan uses hosted OpenAI speech services, streams generated speech without persisting it, and retains only the learner-confirmed transcript—not raw microphone audio. Realtime speech-to-speech conversation, a voice tutor, and self-hosted Whisper are explicitly outside the Phase 8 scope. See [the Phase 8 plan](design/original-project-plan.md#phase-8--voice-learning-read-aloud--spoken-quiz-answers--1-2-weeks).
+The voice layer lives in `app/audio/` — deliberately its own package, not part of `app/semantics/`, whose `LLMProvider` is the Layer B abstraction. It defines two provider protocols, `TranscriptionProvider` and `SpeechProvider`, each with a hosted OpenAI backend and an in-process self-hosted one (faster-whisper; Kokoro via ONNX), selected per capability by `TRANSCRIPTION_BACKEND` / `SPEECH_BACKEND` and off by default. `app/audio/dependencies.py` is the single place a capability is decided on or off; `GET /voice/capabilities` reports the answer as booleans so the UI never renders a control that would 503; the *reason* a capability is off is logged once at startup and nowhere else. The pure pieces — Markdown-to-speakable text, magic-byte upload validation, vocabulary hints that never include the answer key, per-call metering — are deterministic and unit-tested without any provider. Rationale, including the deliberate reversal of the original "hosted only" scope, is [ADR-010](adr/ADR-010-voice-providers-and-self-hosted-backends.md).
+
+Delivered so far: the protocols, fakes, pure modules, config, and the capabilities endpoint. Landing next, in order: hosted transcription and the spoken-answer UI, hosted read-aloud, the local backends, and the evaluation harness whose committed report compares them.
 
 ## Decision references
 
@@ -220,3 +223,4 @@ Major architectural rationale lives in [`docs/adr/`](adr/), especially:
 - [ADR-007: self-implemented auth](adr/ADR-007-self-implemented-auth.md)
 - [ADR-008: no local-filesystem ingestion](adr/ADR-008-no-local-filesystem-ingestion.md)
 - [ADR-009: LLM providers](adr/ADR-009-llm-providers.md)
+- [ADR-010: voice providers and self-hosted backends](adr/ADR-010-voice-providers-and-self-hosted-backends.md)
