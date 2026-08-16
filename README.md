@@ -2,14 +2,14 @@
 
 Point Strata Learn at a Git repository and it produces a citation-grounded **study guide** — architecture narrative, subsystem deep-dives, trade-offs, glossary, Mermaid diagram — and then a **quiz** that checks you understood *why* the code is the way it is, not just that it runs. It's built for the "I've just been handed a codebase" moment.
 
-<!-- screenshots -->
 <p align="center">
-  <img src="docs/screenshots/study-guide.png" alt="A generated study guide: architecture diagram, narrative, and clickable citations" width="800">
+  <img src="docs/screenshots/study-guide.png" alt="A generated study guide for psf/requests: the synthesised Architecture section, with read-aloud and section navigation" width="820">
 </p>
 <p align="center">
-  <img src="docs/screenshots/repo-detail.png" alt="Repository page: indexing stepper, study-guide panel, quiz history, mastery per subsystem" width="400">
-  <img src="docs/screenshots/quiz-results.png" alt="Quiz results: score, per-question breakdown, rubric coverage" width="400">
+  <img src="docs/screenshots/repo-detail.png" alt="Repository page: indexing stepper, study-guide panel, quiz history, and mastery per subsystem" width="405">
+  <img src="docs/screenshots/quiz-results.png" alt="Quiz results: a short-answer question with the learner's answer, a model answer, and which rubric key points landed" width="405">
 </p>
+<p align="center"><sub>Shown: <a href="https://github.com/psf/requests">psf/requests</a> indexed and quizzed end to end.</sub></p>
 
 ## What it does
 
