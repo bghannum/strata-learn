@@ -12,6 +12,7 @@ from uuid import UUID
 
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
@@ -19,9 +20,10 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.auth import get_current_user
 from app.audio import rate_limit
-from app.audio.dependencies import get_transcription_provider
+from app.audio.dependencies import get_speech_provider, get_transcription_provider
 from app.audio.errors import AudioProviderError, AudioValidationError
-from app.audio.providers import AudioClip, TranscriptionProvider
+from app.audio.providers import AudioClip, SpeechProvider, TranscriptionProvider
+from app.audio.speech_response import stream_speech
 from app.audio.validation import validate_audio_upload
 from app.audio.vocabulary import build_vocabulary
 from app.config import settings
@@ -517,6 +519,49 @@ async def transcribe_answer(
     duration_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
 
     return TranscriptionOut(text=result.text, duration_ms=duration_ms)
+
+
+@router.get("/{attempt_id}/answers/{question_id}/feedback-speech")
+async def speak_feedback(
+    attempt_id: UUID,
+    question_id: UUID,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+    speaker: SpeechProvider | None = Depends(get_speech_provider),
+) -> StreamingResponse:
+    """Read-aloud for one graded answer's feedback (ADR-010). Identifier-
+    based only: the text is AnswerSubmission.feedback, never caller-supplied.
+
+    Gated on the *same* visibility rule _build_results applies to feedback
+    text — completed, or immediate mode. Without that gate this would be a
+    side channel that defeats end_of_quiz mode: the JSON withholds the
+    feedback, but the audio would speak it. Same leak class as #37.
+    """
+    attempt = await _owned_attempt(session, attempt_id, current_user)
+    question = await session.get(Question, question_id)
+    if question is None or question.quiz_id != attempt.quiz_id:
+        raise HTTPException(404, "question not found on this attempt's quiz")
+
+    quiz = await session.get(Quiz, attempt.quiz_id)
+    reveal = attempt.status == AttemptStatus.completed or (
+        quiz is not None and quiz.feedback_mode == FeedbackMode.immediate
+    )
+    if not reveal:
+        # 404, not 403: the existence of feedback for a question the learner
+        # hasn't finished is itself something this response shouldn't confirm.
+        raise HTTPException(404, "no feedback to read for this question yet")
+
+    submission = (
+        await session.exec(
+            select(AnswerSubmission).where(
+                AnswerSubmission.attempt_id == attempt_id, AnswerSubmission.question_id == question_id
+            )
+        )
+    ).first()
+    if submission is None or not submission.feedback:
+        raise HTTPException(404, "no feedback to read for this question yet")
+
+    return await stream_speech(speaker, submission.feedback, max_chars=settings.speech_max_chars)
 
 
 @router.post("/{attempt_id}/complete", response_model=AttemptResultsOut)

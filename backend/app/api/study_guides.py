@@ -9,12 +9,16 @@ from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.auth import get_current_user
+from app.audio.dependencies import get_speech_provider
+from app.audio.providers import SpeechProvider
+from app.audio.speech_response import stream_speech
+from app.config import settings
 from app.db.models import (
     AnalysisSnapshot,
     Citation,
@@ -210,6 +214,30 @@ async def diff_study_guides(
             snapshot_before.dependency_graph, subsystems_before, snapshot_after.dependency_graph, subsystems_after
         ),
     )
+
+
+@router.get("/{study_guide_id}/sections/{section_id}/speech")
+async def speak_section(
+    study_guide_id: UUID,
+    section_id: UUID,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+    speaker: SpeechProvider | None = Depends(get_speech_provider),
+) -> StreamingResponse:
+    """Read-aloud for one persisted section (ADR-010). Identifier-based
+    only — the text spoken is Section.content_md, never caller-supplied, so
+    this is not a paid text-to-speech proxy. Ownership goes through the
+    guide's repo like every other route here; the section must belong to
+    *that* guide, not merely exist.
+
+    See app/audio/speech_response.py for the streaming shape and why the
+    first chunk is awaited before the response starts.
+    """
+    guide, _repo = await _owned_guide_and_repo(session, study_guide_id, current_user)
+    section = await session.get(Section, section_id)
+    if section is None or section.study_guide_id != guide.id:
+        raise HTTPException(404, "section not found")
+    return await stream_speech(speaker, section.content_md, max_chars=settings.speech_max_chars)
 
 
 @router.get("/{study_guide_id}/export.md")

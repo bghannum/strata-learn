@@ -132,6 +132,27 @@ async function request<T>(path: string, init?: RequestInit, options?: RequestOpt
   return response.json()
 }
 
+/** request()'s sibling for binary bodies — audio for read-aloud. Shares the
+ *  401 handling and ApiError shape; only `.blob()` differs from `.json()`.
+ *
+ *  Why not `<audio src={url}>` like the export link? That link is a top-level
+ *  navigation, where cookies attach under navigation rules. An <audio> tag
+ *  here is a *cross-origin subresource* (frontend :5173, API :8000) — it only
+ *  carries the session cookie with crossOrigin="use-credentials" and matching
+ *  CORS headers, and it breaks silently when either changes. Worse, its
+ *  `error` event carries a MediaError code and nothing else: a 429, a 503,
+ *  and a codec fault would all render "Could not play audio", and a 401
+ *  would never fire UNAUTHORIZED_EVENT. Fetching gives every failure the
+ *  server's own detail string, like everywhere else in the app. */
+export async function requestBlob(path: string, init?: RequestInit): Promise<{ blob: Blob; headers: Headers }> {
+  const response = await fetch(`${API_BASE_URL}${path}`, { ...init, credentials: 'include' })
+  if (!response.ok) {
+    if (response.status === 401) notifyUnauthorized()
+    throw new ApiError(response.status, await parseErrorDetail(response))
+  }
+  return { blob: await response.blob(), headers: response.headers }
+}
+
 // --- Auth ---
 
 export interface User {
@@ -526,6 +547,25 @@ export interface VoiceCapabilities {
 
 export function getVoiceCapabilities(): Promise<VoiceCapabilities> {
   return request('/voice/capabilities')
+}
+
+/** Header the speech routes set when the section was cut at the provider's
+ *  input limit, so the control can say "reading the first part". */
+export const SPEECH_TRUNCATED_HEADER = 'X-Speech-Truncated'
+
+export interface SpeechClip {
+  blob: Blob
+  truncated: boolean
+}
+
+export async function getSectionSpeech(studyGuideId: string, sectionId: string): Promise<SpeechClip> {
+  const { blob, headers } = await requestBlob(`/study-guides/${studyGuideId}/sections/${sectionId}/speech`)
+  return { blob, truncated: headers.get(SPEECH_TRUNCATED_HEADER) === '1' }
+}
+
+export async function getFeedbackSpeech(attemptId: string, questionId: string): Promise<SpeechClip> {
+  const { blob, headers } = await requestBlob(`/attempts/${attemptId}/answers/${questionId}/feedback-speech`)
+  return { blob, truncated: headers.get(SPEECH_TRUNCATED_HEADER) === '1' }
 }
 
 export interface Transcription {
