@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Status** | Target UX — Phase 4–5 baseline implemented; Phase 5.5 design integration applied to every screen (visual-regression baselines and a full manual responsive/keyboard sweep still open — see §5.1); Phase 6 not started |
+| **Status** | Historical/reference — the Phase 4–5 UX and the Phase 5.5 design integration this spec describes are implemented and shipped in the MVP; only the drawing-question sections (§6.6, §6.7) describe unbuilt behaviour, deferred to [Phase 9](https://github.com/bghannum/strata-learn/milestone/8). Fill-in-the-blank references below describe the pre–Phase 8 quiz; short-answer questions replaced it (see [architecture](../architecture.md)) |
 | **Related design** | [Original project plan](original-project-plan.md); this spec covers the Phase 4–6 frontend surface |
 | **Owner** | Solo builder |
 | **Intended reader** | Claude Design / Claude Code (frontend build) |
@@ -13,7 +13,7 @@
 
 ## 1. Problem
 
-The backend pipeline (ingest → Layer A → Layer B → generation → assessment) needs a UI that lets the person get a repo into the system, see whether or where the pipeline is stuck, read what was generated, and take and grade a quiz. The functional baseline now exists. Phase 5.5 makes the interactive prototype in [`Strata-Learn UI mockups.zip`](../../Strata-Learn%20UI%20mockups.zip) the explicit visual reference for production design parity; this spec remains the behavioral reference for that integration and later drawing-question work.
+The backend pipeline (ingest → Layer A → Layer B → generation → assessment) needs a UI that lets the person get a repo into the system, see whether or where the pipeline is stuck, read what was generated, and take and grade a quiz. The functional baseline now exists. Phase 5.5 makes the interactive prototype in [`strata-learn-ui-mockups.zip`](strata-learn-ui-mockups.zip) the explicit visual reference for production design parity; this spec remains the behavioral reference for that integration and later drawing-question work.
 
 ## 2. Goals
 
@@ -65,9 +65,9 @@ Mapped to the component names from the original project plan — this spec elabo
 | Authentication and repository ingestion | Implemented through Phase 4b; auth state now clears on a runtime `401` ([#33](https://github.com/bghannum/strata-learn/issues/33), closed) | — |
 | Indexing progress and repository detail | Shared chip/stepper states, WebSocket updates, failure details, a raw-analysis viewer, and a real `POST /repos/{id}/reindex` retry ([#26](https://github.com/bghannum/strata-learn/issues/26), closed). `RepoDetail.tsx` now follows the mockup's structure: header actions beside the title, the stepper full-width, then a study-guide panel next to the quiz-history panel this table row has promised since Phase 4 | Bound dashboard WebSocket fan-out ([#27](https://github.com/bghannum/strata-learn/issues/27)) |
 | Study-guide reading | Section navigation, collapsible Markdown, Mermaid rendering, and a citation slide-over | Citations still render as a per-section list, not inline markers — generated `claim_excerpt` values cannot always be anchored to a literal substring; not something the Phase 5.5 visual pass resolves |
-| Quiz generation and taking | MCQ/fill-in-the-blank questions, resumable attempts, citations, refreshable results, Previous navigation restoring in-session answers ([#35](https://github.com/bghannum/strata-learn/issues/35), closed), a per-quiz `feedback_mode` (immediate/end-of-quiz, [#37](https://github.com/bghannum/strata-learn/issues/37), closed), bounded/cancellable polling ([#38](https://github.com/bghannum/strata-learn/issues/38), closed), completed-result answer detail ([#34](https://github.com/bghannum/strata-learn/issues/34), closed), and Retake ([#36](https://github.com/bghannum/strata-learn/issues/36), closed) | — |
+| Quiz generation and taking | MCQ/short-answer questions (fill-in-the-blank before Phase 8), resumable attempts, citations, refreshable results, Previous navigation restoring in-session answers ([#35](https://github.com/bghannum/strata-learn/issues/35), closed), a per-quiz `feedback_mode` (immediate/end-of-quiz, [#37](https://github.com/bghannum/strata-learn/issues/37), closed), bounded/cancellable polling ([#38](https://github.com/bghannum/strata-learn/issues/38), closed), completed-result answer detail ([#34](https://github.com/bghannum/strata-learn/issues/34), closed), and Retake ([#36](https://github.com/bghannum/strata-learn/issues/36), closed) | — |
 | Visual design system | Organic's tokens and component patterns applied across every screen (login/register, dashboard, add-repo, repo detail, study guide, quiz taker, results) | Visual-regression screenshot baselines and a full manual keyboard/responsive sweep — the Playwright `e2e/` job currently starts only the frontend dev server, so authenticated screens with real data aren't reachable there yet without either standing up the backend stack in CI or mocking its responses |
-| Drawing questions | Not implemented; `DrawingCanvas.tsx` is a stub and the generator/grader modules are empty | All Phase 6 work in §6.6 and the drawing-specific result treatment in §6.7 |
+| Drawing questions | Not implemented; `DrawingCanvas.tsx` is a stub and the generator/grader modules are empty | Deferred to Phase 9: §6.6 and the drawing-specific result treatment in §6.7 |
 
 This matrix is a concise reconciliation aid, not a second backlog. GitHub Issues remain canonical for actionable work, and [Current architecture](../architecture.md) remains canonical for implemented behavior.
 

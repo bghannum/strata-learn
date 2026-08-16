@@ -2,6 +2,7 @@
 name = "strata-learn-backend"
 version = "0.1.0"
 description = "Strata Learn — repo study guide & quiz generator (backend)"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
