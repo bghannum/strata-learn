@@ -18,9 +18,21 @@ def test_capabilities_requires_a_session() -> None:
         assert client.get("/voice/capabilities").status_code == 401
 
 
-def test_capabilities_are_both_off_by_default() -> None:
-    # The state CI always runs in: no backend selected, so nothing renders a
-    # mic button or a read-aloud control.
+def test_capabilities_are_off_without_the_local_runtimes() -> None:
+    # Both capabilities default to "local" so the app works out of the box —
+    # but the runtimes are an opt-in extra that CI never installs, so here
+    # (and in any bare `pip install -e ".[dev]"`) they resolve to off, with
+    # the reason in the startup log rather than in this response.
+    assert settings.transcription_backend == "local"
+    assert settings.speech_backend == "local"
+    with TestClient(app) as client:
+        register_test_user(client)
+        assert client.get("/voice/capabilities").json() == {"transcription": False, "speech": False}
+
+
+def test_capabilities_are_off_when_explicitly_unset(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "transcription_backend", None)
+    monkeypatch.setattr(settings, "speech_backend", None)
     with TestClient(app) as client:
         register_test_user(client)
         assert client.get("/voice/capabilities").json() == {"transcription": False, "speech": False}

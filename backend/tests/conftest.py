@@ -21,6 +21,12 @@ from app.db.session import async_session_factory
 
 REGISTRATION_SECRET = settings.registration_secret
 
+# Never load or download local audio models during a test run — the suite
+# must be free and offline even in a venv that happens to have the `voice`
+# extra installed. Route tests inject fakes; the local backends' own tests
+# inject fake runtime modules.
+settings.voice_warm_on_startup = False
+
 
 async def _clean_db() -> None:
     async with async_session_factory() as session:
