@@ -10,13 +10,20 @@ response, not a multi-call batch job worth decoupling from the request.
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from arq.connections import ArqRedis
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.auth import get_current_user
+from app.audio import rate_limit
+from app.audio.dependencies import get_transcription_provider
+from app.audio.errors import AudioProviderError, AudioValidationError
+from app.audio.providers import AudioClip, TranscriptionProvider
+from app.audio.validation import validate_audio_upload
+from app.audio.vocabulary import build_vocabulary
 from app.config import settings
 from app.db.models import (
     AnswerSubmission,
@@ -28,11 +35,17 @@ from app.db.models import (
     QuestionType,
     Quiz,
     Repo,
+    StudyGuide,
+    Subsystem,
     User,
 )
 from app.db.session import get_session
-from app.quizzing.grading.fill_blank_grader import FillBlankLLMUnavailableError, grade_fill_blank
+from app.quizzing.grading.fill_blank_grader import (
+    FillBlankLLMUnavailableError,
+    grade_fill_blank,
+)
 from app.quizzing.grading.mcq_grader import grade_mcq
+from app.redis_pool import get_redis_pool
 from app.semantics.llm_provider import AnthropicProvider, LLMOutputError, LLMProvider
 
 router = APIRouter(prefix="/attempts", tags=["attempts"])
@@ -388,6 +401,122 @@ async def submit_answer(
         correct_index=question.correct_index if reveal else None,
         correct_answer=question.correct_answer if reveal else None,
     )
+
+
+class TranscriptionOut(BaseModel):
+    # No model or backend name: which one a deployment uses is operator
+    # config the UI is deliberately kept ignorant of (ADR-010). Consistent
+    # with GET /voice/capabilities' booleans-only answer.
+    text: str
+    duration_ms: int
+
+
+async def _vocabulary_for_question(session: AsyncSession, question: Question, quiz: Quiz | None) -> list[str]:
+    """Hint terms drawn from the code the question was generated *from* — its
+    seed citation's snippet, its file path, its subsystem's name. Never from
+    the answer key: correct_answer and acceptable_alternatives are handed to
+    build_vocabulary as the *exclusion* list. See app/audio/vocabulary.py's
+    docstring for why priming the ASR model with the answer would turn this
+    into an answer oracle for exact-match grading."""
+    snippet = None
+    if question.source_citation_id is not None:
+        citation = await session.get(Citation, question.source_citation_id)
+        snippet = citation.snippet_text if citation is not None else None
+
+    subsystem_name = None
+    if question.subsystem_key and quiz is not None:
+        guide = await session.get(StudyGuide, quiz.study_guide_id)
+        if guide is not None:
+            subsystem = (
+                await session.exec(
+                    select(Subsystem).where(
+                        Subsystem.snapshot_id == guide.snapshot_id, Subsystem.key == question.subsystem_key
+                    )
+                )
+            ).first()
+            subsystem_name = subsystem.name if subsystem is not None else None
+
+    return build_vocabulary(
+        snippet_text=snippet,
+        file_path=question.file_path,
+        subsystem_name=subsystem_name,
+        excluded_terms=[question.correct_answer or "", *(question.acceptable_alternatives or [])],
+        max_terms=settings.transcription_vocab_max_terms,
+        max_chars=settings.transcription_vocab_max_chars,
+    )
+
+
+@router.post("/{attempt_id}/answers/{question_id}/transcription", response_model=TranscriptionOut)
+async def transcribe_answer(
+    attempt_id: UUID,
+    question_id: UUID,
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+    redis: ArqRedis = Depends(get_redis_pool),
+    transcriber: TranscriptionProvider | None = Depends(get_transcription_provider),
+) -> TranscriptionOut:
+    """A microphone recording in, an *editable* transcript out. Writes
+    nothing: the learner reviews and corrects the text in QuizTaker.tsx and
+    only the confirmed version goes through submit_answer above, exactly like
+    a typed answer. Never grading an unconfirmed transcript is the phase's
+    one non-negotiable (ADR-010).
+
+    Nested under the answer path rather than a standalone /transcribe
+    because the identifiers are what make this not a general-purpose paid
+    ASR proxy: they are the authorization scope *and* the vocabulary source.
+
+    Gate order is cheapest-and-least-revealing first, paid call last.
+    """
+    # 1. Ownership — a plain get, not the FOR UPDATE variant: nothing is
+    #    written, so a row lock would only serialize transcription against
+    #    grading for no benefit.
+    attempt = await _owned_attempt(session, attempt_id, current_user)
+    # 2. Same 409 as submit_answer — no point transcribing for a finished quiz.
+    if attempt.status != AttemptStatus.in_progress:
+        raise HTTPException(409, "attempt is already completed")
+    # 3–4. The question is this quiz's, and has a text answer to transcribe into.
+    question = await session.get(Question, question_id)
+    if question is None or question.quiz_id != attempt.quiz_id:
+        raise HTTPException(404, "question not found on this attempt's quiz")
+    if question.question_type != QuestionType.fill_blank:
+        raise HTTPException(422, "only fill_blank questions accept a spoken answer")
+    # 5. Capability check before reading the body — a 503 for a disabled
+    #    feature shouldn't cost a 2 MiB upload first. Generic detail: which
+    #    backend (or none) is operator config, not something a caller learns
+    #    from an error body.
+    if transcriber is None:
+        raise HTTPException(503, "spoken answers are unavailable on this deployment")
+    # 6. Rate limit — counted before the paid call, so a burst that trips it
+    #    isn't also billed.
+    if not await rate_limit.check_and_count(redis, current_user.id, "transcription", settings.voice_calls_per_hour):
+        raise HTTPException(429, "too many voice requests this hour — try again later")
+    # 7. Bounded read, verbatim the zip-upload pattern in repos.py: read one
+    #    byte past the cap so worst-case memory is bounded regardless of what
+    #    the client sends, and validate_audio_upload sees max+1 as oversize.
+    data = await file.read(settings.audio_upload_max_bytes + 1)
+    # 8. Magic-byte allowlist. The declared content type is ignored on
+    #    purpose — see app/audio/validation.py.
+    try:
+        fmt = validate_audio_upload(data, settings.audio_upload_max_bytes)
+    except AudioValidationError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    quiz = await session.get(Quiz, attempt.quiz_id)
+    vocabulary = await _vocabulary_for_question(session, question, quiz)
+    clip = AudioClip(data=data, content_type=fmt.content_type, filename=f"answer.{fmt.extension}")
+
+    # 9. The paid call. A provider refusal is a 503 with nothing persisted,
+    #    so the learner can simply re-record — same disposition as a
+    #    concept-grading LLM failure in submit_answer.
+    started = datetime.now(UTC)
+    try:
+        result = await transcriber.transcribe(clip, vocabulary=vocabulary)
+    except AudioProviderError as exc:
+        raise HTTPException(503, "transcription is temporarily unavailable — please try again") from exc
+    duration_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
+
+    return TranscriptionOut(text=result.text, duration_ms=duration_ms)
 
 
 @router.post("/{attempt_id}/complete", response_model=AttemptResultsOut)
