@@ -370,7 +370,9 @@ export function getStudyGuideDiff(studyGuideId: string, otherStudyGuideId: strin
 // --- Quizzes ---
 
 export type QuizStatus = 'generating' | 'ready' | 'failed'
-export type QuestionType = 'mcq' | 'fill_blank'
+// fill_blank still exists for quizzes generated before short_answer replaced
+// it in the mix; new quizzes are mcq + short_answer.
+export type QuestionType = 'mcq' | 'fill_blank' | 'short_answer'
 export type FillBlankMode = 'code' | 'concept'
 
 // No answer key here (correct_index, correct_answer, explanation) — see
@@ -473,6 +475,11 @@ export interface AnswerResult {
   feedback: string | null
   correct_index: number | null
   correct_answer: string | null
+  // short_answer only, revealed on the same terms as feedback: the key
+  // points and which ones the judge found — score is hits/total, so the UI
+  // can show coverage rather than a bare number.
+  rubric: string[] | null
+  rubric_hits: boolean[] | null
 }
 
 export interface QuestionResult {
@@ -496,6 +503,10 @@ export interface QuestionResult {
   // for why: revealing this mid-quiz could leak upcoming correct answers).
   submitted_answer: string | null
   correct_answer: string | null
+  // short_answer only. rubric follows correct_answer's gate (completed only —
+  // the key points *are* the answer key); rubric_hits follows feedback's.
+  rubric: string[] | null
+  rubric_hits: boolean[] | null
 }
 
 export interface AttemptResults {

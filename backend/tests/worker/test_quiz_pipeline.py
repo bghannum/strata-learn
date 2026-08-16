@@ -18,8 +18,8 @@ from app.db.models import (
     Subsystem,
 )
 from app.db.session import async_session_factory
-from app.quizzing.fill_blank_generator import FillBlankOutput
 from app.quizzing.mcq_generator import MCQOutput
+from app.quizzing.short_answer_generator import ShortAnswerOutput
 from app.semantics.llm_provider import FakeLLMProvider, LLMResponse
 from app.worker.quiz_pipeline import generate_quiz
 
@@ -31,10 +31,13 @@ def _mcq_response() -> LLMResponse:
     )
 
 
-def _fill_blank_response() -> LLMResponse:
+def _short_answer_response() -> LLMResponse:
     return LLMResponse(
         text="", model="fake-model", stop_reason="end_turn", usage={},
-        parsed=FillBlankOutput(mode="code", blanked_text="uses ___", correct_answer="arq", acceptable_alternatives=[]),
+        parsed=ShortAnswerOutput(
+            prompt="Why does the worker use arq?", model_answer="Because jobs must outlive a request.",
+            rubric=["jobs outlive the request", "redis is already present"],
+        ),
     )
 
 
@@ -121,11 +124,11 @@ async def _make_pending_quiz(repo_id: uuid.UUID, study_guide_id: uuid.UUID, stat
 async def test_generate_quiz_success_persists_questions_and_marks_ready(pending_repo_factory) -> None:
     # Two citations, one section — identify_question_seeds sorts "a.py"
     # before "b.py" (same priority tier), and generation.py alternates
-    # mcq/fill_blank by seed position, so this exercises both generators in
-    # one deterministic pass: mcq from a.py, fill_blank from b.py.
+    # mcq/short_answer by seed position, so this exercises both generators in
+    # one deterministic pass: mcq from a.py, short_answer from b.py.
     repo_id, guide_id = await _make_study_guide_with_two_citations(pending_repo_factory)
     quiz_id = await _make_pending_quiz(repo_id, guide_id)
-    llm = FakeLLMProvider([_mcq_response(), _fill_blank_response()])
+    llm = FakeLLMProvider([_mcq_response(), _short_answer_response()])
 
     await generate_quiz({}, quiz_id=quiz_id, study_guide_id=guide_id, llm=llm)
 
@@ -134,7 +137,12 @@ async def test_generate_quiz_success_persists_questions_and_marks_ready(pending_
         assert quiz.status == QuizStatus.ready
         questions = list((await session.exec(select(Question).where(Question.quiz_id == quiz_id))).all())
     assert len(questions) == 2
-    assert {q.question_type.value for q in questions} == {"mcq", "fill_blank"}
+    assert {q.question_type.value for q in questions} == {"mcq", "short_answer"}
+    short = next(q for q in questions if q.question_type.value == "short_answer")
+    # The rubric is what the grader judges; the model answer rides in
+    # correct_answer for the results view.
+    assert short.rubric == ["jobs outlive the request", "redis is already present"]
+    assert short.correct_answer == "Because jobs must outlive a request."
     # Each question keeps a working link back to the Citation it was
     # generated from, not just a copied file_path/line range (Phase 5
     # Codex review — a range alone can't be traced to one Citation row
@@ -218,7 +226,7 @@ async def test_generated_questions_carry_their_subsystem_key(pending_repo_factor
 
     await generate_quiz(
         {}, quiz_id=quiz_id, study_guide_id=guide_id,
-        llm=FakeLLMProvider([_mcq_response(), _fill_blank_response()]),
+        llm=FakeLLMProvider([_mcq_response(), _short_answer_response()]),
     )
 
     async with async_session_factory() as session:
@@ -237,7 +245,7 @@ async def test_question_from_an_unclaimed_file_has_no_subsystem_key(pending_repo
 
     await generate_quiz(
         {}, quiz_id=quiz_id, study_guide_id=guide_id,
-        llm=FakeLLMProvider([_mcq_response(), _fill_blank_response()]),
+        llm=FakeLLMProvider([_mcq_response(), _short_answer_response()]),
     )
 
     async with async_session_factory() as session:
@@ -258,7 +266,7 @@ async def test_subsystem_keys_survive_a_reindex(pending_repo_factory) -> None:
     first_quiz = await _make_pending_quiz(repo_id, first_guide)
     await generate_quiz(
         {}, quiz_id=first_quiz, study_guide_id=first_guide,
-        llm=FakeLLMProvider([_mcq_response(), _fill_blank_response()]),
+        llm=FakeLLMProvider([_mcq_response(), _short_answer_response()]),
     )
 
     # Second snapshot for the same repo, with a differently-named subsystem for
@@ -277,7 +285,7 @@ async def test_subsystem_keys_survive_a_reindex(pending_repo_factory) -> None:
     second_quiz = await _make_pending_quiz(repo_id, second_guide)
     await generate_quiz(
         {}, quiz_id=second_quiz, study_guide_id=second_guide,
-        llm=FakeLLMProvider([_mcq_response(), _fill_blank_response()]),
+        llm=FakeLLMProvider([_mcq_response(), _short_answer_response()]),
     )
 
     async with async_session_factory() as session:

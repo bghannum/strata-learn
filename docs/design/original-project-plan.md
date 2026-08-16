@@ -531,6 +531,9 @@ Source code context: {code_snippet}
 
 ### 9.5 Fill-in-the-Blank Generator
 
+> **Superseded after Phase 8:** fill-in-the-blank was replaced in new quizzes by an open *short-answer* question type graded against a rubric of key points (`docs/prompts/short_answer_generator.v1.md`, `short_answer_grader.v1.md`). The blanked-term format, even at its most conceptual, tested recall of one word more than understanding. This section is kept as history; the grading in §10.2 likewise applies only to legacy fill-blank questions.
+
+
 ```
 SYSTEM:
 Generate a fill-in-the-blank question. Two modes:

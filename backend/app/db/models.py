@@ -70,7 +70,15 @@ class QuizStatus(str, Enum):
 
 class QuestionType(str, Enum):
     mcq = "mcq"
+    # Still valid for quizzes generated before short_answer replaced it in the
+    # generation mix; grading and results keep working, nothing new is made.
     fill_blank = "fill_blank"
+    # An open how/why question answered in a sentence or three and graded by
+    # an LLM judge against a rubric of key points — the "paragraph-style"
+    # counterpart to Phase 6's architecture narrative. Replaced fill_blank in
+    # new quizzes because a blanked term, however well chosen, still tests
+    # "guess the word I'm thinking of" more than understanding.
+    short_answer = "short_answer"
 
 
 class FillBlankMode(str, Enum):
@@ -365,9 +373,16 @@ class Question(SQLModel, table=True):
     fill_blank_mode: FillBlankMode | None = Field(
         default=None, sa_column=Column(_by_value(FillBlankMode), nullable=True)
     )
-    correct_answer: str | None = None  # fill_blank only
+    # fill_blank: the blanked term. short_answer: the *model answer* — a short
+    # reference paragraph shown after grading, never matched against.
+    correct_answer: str | None = None
     acceptable_alternatives: list = Field(default_factory=list, sa_column=Column(JSON))  # fill_blank only
     explanation: str | None = None  # mcq only — why the correct choice is correct (§9.4); fill_blank has none
+    # short_answer only: the 2–4 key points a complete answer must contain.
+    # The grader judges each one separately, and score = points hit / total —
+    # a deterministic number from a structured judgment, not a free float
+    # the model picked. What makes paragraph grading defensible.
+    rubric: list | None = Field(default=None, sa_column=Column(JSON))
     # Singular, not a list like TradeoffCard.evidence_refs — each question is
     # grounded in exactly one source Citation (the seed it was generated
     # from), never synthesized across several the way a trade-off claim is.
@@ -443,7 +458,11 @@ class AnswerSubmission(SQLModel, table=True):
     attempt_id: uuid.UUID = Field(foreign_key="attempt.id", index=True)
     question_id: uuid.UUID = Field(foreign_key="question.id", index=True)
     selected_index: int | None = None  # mcq
-    answer_text: str | None = None  # fill_blank
+    answer_text: str | None = None  # fill_blank, short_answer
+    # short_answer only: one boolean per Question.rubric entry, in order —
+    # which key points the judge found in the answer. Kept so results can
+    # show coverage rather than just a score.
+    rubric_hits: list | None = Field(default=None, sa_column=Column(JSON))
     # Graded immediately on submission (§10.1/§10.2), not deferred to
     # POST /attempts/{id}/complete — null only in the instant between insert
     # and the grading call within the same request.
