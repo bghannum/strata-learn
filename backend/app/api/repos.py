@@ -29,6 +29,7 @@ from fastapi import (
 )
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -510,6 +511,83 @@ async def get_repo_mastery(
             for b in buckets
         ],
     )
+
+
+class AttemptSummaryOut(BaseModel):
+    id: UUID
+    quiz_id: UUID
+    completed_at: datetime
+    score: float
+    question_count: int
+
+
+@router.get("/{repo_id}/attempts", response_model=list[AttemptSummaryOut])
+async def list_repo_attempts(
+    repo_id: UUID, session: AsyncSession = Depends(get_session), current_user: User = Depends(get_current_user)
+) -> list[AttemptSummaryOut]:
+    """Quiz history for RepoDetail.tsx: every completed attempt over any quiz
+    for this repo, newest first.
+
+    Deliberately not the same data as /mastery, which aggregates *answers* by
+    subsystem across attempts and so can't say "you scored 80% on a 5-question
+    quiz on Tuesday". This is the per-sitting record; that one is the per-topic
+    one.
+
+    Completed attempts only, for the same reason mastery excludes in-progress
+    ones — an abandoned attempt has no score to report, and listing it as
+    history would misrepresent a quiz the learner never finished. Resuming one
+    is already handled by POST /attempts.
+    """
+    repo = await session.get(Repo, repo_id)
+    if repo is None or repo.user_id != current_user.id:
+        raise HTTPException(404, "repo not found")
+
+    quiz_ids = list((await session.exec(select(Quiz.id).where(Quiz.repo_id == repo_id))).all())
+    if not quiz_ids:
+        return []
+
+    attempts = list(
+        (
+            await session.exec(
+                select(Attempt)
+                .where(
+                    Attempt.quiz_id.in_(quiz_ids),
+                    Attempt.user_id == current_user.id,
+                    Attempt.status == AttemptStatus.completed,
+                )
+                .order_by(Attempt.completed_at.desc())
+            )
+        ).all()
+    )
+    if not attempts:
+        return []
+
+    # One grouped count for every quiz involved rather than a query per row —
+    # a repo re-indexed a few times can easily have several quizzes, and the
+    # count is a property of the quiz, not of the attempt.
+    counts = dict(
+        (
+            await session.exec(
+                select(Question.quiz_id, func.count(Question.id))
+                .where(Question.quiz_id.in_({a.quiz_id for a in attempts}))
+                .group_by(Question.quiz_id)
+            )
+        ).all()
+    )
+
+    return [
+        AttemptSummaryOut(
+            id=a.id,
+            quiz_id=a.quiz_id,
+            completed_at=a.completed_at,
+            # Both are set together on completion (api/attempts.py), so a
+            # completed attempt missing either is a bug, not a state to render.
+            score=a.score if a.score is not None else 0.0,
+            question_count=counts.get(a.quiz_id, 0),
+        )
+        for a in attempts
+        if a.completed_at is not None
+    ]
 
 
 @router.get("/{repo_id}/snapshot", response_model=AnalysisSnapshot)

@@ -68,6 +68,7 @@ export interface StudyGuide {
   repo_id: string
   snapshot_id: string
   version: number
+  generated_at: string
   sections: Section[]
 }
 
@@ -328,6 +329,22 @@ export interface Attempt {
   quiz_id: string
   status: AttemptStatus
   score: number | null
+}
+
+/** One completed sitting, for RepoDetail.tsx's quiz-history panel. Distinct
+ *  from Mastery, which aggregates answers by subsystem across attempts and so
+ *  can't say "80% on a 5-question quiz on Tuesday". */
+export interface AttemptSummary {
+  id: string
+  quiz_id: string
+  completed_at: string
+  score: number
+  question_count: number
+}
+
+/** Newest first; completed attempts only. */
+export function listRepoAttempts(repoId: string): Promise<AttemptSummary[]> {
+  return request(`/repos/${repoId}/attempts`)
 }
 
 export interface AnswerResult {

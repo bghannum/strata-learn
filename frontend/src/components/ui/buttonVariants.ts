@@ -19,10 +19,16 @@ const FOCUS_RING =
 // a second font-size utility from a different call site on top of one set
 // here would hit the same "no guaranteed cascade order" problem the size
 // variant exists to avoid (see SIZE_PADDING's comment).
+// Border *width* only — the color belongs to each variant below. Having the
+// base set `border-transparent` meant `secondary` stacked a second
+// border-color utility on the same element, and Tailwind resolves that by
+// stylesheet order rather than className order (the same trap SIZE_PADDING
+// documents): the transparent one won, so the secondary button's outline
+// never rendered.
 const BASE =
   `inline-flex items-center justify-center gap-1.5 cursor-pointer no-underline ` +
   `font-organic-heading font-normal leading-[1.2] rounded-full ` +
-  `border border-transparent disabled:opacity-45 disabled:cursor-not-allowed ` +
+  `border disabled:opacity-45 disabled:cursor-not-allowed ` +
   `[&>svg]:block ${FOCUS_RING}`
 
 export type ButtonSize = 'md' | 'lg'
@@ -46,7 +52,8 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   // for small text like a button label. Shifted one tier darker
   // (700/800/900 instead of 500/600/700) clears 4.5:1 (5.72:1) while
   // keeping the same "hover/press darkens further" progression.
-  primary: 'bg-organic-accent-700 text-organic-bg hover:bg-organic-accent-800 active:bg-organic-accent-900',
+  primary:
+    'border-transparent bg-organic-accent-700 text-organic-bg hover:bg-organic-accent-800 active:bg-organic-accent-900',
   secondary: cn(
     'text-organic-text border-organic-divider',
     'hover:bg-[color-mix(in_srgb,var(--color-organic-text)_7%,transparent)]',
@@ -56,12 +63,15 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   // fix as primary, and matches Organic's readme guidance to use a deep
   // ramp step for accent-colored text rather than the accent itself.
   ghost: cn(
-    'px-[var(--spacing-organic-1)] text-organic-accent-700',
+    'border-transparent px-[var(--spacing-organic-1)] text-organic-accent-700',
     'hover:bg-[color-mix(in_srgb,var(--color-organic-accent)_10%,transparent)]',
     'active:bg-[color-mix(in_srgb,var(--color-organic-accent)_18%,transparent)]',
   ),
   // 36px, matching .btn-icon exactly (Tailwind's size-9 = 9 * 4px = 36px).
-  icon: cn('size-9 p-0 text-organic-text', 'hover:bg-[color-mix(in_srgb,var(--color-organic-text)_7%,transparent)]'),
+  icon: cn(
+    'size-9 border-transparent p-0 text-organic-text',
+    'hover:bg-[color-mix(in_srgb,var(--color-organic-text)_7%,transparent)]',
+  ),
 }
 
 export function buttonClasses(variant: ButtonVariant = 'primary', block = false, size: ButtonSize = 'md'): string {

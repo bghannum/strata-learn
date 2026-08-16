@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
@@ -35,7 +36,12 @@ async def test_get_study_guide_returns_ordered_sections_and_citations(pending_re
         )
 
         async with async_session_factory() as session:
-            guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=1)
+            guide = StudyGuide(
+                repo_id=repo_id,
+                snapshot_id=snapshot_id,
+                version=1,
+                generated_at=datetime(2026, 8, 1, 14, 20, tzinfo=UTC),
+            )
             session.add(guide)
             await session.flush()
 
@@ -76,6 +82,9 @@ async def test_get_study_guide_returns_ordered_sections_and_citations(pending_re
     body = response.json()
     assert body["id"] == str(guide_id)
     assert body["version"] == 1
+    # RepoDetail.tsx's "generated N hours ago" line reads this — the guide's own
+    # timestamp, not the snapshot's indexed_at.
+    assert datetime.fromisoformat(body["generated_at"]) == datetime(2026, 8, 1, 14, 20, tzinfo=UTC)
     # Returned in `order`, not insertion order (section_2 was added first above).
     assert [s["section_type"] for s in body["sections"]] == ["overview", "tradeoffs"]
     assert len(body["sections"][0]["citations"]) == 1

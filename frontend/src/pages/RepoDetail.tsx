@@ -11,11 +11,13 @@ import {
   getSnapshot,
   getUpdateStatus,
   isAbortError,
+  listRepoAttempts,
   pollQuiz,
   PollTimeoutError,
   reindexRepo,
   useIndexingProgress,
   type AnalysisSnapshot,
+  type AttemptSummary,
   type FeedbackMode,
   type Mastery,
   type Quiz,
@@ -24,8 +26,10 @@ import {
   type StudyGuide,
   type UpdateStatus,
 } from '../api/client'
+import { useBreadcrumb } from '../components/breadcrumb'
 import IndexingProgress from '../components/IndexingProgress'
 import Button from '../components/ui/Button'
+import Tag from '../components/ui/Tag'
 import { cn } from '../components/ui/cn'
 
 const QUIZ_TIMEOUT_MESSAGE = 'Quiz generation is taking longer than expected. Refresh the page to check its status.'
@@ -44,18 +48,61 @@ const UNKNOWN_REASONS: Record<string, string> = {
   no_indexed_commit: 'No commit recorded for this index',
 }
 
+// Each unit paired with how many of it fit in the next one up — the loop below
+// divides its way up the list until the number is small enough to read.
+const RELATIVE_UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
+  ['second', 60],
+  ['minute', 60],
+  ['hour', 24],
+  ['day', 7],
+  ['week', 4.35],
+  ['month', 12],
+]
+
+const RELATIVE_FORMAT = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
+
+/** "2 hours ago" — a guide's age is the useful fact here, not its wall-clock
+ *  timestamp: the question this line answers is "is this current?". */
+function relativeTime(iso: string): string {
+  let value = (new Date(iso).getTime() - Date.now()) / 1000
+  for (const [unit, perNext] of RELATIVE_UNITS) {
+    if (Math.abs(value) < perNext) return RELATIVE_FORMAT.format(Math.round(value), unit)
+    value /= perNext
+  }
+  return RELATIVE_FORMAT.format(Math.round(value), 'year')
+}
+
+/** "Today, 14:20" / "Yesterday, 09:05" / "3 Aug, 09:05" — quiz history is
+ *  mostly read as a recent sequence, so the last two days get names and
+ *  everything older gets a date. */
+function sittingTimestamp(iso: string): string {
+  const date = new Date(iso)
+  const time = date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  const startOfToday = new Date()
+  startOfToday.setHours(0, 0, 0, 0)
+  const daysAgo = Math.floor((startOfToday.getTime() - date.getTime()) / 86_400_000) + 1
+  if (daysAgo <= 0) return `Today, ${time}`
+  if (daysAgo === 1) return `Yesterday, ${time}`
+  return `${date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}, ${time}`
+}
+
+// accent-2 (sage) is this system's positive voice; the warm outlined tag marks
+// a score worth revisiting. Deliberately *not* organic-danger, which is scoped
+// to actual failures (see organic.css) — a 55% is a study prompt, not an error.
+const PASSING_SCORE = 0.7
+
 function MasterySection({ mastery }: { mastery: Mastery }) {
   if (mastery.completed_attempts === 0) return null
 
   return (
-    <div className="mt-5.5 rounded-2xl border border-organic-divider p-3.5">
-      <h2 className="text-sm font-semibold">
+    <div className="mt-5.5 rounded-[32px] bg-organic-surface p-7">
+      <h2 className="text-lg font-semibold">
         Mastery{' '}
-        <span className="font-normal opacity-70">
+        <span className="text-[12.5px] font-normal opacity-55">
           across {mastery.completed_attempts} completed {mastery.completed_attempts === 1 ? 'quiz' : 'quizzes'}
         </span>
       </h2>
-      <ul className="mt-3 flex flex-col gap-2">
+      <ul className="mt-4 flex flex-col gap-2">
         {mastery.buckets.map((bucket) => {
           const percent = Math.round(bucket.average_score * 100)
           // First and last point of the bucket's own history — enough to say
@@ -66,7 +113,7 @@ function MasterySection({ mastery }: { mastery: Mastery }) {
           const delta = bucket.history.length > 1 ? Math.round((last.average_score - first.average_score) * 100) : null
           return (
             <li key={bucket.subsystem_key} className="flex items-center gap-3 text-sm">
-              <span className="w-44 shrink-0 truncate">{bucket.name}</span>
+              <span className="w-28 shrink-0 truncate sm:w-44">{bucket.name}</span>
               <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-organic-divider">
                 <span
                   className="block h-full rounded-full bg-organic-accent-700"
@@ -74,7 +121,9 @@ function MasterySection({ mastery }: { mastery: Mastery }) {
                 />
               </span>
               <span className="w-10 shrink-0 text-right tabular-nums">{percent}%</span>
-              <span className="w-24 shrink-0 text-right opacity-70 tabular-nums">
+              {/* The trend column is the first thing to go on a phone — the
+              score itself is the number being read. */}
+              <span className="hidden w-24 shrink-0 text-right opacity-70 tabular-nums sm:block">
                 {delta === null ? `${bucket.answered} answered` : `${delta >= 0 ? '+' : ''}${delta} pts`}
               </span>
             </li>
@@ -100,6 +149,74 @@ function UpdateStatusBadge({ status }: { status: UpdateStatus }) {
   return <p className="text-sm opacity-70">{UNKNOWN_REASONS[status.reason ?? ''] ?? 'Update status unknown'}</p>
 }
 
+/** The mockup's chip row: one per named section, with deep-dives collapsed into
+ *  a single count — a guide can carry several and listing each title turns the
+ *  row into a wall. */
+function sectionChips(guide: StudyGuide): string[] {
+  const deepDives = guide.sections.filter((section) => section.section_type === 'deep_dive').length
+  const chips = guide.sections
+    .filter((section) => section.section_type !== 'deep_dive')
+    .map((section) => section.title)
+  if (deepDives > 0) chips.push(`${deepDives} deep ${deepDives === 1 ? 'dive' : 'dives'}`)
+  return chips
+}
+
+function QuizHistory({
+  attempts,
+  error,
+  onRetry,
+}: {
+  attempts: AttemptSummary[] | null
+  error: string | null
+  onRetry: () => void
+}) {
+  return (
+    <section className="rounded-[32px] bg-organic-surface p-7">
+      <h2 className="text-lg font-semibold">Quiz history</h2>
+      {/* An explicit failure, not a permanent "Loading…" — ui-spec.md §8 asks
+      every data-bearing view for a real error state, and this one is the most
+      tempting to skip because the rest of the page still works without it. */}
+      {error && (
+        <div className="mt-3.5 rounded-2xl bg-organic-danger-bg p-3.5">
+          <p className="text-sm text-organic-danger">{error}</p>
+          <button type="button" onClick={onRetry} className="mt-1.5 text-sm font-semibold underline">
+            Try again
+          </button>
+        </div>
+      )}
+      {!error && attempts === null && <p className="mt-3.5 text-[13px] opacity-55">Loading…</p>}
+      {!error && attempts !== null && attempts.length === 0 && (
+        <p className="mt-3.5 text-[13px] leading-relaxed opacity-70">
+          No completed quizzes yet. Scores and dates land here once you finish one.
+        </p>
+      )}
+      {attempts !== null && attempts.length > 0 && (
+        <ul className="mt-3.5 flex flex-col">
+          {attempts.map((attempt) => {
+            const percent = Math.round(attempt.score * 100)
+            return (
+              <li key={attempt.id} className="border-t border-organic-divider first:border-t-0">
+                <Link
+                  to={`/attempts/${attempt.id}`}
+                  className="-mx-2 flex items-center gap-3 rounded-2xl px-2 py-3 text-sm hover:bg-[color-mix(in_srgb,var(--color-organic-text)_5%,transparent)]"
+                >
+                  <span className="min-w-0 flex-1 truncate">{sittingTimestamp(attempt.completed_at)}</span>
+                  <span className="shrink-0 text-[12.5px] opacity-55">
+                    {attempt.question_count} {attempt.question_count === 1 ? 'question' : 'questions'}
+                  </span>
+                  <Tag variant={attempt.score >= PASSING_SCORE ? 'accent-2' : 'outline'} className="tabular-nums">
+                    {percent}%
+                  </Tag>
+                </Link>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </section>
+  )
+}
+
 function RepoDetail() {
   const { repoId } = useParams<{ repoId: string }>()
   const [repo, setRepo] = useState<Repo | null>(null)
@@ -121,9 +238,16 @@ function RepoDetail() {
   const [reindexing, setReindexing] = useState(false)
   const [reindexError, setReindexError] = useState<string | null>(null)
   const [mastery, setMastery] = useState<Mastery | null>(null)
+  const [attempts, setAttempts] = useState<AttemptSummary[] | null>(null)
+  const [attemptsError, setAttemptsError] = useState<string | null>(null)
+  // Bumped by the panel's "Try again", which is the only way to re-run the
+  // fetch below without a full page reload.
+  const [attemptsReload, setAttemptsReload] = useState(0)
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const [updateError, setUpdateError] = useState<string | null>(null)
+
+  useBreadcrumb(repo?.display_name)
 
   useEffect(() => {
     if (!repoId) return
@@ -259,6 +383,19 @@ function RepoDetail() {
       })
   }, [status, repoId, quiz])
 
+  // Same reload trigger as mastery, for the same reason: finishing a quiz is
+  // the one event that adds a row here.
+  useEffect(() => {
+    if (status !== 'ready' || !repoId) return
+    setAttemptsError(null)
+    listRepoAttempts(repoId)
+      .then(setAttempts)
+      // Scoped to the panel — an unreachable history shouldn't take the page
+      // down with it, but it does have to say so rather than sit on "Loading…"
+      // forever (found via Codex's review of this change).
+      .catch((err) => setAttemptsError(err instanceof ApiError ? err.message : 'Could not load quiz history.'))
+  }, [status, repoId, quiz, attemptsReload])
+
   function handleCheckUpdates() {
     if (!repoId) return
     setCheckingUpdates(true)
@@ -285,7 +422,7 @@ function RepoDetail() {
 
   if (!loaded) {
     return (
-      <main className="mx-auto max-w-2xl p-7">
+      <main className="mx-auto max-w-5xl p-7">
         <p className="text-sm opacity-70">Loading…</p>
       </main>
     )
@@ -293,7 +430,7 @@ function RepoDetail() {
 
   if (loadError || !repo) {
     return (
-      <main className="mx-auto max-w-2xl p-7">
+      <main className="mx-auto max-w-5xl p-7">
         <div className="rounded-2xl bg-organic-danger-bg p-3.5">
           <p className="text-sm text-organic-danger">{loadError ?? 'Repository not found.'}</p>
         </div>
@@ -301,15 +438,39 @@ function RepoDetail() {
     )
   }
 
-  return (
-    <main className="mx-auto max-w-2xl p-7">
-      <Link to="/" className="text-[13px] opacity-60 hover:underline">
-        ← All repositories
-      </Link>
-      <h1 className="mt-2 mb-1 text-[34px] leading-tight">{repo.display_name}</h1>
-      <p className="font-mono text-xs opacity-55">{repo.source_uri}</p>
+  const isReady = status === 'ready'
 
-      <div className="mt-5.5 rounded-[32px] bg-organic-surface p-7">
+  return (
+    <main className="mx-auto max-w-5xl p-7">
+      <Link to="/" className="text-[13px] opacity-60 hover:underline">
+        ← Back to shelf
+      </Link>
+
+      {/* Title and the two things you'd come here to do, on one line — the
+      mockup's header treatment. The primary action is the guide; "view raw
+      analysis" is the debug affordance ui-spec.md §6.4 asks for, so it stays
+      secondary and reveals its panel at the foot of the page. */}
+      <div className="mt-2 mb-5.5 flex flex-wrap items-end justify-between gap-x-4 gap-y-3.5">
+        <div className="min-w-0">
+          <h1 className="mb-1 text-[34px] leading-tight">{repo.display_name}</h1>
+          <p className="truncate font-mono text-xs opacity-55">
+            {repo.source_uri}
+            {snapshot?.commit_hash && ` · @ ${snapshot.commit_hash.slice(0, 7)}`}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <Button variant="secondary" onClick={() => setShowRaw((visible) => !visible)} aria-expanded={showRaw}>
+            {showRaw ? 'Hide raw analysis' : 'View raw analysis'}
+          </Button>
+          {isReady && guide && (
+            <Link to={`/study-guides/${guide.id}`}>
+              <Button>Open study guide</Button>
+            </Link>
+          )}
+        </div>
+      </div>
+
+      <div className="rounded-[32px] bg-organic-surface p-7">
         <IndexingProgress
           status={status}
           lastNonTerminalStatus={lastNonTerminalStatus}
@@ -321,9 +482,12 @@ function RepoDetail() {
         />
       </div>
 
-      {status === 'ready' && mastery && <MasterySection mastery={mastery} />}
-
-      {status === 'ready' && updateStatus && (
+      {/* Below the stepper, not above it: the mockup's reading order is
+      title → indexing → panels, and "up to date with the remote" is a
+      footnote to the indexing state rather than a headline of its own. It
+      still lands above the study guide, which is what matters when it's the
+      "these commits are newer than this guide" version. */}
+      {isReady && updateStatus && (
         <div className="mt-5.5 flex flex-wrap items-center gap-3 rounded-2xl border border-organic-divider p-3.5">
           <UpdateStatusBadge status={updateStatus} />
           {updateStatus.reason !== 'zip_upload' && (
@@ -347,85 +511,116 @@ function RepoDetail() {
         </div>
       )}
 
-      {status === 'ready' && (
-        <div className="mt-5.5 flex flex-wrap items-center gap-3">
-          {guide && (
-            <Link to={`/study-guides/${guide.id}`}>
-              <Button>View Study Guide</Button>
-            </Link>
-          )}
-          {guideError && (
-            <div className="rounded-2xl bg-organic-danger-bg p-3.5">
-              <p className="text-sm text-organic-danger">{guideError}</p>
-            </div>
-          )}
+      {isReady && (
+        // Two panels side by side once there's room: what this repo produced,
+        // and how you've done on it. They stack on narrow viewports.
+        <div className="mt-5.5 grid items-start gap-5.5 lg:grid-cols-[1.55fr_1fr]">
+          <section className="rounded-[32px] bg-organic-surface p-7">
+            <h2 className="text-lg font-semibold">Study guide</h2>
 
-          {guide && quizChecked && !quiz && (
-            <>
-              {/* Same has-[:checked]: segmented-control pattern as AddRepo.tsx's
-              Git URL/Upload zip toggle. */}
-              <div className="inline-flex overflow-hidden rounded-full border border-organic-divider">
-                {(['end_of_quiz', 'immediate'] as const).map((mode, index) => (
-                  <label
-                    key={mode}
-                    className={cn(
-                      'cursor-pointer px-3 py-1.5 text-xs has-[:checked]:bg-organic-accent-700 has-[:checked]:text-organic-bg',
-                      index > 0 && 'border-l border-organic-divider',
-                    )}
-                  >
-                    <input
-                      type="radio"
-                      name="feedbackMode"
-                      className="sr-only"
-                      checked={feedbackMode === mode}
-                      onChange={() => setFeedbackMode(mode)}
-                    />
-                    {mode === 'end_of_quiz' ? 'End of quiz' : 'As I go'}
-                  </label>
-                ))}
+            {guideError && (
+              <div className="mt-3.5 rounded-2xl bg-organic-danger-bg p-3.5">
+                <p className="text-sm text-organic-danger">{guideError}</p>
               </div>
-              <Button variant="secondary" onClick={handleGenerateQuiz} disabled={quizPending}>
-                {quizPending ? 'Generating quiz…' : 'Generate Quiz'}
-              </Button>
-            </>
-          )}
-          {quiz?.status === 'ready' && (
-            <Link to={`/quizzes/${quiz.id}`}>
-              <Button variant="secondary">Take Quiz</Button>
-            </Link>
-          )}
-          {quiz?.status === 'failed' && (
-            <div className="rounded-2xl bg-organic-danger-bg p-3.5">
-              <p className="text-sm text-organic-danger">
-                Quiz generation failed.{' '}
-                <button type="button" onClick={handleGenerateQuiz} className="font-semibold underline">
-                  Try again
-                </button>
-              </p>
+            )}
+
+            {guide && (
+              <>
+                <p className="mt-1.5 text-[13px] opacity-70">
+                  {guide.sections.length} {guide.sections.length === 1 ? 'section' : 'sections'}
+                  {' · '}
+                  {guide.sections.filter((section) => section.diagram_mermaid).length} diagrams
+                  {' · '}
+                  {guide.sections.reduce((total, section) => total + section.citations.length, 0)} citations
+                  {' · generated '}
+                  {relativeTime(guide.generated_at)}
+                </p>
+
+                <div className="mt-3.5 flex flex-wrap gap-2">
+                  {sectionChips(guide).map((chip) => (
+                    <Tag key={chip} className="text-[12px]">
+                      {chip}
+                    </Tag>
+                  ))}
+                </div>
+              </>
+            )}
+
+            <div className="mt-5.5 flex flex-wrap items-center gap-3">
+              {guide && (
+                <Link to={`/study-guides/${guide.id}`}>
+                  <Button>Read it</Button>
+                </Link>
+              )}
+
+              {guide && quizChecked && !quiz && (
+                <>
+                  {/* Same has-[:checked]: segmented-control pattern as AddRepo.tsx's
+                  Git URL/Upload zip toggle. */}
+                  <div className="inline-flex overflow-hidden rounded-full border border-organic-divider">
+                    {(['end_of_quiz', 'immediate'] as const).map((mode, index) => (
+                      <label
+                        key={mode}
+                        className={cn(
+                          'cursor-pointer px-3 py-1.5 text-xs has-[:checked]:bg-organic-accent-700 has-[:checked]:text-organic-bg',
+                          index > 0 && 'border-l border-organic-divider',
+                        )}
+                      >
+                        <input
+                          type="radio"
+                          name="feedbackMode"
+                          className="sr-only"
+                          checked={feedbackMode === mode}
+                          onChange={() => setFeedbackMode(mode)}
+                        />
+                        {mode === 'end_of_quiz' ? 'End of quiz' : 'As I go'}
+                      </label>
+                    ))}
+                  </div>
+                  <Button variant="secondary" onClick={handleGenerateQuiz} disabled={quizPending}>
+                    {quizPending ? 'Generating quiz…' : 'Generate quiz'}
+                  </Button>
+                </>
+              )}
+              {quiz?.status === 'ready' && (
+                <Link to={`/quizzes/${quiz.id}`}>
+                  <Button variant="secondary">Take quiz</Button>
+                </Link>
+              )}
             </div>
-          )}
-          {quizError && (
-            <div className="rounded-2xl bg-organic-danger-bg p-3.5">
-              <p className="text-sm text-organic-danger">{quizError}</p>
-            </div>
-          )}
+
+            {quiz?.status === 'failed' && (
+              <div className="mt-3.5 rounded-2xl bg-organic-danger-bg p-3.5">
+                <p className="text-sm text-organic-danger">
+                  Quiz generation failed.{' '}
+                  <button type="button" onClick={handleGenerateQuiz} className="font-semibold underline">
+                    Try again
+                  </button>
+                </p>
+              </div>
+            )}
+            {quizError && (
+              <div className="mt-3.5 rounded-2xl bg-organic-danger-bg p-3.5">
+                <p className="text-sm text-organic-danger">{quizError}</p>
+              </div>
+            )}
+          </section>
+
+          <QuizHistory
+            attempts={attempts}
+            error={attemptsError}
+            onRetry={() => setAttemptsReload((count) => count + 1)}
+          />
         </div>
       )}
 
-      <div className="mt-8 border-t border-organic-divider pt-4">
-        <button
-          type="button"
-          onClick={() => setShowRaw((visible) => !visible)}
-          className="text-sm opacity-60 hover:opacity-100"
-        >
-          {showRaw ? 'Hide' : 'View'} raw analysis
-        </button>
-        {showRaw && (
-          <pre className="mt-2 max-h-96 overflow-auto rounded-2xl bg-organic-neutral-900 p-4 text-xs text-organic-neutral-200">
-            {JSON.stringify(snapshot, null, 2)}
-          </pre>
-        )}
-      </div>
+      {isReady && mastery && <MasterySection mastery={mastery} />}
+
+      {showRaw && (
+        <pre className="mt-5.5 max-h-96 overflow-auto rounded-2xl bg-organic-neutral-900 p-4 text-xs text-organic-neutral-200">
+          {JSON.stringify(snapshot, null, 2)}
+        </pre>
+      )}
     </main>
   )
 }

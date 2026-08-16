@@ -523,9 +523,14 @@ async def _completed_attempt(
     answers: list[tuple[str | None, float]],
     version: int = 1,
     minutes: int = 0,
-) -> None:
+) -> UUID:
     """A study guide, a quiz with one question per answer, and a completed
-    attempt over it — the shape mastery aggregates from."""
+    attempt over it — the shape mastery aggregates from. Returns the attempt id.
+
+    Attempt.score mirrors what api/attempts.py's completion actually writes (the
+    mean over every question), so the quiz-history tests below read a realistic
+    row rather than one only mastery's own recomputation would accept.
+    """
     async with async_session_factory() as session:
         guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=version)
         session.add(guide)
@@ -549,6 +554,7 @@ async def _completed_attempt(
         attempt = Attempt(
             quiz_id=quiz.id, user_id=user_id, status=AttemptStatus.completed,
             completed_at=datetime(2026, 8, 1, tzinfo=UTC) + timedelta(minutes=minutes),
+            score=sum(score for _key, score in answers) / len(answers) if answers else 0.0,
         )
         session.add(attempt)
         await session.flush()
@@ -557,6 +563,7 @@ async def _completed_attempt(
                 AnswerSubmission(attempt_id=attempt.id, question_id=question.id, selected_index=0, score=score)
             )
         await session.commit()
+        return attempt.id
 
 
 async def test_mastery_is_empty_before_any_quiz(pending_repo_factory) -> None:
@@ -657,6 +664,70 @@ async def test_mastery_is_scoped_to_its_owner(pending_repo_factory) -> None:
     with TestClient(app) as other:
         await login_as_new_user(other)
         assert other.get(f"/repos/{repo_id}/mastery").status_code == 404
+
+
+# --- Quiz history (RepoDetail.tsx's per-sitting record, not mastery's per-topic one) ---
+
+
+async def test_quiz_history_is_empty_before_any_attempt(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        repo_id, _snapshot_id = await _git_repo(client, pending_repo_factory)
+        response = client.get(f"/repos/{repo_id}/attempts")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+async def test_quiz_history_lists_completed_attempts_newest_first(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=UUID(user["id"])
+        )
+        older = await _completed_attempt(
+            repo_id, snapshot_id, UUID(user["id"]), [("app/api", 1.0), ("app/db", 0.0)], version=1, minutes=0
+        )
+        newer = await _completed_attempt(
+            repo_id, snapshot_id, UUID(user["id"]), [("app/api", 1.0)], version=2, minutes=60
+        )
+
+        body = client.get(f"/repos/{repo_id}/attempts").json()
+
+    assert [row["id"] for row in body] == [str(newer), str(older)]
+    assert body[0]["score"] == 1.0
+    assert body[0]["question_count"] == 1
+    assert body[1]["score"] == 0.5
+    # The count is the quiz's, not the number of answers submitted — a quiz
+    # finished early still reads "2 questions".
+    assert body[1]["question_count"] == 2
+
+
+async def test_quiz_history_excludes_in_progress_attempts(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=UUID(user["id"])
+        )
+        async with async_session_factory() as session:
+            guide = StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=1)
+            session.add(guide)
+            await session.flush()
+            quiz = Quiz(repo_id=repo_id, study_guide_id=guide.id, status=QuizStatus.ready)
+            session.add(quiz)
+            await session.flush()
+            session.add(Attempt(quiz_id=quiz.id, user_id=UUID(user["id"]), status=AttemptStatus.in_progress))
+            await session.commit()
+
+        assert client.get(f"/repos/{repo_id}/attempts").json() == []
+
+
+async def test_quiz_history_is_scoped_to_its_owner(pending_repo_factory) -> None:
+    with TestClient(app) as owner:
+        repo_id, _snapshot_id = await _git_repo(owner, pending_repo_factory)
+
+    with TestClient(app) as other:
+        await login_as_new_user(other)
+        assert other.get(f"/repos/{repo_id}/attempts").status_code == 404
 
 
 # --- #73: re-indexing a healthy repo ---
