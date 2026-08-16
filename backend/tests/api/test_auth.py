@@ -1,6 +1,5 @@
-from fastapi.testclient import TestClient
-
 import pytest
+from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.db.models import SourceType

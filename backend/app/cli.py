@@ -22,6 +22,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.auth.security import hash_password
 from app.db.models import Session, User
+from app.db.session import async_session_factory
 
 
 async def reset_password(session: AsyncSession, email: str, new_password: str) -> None:
@@ -40,8 +41,6 @@ async def reset_password(session: AsyncSession, email: str, new_password: str) -
 
 
 async def _run_reset_password(email: str, new_password: str) -> None:
-    from app.db.session import async_session_factory  # deferred: engine construction reads settings
-
     async with async_session_factory() as session:
         await reset_password(session, email, new_password)
 
