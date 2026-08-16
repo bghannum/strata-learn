@@ -42,6 +42,20 @@ def test_a_selected_backend_without_credentials_reports_off_and_why(monkeypatch)
         assert client.get("/voice/capabilities").json()["transcription"] is False
 
 
+def test_openai_backend_with_a_key_reports_on(monkeypatch) -> None:
+    # Constructing the provider never makes a network call, so this is safe
+    # with a dummy key.
+    monkeypatch.setattr(settings, "transcription_backend", "openai")
+    monkeypatch.setattr(settings, "speech_backend", "openai")
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test-not-real")
+
+    assert transcription_status().enabled is True
+    assert speech_status().enabled is True
+    with TestClient(app) as client:
+        register_test_user(client)
+        assert client.get("/voice/capabilities").json() == {"transcription": True, "speech": True}
+
+
 def test_local_backend_without_the_voice_extra_reports_off_and_why(monkeypatch) -> None:
     # CI never installs the extra, so this is the branch it exercises.
     monkeypatch.setattr(settings, "speech_backend", "local")

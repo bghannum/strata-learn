@@ -196,6 +196,7 @@ The worker commits final Layer B rows with `generating` atomically, and the stud
 | `PATCH` | `/attempts/{attempt_id}/answers/{question_id}` | Submit and immediately grade one answer |
 | `POST` | `/attempts/{attempt_id}/complete` | Finalize an attempt's score and return full results |
 | `GET` | `/attempts/{attempt_id}` | Fetch an attempt's current results (supports a direct visit or refresh) |
+| `POST` | `/attempts/{attempt_id}/answers/{question_id}/transcription` | Upload a microphone recording, get back an *editable* transcript; writes nothing — only the learner-confirmed text is ever graded, via the existing `PATCH` |
 | `GET` | `/voice/capabilities` | Whether transcription and speech are on for this deployment — booleans only, never the backend |
 
 The broader API in the [original project plan](design/original-project-plan.md) is a target surface, not a description of current routes.
@@ -210,7 +211,7 @@ Phase 8 adds two request-based audio capabilities: read-aloud for persisted stud
 
 The voice layer lives in `app/audio/` — deliberately its own package, not part of `app/semantics/`, whose `LLMProvider` is the Layer B abstraction. It defines two provider protocols, `TranscriptionProvider` and `SpeechProvider`, each with a hosted OpenAI backend and an in-process self-hosted one (faster-whisper; Kokoro via ONNX), selected per capability by `TRANSCRIPTION_BACKEND` / `SPEECH_BACKEND` and off by default. `app/audio/dependencies.py` is the single place a capability is decided on or off; `GET /voice/capabilities` reports the answer as booleans so the UI never renders a control that would 503; the *reason* a capability is off is logged once at startup and nowhere else. The pure pieces — Markdown-to-speakable text, magic-byte upload validation, vocabulary hints that never include the answer key, per-call metering — are deterministic and unit-tested without any provider. Rationale, including the deliberate reversal of the original "hosted only" scope, is [ADR-010](adr/ADR-010-voice-providers-and-self-hosted-backends.md).
 
-Delivered so far: the protocols, fakes, pure modules, config, and the capabilities endpoint. Landing next, in order: hosted transcription and the spoken-answer UI, hosted read-aloud, the local backends, and the evaluation harness whose committed report compares them.
+Delivered so far: the protocols, fakes, pure modules, config, the capabilities endpoint, and hosted transcription — `OpenAITranscriptionProvider` behind `POST /attempts/{id}/answers/{qid}/transcription`, whose gate ladder runs cheapest-and-least-revealing first (ownership 404 → completed 409 → not-fill-blank 422 → capability 503 → hourly rate limit 429 → bounded read → magic-byte allowlist 422) and reaches the paid call last. Vocabulary hints are built from the question's seed citation, file path, and subsystem name, with the answer key as the exclusion list. Landing next, in order: the spoken-answer UI, hosted read-aloud, the local backends, and the evaluation harness whose committed report compares them.
 
 ## Decision references
 
