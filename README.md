@@ -70,6 +70,8 @@ Add a repository from the Dashboard, watch it index, and open the generated stud
 
 On the first visit, register the app's single account using the `REGISTRATION_SECRET` from `.env`. Registration closes permanently after that account is created; later visits use the normal login flow.
 
+The API and frontend containers hot-reload from the mounted source, but the **worker does not** — arq loads the code once at start. After changing anything under `app/quizzing/`, `app/generation/`, `app/semantics/`, or `app/worker/`, run `docker compose restart worker` or the next indexing/quiz job will run the old code.
+
 Stop the stack with `docker compose down`. Add `-v` only when you intentionally want to delete the local PostgreSQL volume.
 
 ## Local development without Docker
