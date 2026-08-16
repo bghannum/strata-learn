@@ -5,6 +5,7 @@ relationships anywhere (see repos.py's own plain select() pattern) — sections
 and citations are fetched with their own queries and assembled here.
 """
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -64,6 +65,11 @@ class StudyGuideOut(BaseModel):
     repo_id: UUID
     snapshot_id: UUID
     version: int
+    # RepoDetail.tsx's "generated N hours ago" line. The snapshot's indexed_at
+    # is the closest already-exposed timestamp, but it dates the *analysis*,
+    # not the writing pass that ran after it — and a re-run of generation over
+    # an unchanged snapshot would leave it stale.
+    generated_at: datetime
     sections: list[SectionOut]
 
 
@@ -245,6 +251,7 @@ async def get_study_guide(
         repo_id=guide.repo_id,
         snapshot_id=guide.snapshot_id,
         version=guide.version,
+        generated_at=guide.generated_at,
         sections=[
             SectionOut(
                 id=section.id,

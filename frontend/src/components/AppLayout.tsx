@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, Navigate, Outlet } from 'react-router-dom'
 import { logout as apiLogout } from '../api/client'
 import { useAuth } from '../auth/useAuth'
+import { BreadcrumbContext } from './breadcrumb'
 import { buttonClasses } from './ui/buttonVariants'
 
 // The mockup's avatar shows two-letter initials from a name field the User
@@ -18,6 +19,7 @@ function initials(email: string): string {
 function AppLayout() {
   const { user, loading, setUser } = useAuth()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [breadcrumb, setBreadcrumb] = useState<string | null>(null)
 
   if (loading) {
     return <p className="p-6 text-sm text-organic-text opacity-70">Loading…</p>
@@ -41,6 +43,17 @@ function AppLayout() {
           </span>
           <span className="font-organic-heading text-[17px] font-normal tracking-tight">Strata Learn</span>
         </Link>
+
+        {breadcrumb && (
+          // Hidden on phones: at ~390px the trail squeezes the wordmark itself
+          // onto two lines, and the page it names is the one already on screen.
+          <p className="hidden min-w-0 truncate text-sm opacity-55 md:block">
+            <span aria-hidden="true" className="mr-[18px]">
+              /
+            </span>
+            {breadcrumb}
+          </p>
+        )}
 
         <div className="ml-auto flex items-center gap-2.5">
           <Link to="/repos/new" className={buttonClasses('secondary')}>
@@ -95,7 +108,9 @@ function AppLayout() {
           </div>
         </div>
       </header>
-      <Outlet />
+      <BreadcrumbContext value={setBreadcrumb}>
+        <Outlet />
+      </BreadcrumbContext>
     </div>
   )
 }
