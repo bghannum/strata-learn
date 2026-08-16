@@ -1,8 +1,8 @@
 import Tag from './ui/Tag'
 
 // The mockup's "one account, one shelf" panel, shared by Login.tsx and
-// Register.tsx (Phase 5.5) — identical in both, so its copy stays in one
-// place rather than duplicated and risking drift.
+// Setup.tsx (Phase 5.5) — identical in both, so its copy stays in one place
+// rather than duplicated and risking drift.
 const STEPS = [
   'Add a repo by URL or zip.',
   "Read the guide it writes — diagrams, trade-offs, citations.",

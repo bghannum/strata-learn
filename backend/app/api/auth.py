@@ -1,6 +1,6 @@
-"""POST /auth/register, /auth/login, /auth/logout, GET /auth/me — session
-issuance/validation for the self-implemented, DB-backed auth design (ADR-007,
-app/auth/session.py). Every issuing endpoint sets the session cookie itself
+"""POST /auth/register, /auth/login, /auth/logout, GET /auth/me, GET
+/auth/status — session issuance/validation for the self-implemented,
+DB-backed auth design (ADR-007, app/auth/session.py). Every issuing endpoint sets the session cookie itself
 directly on the Response rather than returning a token in the body — an
 HttpOnly cookie can't be read or exfiltrated by JS, which is the whole point.
 
@@ -46,7 +46,9 @@ _DUMMY_PASSWORD_HASH = hash_password("not-a-real-account-timing-safety-only")
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
-    registration_secret: str
+    # Only checked when REGISTRATION_SECRET is set (config.py); the setup
+    # form only shows the field then, so it's usually absent.
+    registration_secret: str = ""
 
 
 class LoginRequest(BaseModel):
@@ -60,6 +62,33 @@ class UserOut(BaseModel):
     id: UUID
     email: str
     created_at: datetime
+
+
+class AuthStatus(BaseModel):
+    # True until the single account exists — the frontend routes a fresh
+    # install to "set up your account" instead of a login form it can't
+    # get past.
+    setup_required: bool
+    # Whether that setup form has to ask for REGISTRATION_SECRET.
+    secret_required: bool
+
+
+def _secret_required() -> bool:
+    return bool(settings.registration_secret)
+
+
+@router.get("/status", response_model=AuthStatus)
+async def get_status(session: AsyncSession = Depends(get_session)) -> AuthStatus:
+    """Unauthenticated by design: it exists so a fresh install can be routed
+    to the setup screen before anyone has an account. It does reveal whether
+    the instance is provisioned, which /register's identical-403 design was
+    careful not to. That's fine on localhost (the intended default) and, on
+    a hosted instance, harmless once REGISTRATION_SECRET is set — knowing
+    the account doesn't exist yet doesn't help without the secret. The
+    remaining case, hosted with no secret, is exactly the configuration
+    config.py says not to run."""
+    any_existing_user = (await session.exec(select(User.id).limit(1))).first()
+    return AuthStatus(setup_required=any_existing_user is None, secret_required=_secret_required())
 
 
 def _set_session_cookie(response: Response, raw_token: str) -> None:
@@ -96,16 +125,21 @@ async def register(
     #
     # That lockout only closes the door *after* the first account exists —
     # on a freshly reachable deployment, whoever reaches this endpoint first
-    # isn't necessarily the operator. registration_secret (settings.py) is
-    # an out-of-band shared secret only the operator has, so this is really
-    # "provision the account", not "sign up" (found via Codex's Phase 4b
-    # pre-push review, round 3). compare_digest avoids leaking the secret's
-    # value byte-by-byte through response timing; token_ok is still computed
-    # even once any_existing_user is set, for the same reason login always
-    # pays bcrypt's cost below — a short-circuit would make "already
-    # registered" measurably faster than "wrong secret, first account".
+    # isn't necessarily the operator. registration_secret (config.py) is
+    # an out-of-band shared secret only the operator has, so when it's set
+    # this is really "provision the account", not "sign up" (found via
+    # Codex's Phase 4b pre-push review, round 3). When it's blank — the
+    # default, for a localhost install where the first visitor *is* the
+    # operator — the check is skipped entirely. compare_digest avoids
+    # leaking the secret's value byte-by-byte through response timing;
+    # token_ok is still computed even once any_existing_user is set, for
+    # the same reason login always pays bcrypt's cost below — a
+    # short-circuit would make "already registered" measurably faster than
+    # "wrong secret, first account".
     any_existing_user = (await session.exec(select(User.id).limit(1))).first()
-    token_ok = secrets.compare_digest(body.registration_secret, settings.registration_secret)
+    token_ok = not _secret_required() or secrets.compare_digest(
+        body.registration_secret, settings.registration_secret
+    )
     if any_existing_user is not None or not token_ok:
         raise HTTPException(403, "Registration is closed — this app supports a single account")
     try:

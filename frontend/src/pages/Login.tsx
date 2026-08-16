@@ -1,7 +1,8 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
 import { ApiError, login } from '../api/client'
 import { useAuth } from '../auth/useAuth'
+import { useAuthStatus } from '../auth/useAuthStatus'
 import AuthSidePanel from '../components/AuthSidePanel'
 import Button from '../components/ui/Button'
 import { Field, Input } from '../components/ui/Field'
@@ -9,10 +10,17 @@ import { Field, Input } from '../components/ui/Field'
 function Login() {
   const navigate = useNavigate()
   const { setUser } = useAuth()
+  const { status, loading } = useAuthStatus()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // A fresh install has no account to log in with — send the visitor to
+  // first-run setup instead of a form they can't get past. While the status
+  // is unknown (loading, or the API is unreachable) this renders normally.
+  if (loading) return null
+  if (status?.setup_required) return <Navigate to="/setup" replace />
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -77,10 +85,8 @@ function Login() {
         </form>
 
         <p className="mt-4 text-sm opacity-70">
-          No account?{' '}
-          <Link to="/register" className="font-semibold text-organic-accent-700 hover:underline">
-            Register
-          </Link>
+          Forgot your password? Run <code className="text-[13px]">./scripts/reset-password</code> where the app
+          is installed.
         </p>
       </div>
 

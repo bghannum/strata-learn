@@ -19,13 +19,17 @@ from app.config import settings
 from app.db.models import Repo, SourceType
 from app.db.session import async_session_factory
 
-REGISTRATION_SECRET = settings.registration_secret
-
 # Never load or download local audio models during a test run — the suite
 # must be free and offline even in a venv that happens to have the `voice`
 # extra installed. Route tests inject fakes; the local backends' own tests
 # inject fake runtime modules.
 settings.voice_warm_on_startup = False
+
+# The suite exercises the out-of-the-box mode (no REGISTRATION_SECRET) unless
+# a test opts into the secret-gated one via monkeypatch — a developer's own
+# .env at the repo root is picked up by Settings and must not decide which
+# mode the tests run in.
+settings.registration_secret = ""
 
 
 async def _clean_db() -> None:
@@ -59,7 +63,7 @@ def register_test_user(client: TestClient) -> dict:
     email = f"test-{uuid.uuid4()}@example.com"
     response = client.post(
         "/auth/register",
-        json={"email": email, "password": "test-password-123", "registration_secret": REGISTRATION_SECRET},
+        json={"email": email, "password": "test-password-123"},
     )
     assert response.status_code == 201, response.text
     return response.json()

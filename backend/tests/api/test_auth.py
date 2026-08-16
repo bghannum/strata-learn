@@ -1,10 +1,21 @@
 from fastapi.testclient import TestClient
 
+import pytest
+
 from app.config import settings
 from app.db.models import SourceType
 from app.main import app
 
-REGISTRATION_SECRET = settings.registration_secret
+# The tests below register with no secret: settings.registration_secret is
+# blank by default (config.py), which is the localhost / out-of-the-box mode.
+# The secret-gated mode is exercised explicitly by the tests that use the
+# `secret_required` fixture.
+
+
+@pytest.fixture
+def secret_required(monkeypatch) -> str:
+    monkeypatch.setattr(settings, "registration_secret", "operator-only-secret")
+    return "operator-only-secret"
 
 
 def test_register_sets_session_cookie_and_returns_user_without_password_hash() -> None:
@@ -14,7 +25,6 @@ def test_register_sets_session_cookie_and_returns_user_without_password_hash() -
             json={
                 "email": "new@example.com",
                 "password": "a-real-password",
-                "registration_secret": REGISTRATION_SECRET,
             },
         )
 
@@ -38,16 +48,16 @@ def test_register_after_lockout_returns_the_same_response_regardless_of_email() 
     with TestClient(app) as client:
         client.post(
             "/auth/register",
-            json={"email": "first@example.com", "password": "a-real-password", "registration_secret": REGISTRATION_SECRET},
+            json={"email": "first@example.com", "password": "a-real-password"},
         )
 
         same_email = client.post(
             "/auth/register",
-            json={"email": "first@example.com", "password": "whatever", "registration_secret": REGISTRATION_SECRET},
+            json={"email": "first@example.com", "password": "whatever"},
         )
         different_email = client.post(
             "/auth/register",
-            json={"email": "second@example.com", "password": "whatever", "registration_secret": REGISTRATION_SECRET},
+            json={"email": "second@example.com", "password": "whatever"},
         )
 
     assert same_email.status_code == 403
@@ -55,25 +65,73 @@ def test_register_after_lockout_returns_the_same_response_regardless_of_email() 
     assert same_email.json() == different_email.json()
 
 
-def test_register_with_wrong_secret_is_rejected_even_for_the_first_account() -> None:
+def test_register_with_wrong_secret_is_rejected_even_for_the_first_account(secret_required) -> None:
     # The single-tenant lockout (see the test above) only closes registration
     # *after* an account exists — on a freshly reachable deployment, that
     # leaves a race where whoever hits this endpoint first, not necessarily
-    # the operator, permanently owns the app. registration_secret closes
-    # that gap: it's required even when no account exists yet, and a wrong
-    # secret gets the identical 403 as "already registered" so it isn't a
-    # way to probe whether the app has been provisioned (found via Codex's
-    # Phase 4b pre-push review, round 3).
+    # the operator, permanently owns the app. When REGISTRATION_SECRET is
+    # set it closes that gap: it's required even when no account exists yet,
+    # and a wrong (or missing) secret gets the identical 403 as "already
+    # registered" so it isn't a way to probe whether the app has been
+    # provisioned (found via Codex's Phase 4b pre-push review, round 3).
     with TestClient(app) as client:
-        response = client.post(
+        wrong = client.post(
             "/auth/register",
             json={"email": "attacker@example.com", "password": "whatever", "registration_secret": "wrong-secret"},
         )
-        assert response.status_code == 403
+        missing = client.post("/auth/register", json={"email": "attacker@example.com", "password": "whatever"})
+        assert wrong.status_code == 403
+        assert missing.status_code == 403
+        assert wrong.json() == missing.json()
 
         me = client.get("/auth/me")
 
     assert me.status_code == 401  # definitely didn't get a session
+
+
+def test_register_with_the_right_secret_succeeds_when_one_is_required(secret_required) -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/auth/register",
+            json={"email": "operator@example.com", "password": "a-real-password", "registration_secret": secret_required},
+        )
+        assert response.status_code == 201
+        assert client.get("/auth/me").status_code == 200
+
+
+def test_register_ignores_a_submitted_secret_when_none_is_required() -> None:
+    # Blank REGISTRATION_SECRET (the default) means "not checked", not
+    # "must be blank" — an operator who clears the setting after handing
+    # out a value shouldn't strand a client that still sends it.
+    with TestClient(app) as client:
+        response = client.post(
+            "/auth/register",
+            json={"email": "local@example.com", "password": "a-real-password", "registration_secret": "stale-value"},
+        )
+    assert response.status_code == 201
+
+
+def test_status_reports_setup_required_until_the_account_exists() -> None:
+    # This is what routes a fresh install to the setup screen instead of a
+    # login form nobody can get past. Unauthenticated on purpose — there is
+    # no one to authenticate yet when it matters most.
+    with TestClient(app) as client:
+        before = client.get("/auth/status")
+        assert before.status_code == 200
+        assert before.json() == {"setup_required": True, "secret_required": False}
+
+        client.post("/auth/register", json={"email": "first@example.com", "password": "a-real-password"})
+        client.cookies.clear()
+
+        after = client.get("/auth/status")
+
+    assert after.json() == {"setup_required": False, "secret_required": False}
+
+
+def test_status_reports_whether_the_setup_form_must_ask_for_the_secret(secret_required) -> None:
+    with TestClient(app) as client:
+        response = client.get("/auth/status")
+    assert response.json() == {"setup_required": True, "secret_required": True}
 
 
 async def test_register_claims_repos_left_over_from_before_auth_existed(pending_repo_factory) -> None:
@@ -91,7 +149,6 @@ async def test_register_claims_repos_left_over_from_before_auth_existed(pending_
             json={
                 "email": "claims-orphans@example.com",
                 "password": "a-real-password",
-                "registration_secret": REGISTRATION_SECRET,
             },
         )
         response = client.get(f"/repos/{orphaned_repo_id}")
@@ -107,7 +164,6 @@ def test_register_rejects_invalid_email() -> None:
             json={
                 "email": "not-an-email",
                 "password": "a-real-password",
-                "registration_secret": REGISTRATION_SECRET,
             },
         )
     assert response.status_code == 422
@@ -120,7 +176,6 @@ def test_login_with_correct_credentials_sets_session_cookie() -> None:
             json={
                 "email": "login-test@example.com",
                 "password": "a-real-password",
-                "registration_secret": REGISTRATION_SECRET,
             },
         )
         client.cookies.clear()  # simulate a fresh browser session, no leftover cookie from register
@@ -141,7 +196,6 @@ def test_login_with_wrong_password_returns_401() -> None:
             json={
                 "email": "wrong-pw@example.com",
                 "password": "a-real-password",
-                "registration_secret": REGISTRATION_SECRET,
             },
         )
         client.cookies.clear()
@@ -212,7 +266,6 @@ def test_register_hashes_the_password_off_the_event_loop(monkeypatch) -> None:
             json={
                 "email": "thread-check@example.com",
                 "password": "a-real-password",
-                "registration_secret": REGISTRATION_SECRET,
             },
         )
 
@@ -240,7 +293,6 @@ def test_logout_clears_the_cookie_and_invalidates_the_session() -> None:
             json={
                 "email": "logout-test@example.com",
                 "password": "a-real-password",
-                "registration_secret": REGISTRATION_SECRET,
             },
         )
         assert client.get("/auth/me").status_code == 200
