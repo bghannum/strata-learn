@@ -23,6 +23,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -521,12 +522,34 @@ class AttemptSummaryOut(BaseModel):
     question_count: int
 
 
-@router.get("/{repo_id}/attempts", response_model=list[AttemptSummaryOut])
+class AttemptHistoryOut(BaseModel):
+    """An envelope rather than a bare list (#75): once the response is a page,
+    the panel has to be able to say *of how many* — "showing 10 of 23" is the
+    difference between a bounded list and a list that looks complete but
+    silently isn't."""
+
+    items: list[AttemptSummaryOut]
+    total: int
+
+
+# Retakes are unlimited, so both this response and the DOM that renders it grow
+# without a ceiling unless something imposes one (#75). Ten is a sitting's worth
+# of recent history — enough to see a trend, small enough to read — and the
+# ceiling bounds what "show all" can ask for, since an unbounded escape hatch
+# would just move the same problem behind a click.
+DEFAULT_ATTEMPT_PAGE_SIZE = 10
+MAX_ATTEMPT_PAGE_SIZE = 100
+
+
+@router.get("/{repo_id}/attempts", response_model=AttemptHistoryOut)
 async def list_repo_attempts(
-    repo_id: UUID, session: AsyncSession = Depends(get_session), current_user: User = Depends(get_current_user)
-) -> list[AttemptSummaryOut]:
-    """Quiz history for RepoDetail.tsx: every completed attempt over any quiz
-    for this repo, newest first.
+    repo_id: UUID,
+    limit: int = Query(DEFAULT_ATTEMPT_PAGE_SIZE, ge=1, le=MAX_ATTEMPT_PAGE_SIZE),
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> AttemptHistoryOut:
+    """Quiz history for RepoDetail.tsx: the most recent completed attempts over
+    any quiz for this repo, newest first, with the full count alongside.
 
     Deliberately not the same data as /mastery, which aggregates *answers* by
     subsystem across attempts and so can't say "you scored 80% on a 5-question
@@ -544,23 +567,26 @@ async def list_repo_attempts(
 
     quiz_ids = list((await session.exec(select(Quiz.id).where(Quiz.repo_id == repo_id))).all())
     if not quiz_ids:
-        return []
+        return AttemptHistoryOut(items=[], total=0)
+
+    completed = (
+        Attempt.quiz_id.in_(quiz_ids),
+        Attempt.user_id == current_user.id,
+        Attempt.status == AttemptStatus.completed,
+    )
+    # Counted separately rather than derived from the page: the whole point of
+    # `total` is to describe the rows this response *didn't* return.
+    total = (await session.exec(select(func.count(Attempt.id)).where(*completed))).one()
 
     attempts = list(
         (
             await session.exec(
-                select(Attempt)
-                .where(
-                    Attempt.quiz_id.in_(quiz_ids),
-                    Attempt.user_id == current_user.id,
-                    Attempt.status == AttemptStatus.completed,
-                )
-                .order_by(Attempt.completed_at.desc())
+                select(Attempt).where(*completed).order_by(Attempt.completed_at.desc()).limit(limit)
             )
         ).all()
     )
     if not attempts:
-        return []
+        return AttemptHistoryOut(items=[], total=total)
 
     # One grouped count for every quiz involved rather than a query per row —
     # a repo re-indexed a few times can easily have several quizzes, and the
@@ -575,19 +601,22 @@ async def list_repo_attempts(
         ).all()
     )
 
-    return [
-        AttemptSummaryOut(
-            id=a.id,
-            quiz_id=a.quiz_id,
-            completed_at=a.completed_at,
-            # Both are set together on completion (api/attempts.py), so a
-            # completed attempt missing either is a bug, not a state to render.
-            score=a.score if a.score is not None else 0.0,
-            question_count=counts.get(a.quiz_id, 0),
-        )
-        for a in attempts
-        if a.completed_at is not None
-    ]
+    return AttemptHistoryOut(
+        items=[
+            AttemptSummaryOut(
+                id=a.id,
+                quiz_id=a.quiz_id,
+                completed_at=a.completed_at,
+                # Both are set together on completion (api/attempts.py), so a
+                # completed attempt missing either is a bug, not a state to render.
+                score=a.score if a.score is not None else 0.0,
+                question_count=counts.get(a.quiz_id, 0),
+            )
+            for a in attempts
+            if a.completed_at is not None
+        ],
+        total=total,
+    )
 
 
 @router.get("/{repo_id}/snapshot", response_model=AnalysisSnapshot)
@@ -626,6 +655,72 @@ async def get_repo_study_guide(
     if guide is None:
         raise HTTPException(404, "study guide not ready yet")
     return RedirectResponse(f"/study-guides/{guide.id}")
+
+
+class StudyGuideVersionOut(BaseModel):
+    id: UUID
+    version: int
+    generated_at: datetime
+    snapshot_id: UUID
+    commit_hash: str | None
+
+
+@router.get("/{repo_id}/study-guides", response_model=list[StudyGuideVersionOut])
+async def list_repo_study_guides(
+    repo_id: UUID, session: AsyncSession = Depends(get_session), current_user: User = Depends(get_current_user)
+) -> list[StudyGuideVersionOut]:
+    """Every generated version of this repo's guide, newest first — the version
+    picker for the architectural diff (#72).
+
+    Only the identifying fields, not the guides themselves: this is a list to
+    choose *from*, and returning N full guides with all their sections and
+    citations to populate two dropdowns would be several megabytes to render a
+    pair of labels.
+
+    Sorted by version rather than generated_at because version is what the diff
+    endpoint orders by when it decides which side is "before" — sorting the
+    picker one way and the comparison another would let the UI label a diff
+    backwards.
+    """
+    repo = await session.get(Repo, repo_id)
+    if repo is None or repo.user_id != current_user.id:
+        raise HTTPException(404, "repo not found")
+
+    guides = list(
+        (
+            await session.exec(
+                select(StudyGuide).where(StudyGuide.repo_id == repo_id).order_by(StudyGuide.version.desc())
+            )
+        ).all()
+    )
+    if not guides:
+        return []
+
+    # Same no-relationships pattern as the rest of this module: the commit is
+    # the snapshot's, and the picker labels versions by it ("v2 · a1b2c3d").
+    # Two columns rather than whole rows, for the same reason this endpoint
+    # doesn't return whole guides — a snapshot carries its entire
+    # `dependency_graph` JSON, which is a lot of payload for a 7-character label.
+    commit_by_snapshot = dict(
+        (
+            await session.exec(
+                select(AnalysisSnapshot.id, AnalysisSnapshot.commit_hash).where(
+                    AnalysisSnapshot.id.in_({g.snapshot_id for g in guides})
+                )
+            )
+        ).all()
+    )
+
+    return [
+        StudyGuideVersionOut(
+            id=guide.id,
+            version=guide.version,
+            generated_at=guide.generated_at,
+            snapshot_id=guide.snapshot_id,
+            commit_hash=commit_by_snapshot.get(guide.snapshot_id),
+        )
+        for guide in guides
+    ]
 
 
 @router.get("/{repo_id}/quiz")

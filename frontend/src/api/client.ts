@@ -263,6 +263,89 @@ export function getStudyGuide(studyGuideId: string): Promise<StudyGuide> {
   return request(`/study-guides/${studyGuideId}`)
 }
 
+// --- Versions and the architectural diff (#72) ---
+
+/** One generated version, without its sections — enough to label a picker
+ *  entry ("v2 · a1b2c3d"), which is all the diff's version selectors need. */
+export interface StudyGuideVersion {
+  id: string
+  version: number
+  generated_at: string
+  snapshot_id: string
+  commit_hash: string | null
+}
+
+/** Newest first, by version — the same ordering the diff endpoint uses to
+ *  decide which side is "before". */
+export function listStudyGuideVersions(repoId: string): Promise<StudyGuideVersion[]> {
+  return request(`/repos/${repoId}/study-guides`)
+}
+
+export interface SubsystemRef {
+  key: string
+  name: string
+}
+
+export interface SubsystemMembershipChange {
+  key: string
+  name: string
+  files_added: string[]
+  files_removed: string[]
+}
+
+export interface TradeoffChange {
+  decision_before: string
+  decision_after: string
+  reasoning_before: string
+  reasoning_after: string
+  cost_before: string
+  cost_after: string
+  evidence_paths: string[]
+}
+
+export interface SubsystemEdge {
+  source: string
+  target: string
+}
+
+/** Structure only, no prose summary — see backend/app/generation/diffing.py for
+ *  why nothing here matches on generated text. */
+export interface StudyGuideDiff {
+  from_version: number
+  to_version: number
+  from_snapshot_id: string
+  to_snapshot_id: string
+  from_commit: string | null
+  to_commit: string | null
+  subsystems: {
+    added: SubsystemRef[]
+    removed: SubsystemRef[]
+    changed: SubsystemMembershipChange[]
+  }
+  tradeoffs: {
+    added: string[]
+    removed: string[]
+    changed: TradeoffChange[]
+  }
+  pattern: {
+    changed: boolean
+    pattern_before: string | null
+    pattern_after: string | null
+    confidence_before: string | null
+    confidence_after: string | null
+  }
+  dependencies: {
+    edges_added: SubsystemEdge[]
+    edges_removed: SubsystemEdge[]
+  }
+}
+
+/** Direction is decided server-side by version, not by argument order — the
+ *  lower-versioned guide is always "before" whichever id is passed first. */
+export function getStudyGuideDiff(studyGuideId: string, otherStudyGuideId: string): Promise<StudyGuideDiff> {
+  return request(`/study-guides/${studyGuideId}/diff/${otherStudyGuideId}`)
+}
+
 // --- Quizzes ---
 
 export type QuizStatus = 'generating' | 'ready' | 'failed'
@@ -342,9 +425,21 @@ export interface AttemptSummary {
   question_count: number
 }
 
+/** A bounded page plus the full count (#75): retakes are unlimited, so `items`
+ *  is the recent window and `total` is what it's a window onto. */
+export interface AttemptHistory {
+  items: AttemptSummary[]
+  total: number
+}
+
+/** Matches the backend's own default and ceiling — the panel needs both to
+ *  label its "show all" affordance honestly. */
+export const DEFAULT_ATTEMPT_PAGE_SIZE = 10
+export const MAX_ATTEMPT_PAGE_SIZE = 100
+
 /** Newest first; completed attempts only. */
-export function listRepoAttempts(repoId: string): Promise<AttemptSummary[]> {
-  return request(`/repos/${repoId}/attempts`)
+export function listRepoAttempts(repoId: string, limit = DEFAULT_ATTEMPT_PAGE_SIZE): Promise<AttemptHistory> {
+  return request(`/repos/${repoId}/attempts?limit=${limit}`)
 }
 
 export interface AnswerResult {

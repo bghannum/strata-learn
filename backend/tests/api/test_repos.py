@@ -675,7 +675,7 @@ async def test_quiz_history_is_empty_before_any_attempt(pending_repo_factory) ->
         response = client.get(f"/repos/{repo_id}/attempts")
 
     assert response.status_code == 200
-    assert response.json() == []
+    assert response.json() == {"items": [], "total": 0}
 
 
 async def test_quiz_history_lists_completed_attempts_newest_first(pending_repo_factory) -> None:
@@ -693,13 +693,15 @@ async def test_quiz_history_lists_completed_attempts_newest_first(pending_repo_f
 
         body = client.get(f"/repos/{repo_id}/attempts").json()
 
-    assert [row["id"] for row in body] == [str(newer), str(older)]
-    assert body[0]["score"] == 1.0
-    assert body[0]["question_count"] == 1
-    assert body[1]["score"] == 0.5
+    rows = body["items"]
+    assert [row["id"] for row in rows] == [str(newer), str(older)]
+    assert body["total"] == 2
+    assert rows[0]["score"] == 1.0
+    assert rows[0]["question_count"] == 1
+    assert rows[1]["score"] == 0.5
     # The count is the quiz's, not the number of answers submitted — a quiz
     # finished early still reads "2 questions".
-    assert body[1]["question_count"] == 2
+    assert rows[1]["question_count"] == 2
 
 
 async def test_quiz_history_excludes_in_progress_attempts(pending_repo_factory) -> None:
@@ -718,7 +720,7 @@ async def test_quiz_history_excludes_in_progress_attempts(pending_repo_factory) 
             session.add(Attempt(quiz_id=quiz.id, user_id=UUID(user["id"]), status=AttemptStatus.in_progress))
             await session.commit()
 
-        assert client.get(f"/repos/{repo_id}/attempts").json() == []
+        assert client.get(f"/repos/{repo_id}/attempts").json() == {"items": [], "total": 0}
 
 
 async def test_quiz_history_is_scoped_to_its_owner(pending_repo_factory) -> None:
@@ -728,6 +730,88 @@ async def test_quiz_history_is_scoped_to_its_owner(pending_repo_factory) -> None
     with TestClient(app) as other:
         await login_as_new_user(other)
         assert other.get(f"/repos/{repo_id}/attempts").status_code == 404
+
+
+async def test_quiz_history_is_bounded_but_reports_the_full_count(pending_repo_factory) -> None:
+    # #75: retakes are unlimited, so an unbounded response grows forever. The
+    # page has to stay bounded *and* be able to say how much it isn't showing.
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=UUID(user["id"])
+        )
+        for minutes in range(12):
+            await _completed_attempt(
+                repo_id, snapshot_id, UUID(user["id"]), [("app/api", 1.0)], version=minutes + 1, minutes=minutes
+            )
+
+        default_page = client.get(f"/repos/{repo_id}/attempts").json()
+        larger_page = client.get(f"/repos/{repo_id}/attempts", params={"limit": 50}).json()
+
+    assert len(default_page["items"]) == 10
+    assert default_page["total"] == 12
+    # Newest first, so the page that gets truncated is the old end of the
+    # history — the sittings nobody scrolls to.
+    assert default_page["items"][0]["completed_at"] > default_page["items"][-1]["completed_at"]
+    assert len(larger_page["items"]) == 12
+    assert larger_page["total"] == 12
+
+
+async def test_quiz_history_limit_is_capped(pending_repo_factory) -> None:
+    # An unbounded escape hatch would just move #75's problem behind a query
+    # parameter, so the ceiling is enforced rather than advisory.
+    with TestClient(app) as client:
+        repo_id, _snapshot_id = await _git_repo(client, pending_repo_factory)
+
+        assert client.get(f"/repos/{repo_id}/attempts", params={"limit": 101}).status_code == 422
+        assert client.get(f"/repos/{repo_id}/attempts", params={"limit": 0}).status_code == 422
+
+
+# --- #72: the version list the architectural-diff picker chooses from ---
+
+
+async def test_study_guide_versions_are_listed_newest_first_with_commits(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        user = register_test_user(client)
+        repo_id, snapshot_id = await pending_repo_factory(
+            SourceType.git_url, "https://example.com/repo.git", user_id=UUID(user["id"])
+        )
+        await _set_snapshot_commit(snapshot_id, "a" * 40)
+        async with async_session_factory() as session:
+            second_snapshot = AnalysisSnapshot(
+                repo_id=repo_id, commit_hash="b" * 40, status=SnapshotStatus.ready
+            )
+            session.add(second_snapshot)
+            await session.flush()
+            session.add(StudyGuide(repo_id=repo_id, snapshot_id=snapshot_id, version=1))
+            session.add(StudyGuide(repo_id=repo_id, snapshot_id=second_snapshot.id, version=2))
+            await session.commit()
+
+        body = client.get(f"/repos/{repo_id}/study-guides").json()
+
+    # Newest first, and by version — the same ordering the diff endpoint uses to
+    # decide which side is "before", so the picker can't label a diff backwards.
+    assert [row["version"] for row in body] == [2, 1]
+    assert body[0]["commit_hash"] == "b" * 40
+    assert body[1]["commit_hash"] == "a" * 40
+
+
+async def test_study_guide_versions_are_empty_before_generation(pending_repo_factory) -> None:
+    with TestClient(app) as client:
+        repo_id, _snapshot_id = await _git_repo(client, pending_repo_factory)
+        response = client.get(f"/repos/{repo_id}/study-guides")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+async def test_study_guide_versions_are_scoped_to_their_owner(pending_repo_factory) -> None:
+    with TestClient(app) as owner:
+        repo_id, _snapshot_id = await _git_repo(owner, pending_repo_factory)
+
+    with TestClient(app) as other:
+        await login_as_new_user(other)
+        assert other.get(f"/repos/{repo_id}/study-guides").status_code == 404
 
 
 # --- #73: re-indexing a healthy repo ---

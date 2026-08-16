@@ -96,7 +96,13 @@ code produce differently-worded output, and a naive text diff would report
 churn that isn't real. Subsystems match on their stable key, trade-off cards on
 the set of files their evidence cites, and dependency edges are projected up to
 subsystem level before diffing so a refactor reads as one line rather than
-forty. API-only so far; the UI is tracked as a clean-up item.
+forty. `RepoDetail`'s "What changed" panel is the read side (#72): it appears
+only once a repo has two versions to compare, defaults to the newest pair, and
+renders an explicit "nothing changed architecturally" state, since an identical
+re-index legitimately produces a fully empty diff. `GET
+/repos/{id}/study-guides` supplies the version picker — identifying fields
+only, ordered by version rather than by timestamp so the picker can't label a
+diff backwards relative to the direction the diff endpoint chooses.
 
 **Mastery** (`quizzing/mastery.py`) aggregates graded answers by
 `Question.subsystem_key`, which is copied onto the question at generation time
@@ -109,9 +115,13 @@ independent measurement.
 `GET /repos/{id}/attempts` answers the neighbouring but different question —
 what happened in each sitting, rather than how each topic is going. Mastery
 cannot produce that: it aggregates answers by subsystem across attempts, so it
-has no row that says "80% on a five-question quiz, this afternoon". Every
-completed attempt appears, retakes included, because the history panel is a log
-rather than a measurement.
+has no row that says "80% on a five-question quiz, this afternoon". Retakes are
+included, because the history panel is a log rather than a measurement — which
+is also why the response is a bounded page rather than a list (#75): retakes are
+unlimited, so both the payload and the DOM would otherwise grow without a
+ceiling. It returns the ten most recent by default alongside the full `total`,
+capped at 100, and the panel's "show all" raises the request to that ceiling
+rather than removing it.
 
 ### Quiz generation and taking
 
@@ -127,7 +137,7 @@ The app-level "reuse an existing in-flight attempt/quiz" checks above have their
 
 ### Frontend
 
-React + Vite + Tailwind, talking to the API over `fetch`/`WebSocket`, with every request carrying an `HttpOnly` session cookie (`credentials: 'include'`) as of Phase 4b. `Register`/`Login` handle account creation and session establishment; `AddRepo` submits a Git URL or zip upload; `Dashboard` and `RepoDetail` subscribe to `WS /repos/{id}/progress` and render a shared 5-stage status component (`IndexingProgress`, chip and stepper variants) — a failure shows which stage it happened at, not just a generic error. `StudyGuideView` renders `content_md` as Markdown, `diagram_mermaid` inline via the `mermaid` package, and each section's citations as a list that opens a `CitationPanel` slide-over with the real cited snippet. Citations render as a per-section list rather than markers inline on the specific claim — `claim_excerpt` isn't always a literal substring of `content_md` (e.g. the Architecture section's citations pair the primary-pattern headline with a specific evidence claim), so precise inline anchoring isn't reliable yet. `RepoDetail` follows the mockup's layout: title and the two actions worth taking (open the guide, view the raw analysis) above the indexing stepper, then a study-guide panel (section chips, counts, age, "Read it", quiz generation) beside a quiz-history panel listing every completed sitting from `GET /repos/{id}/attempts`, with the per-subsystem mastery bars below both. It offers "Generate quiz" once a study guide exists, polling until it's ready; `QuizTaker` walks one question at a time, with per-answer feedback shown immediately or withheld until the end depending on the quiz's `feedback_mode`; `AttemptResults` shows the final score and a per-question breakdown with its source reference, loaded fresh from `GET /attempts/{id}` so the page works on a direct visit or refresh, not only right after finishing.
+React + Vite + Tailwind, talking to the API over `fetch`/`WebSocket`, with every request carrying an `HttpOnly` session cookie (`credentials: 'include'`) as of Phase 4b. `Register`/`Login` handle account creation and session establishment; `AddRepo` submits a Git URL or zip upload; `Dashboard` and `RepoDetail` subscribe to `WS /repos/{id}/progress` and render a shared 5-stage status component (`IndexingProgress`, chip and stepper variants) — a failure shows which stage it happened at, not just a generic error. `StudyGuideView` renders `content_md` as Markdown, `diagram_mermaid` inline via the `mermaid` package, and each section's citations as a list that opens a `CitationPanel` slide-over with the real cited snippet. Citations render as a per-section list rather than markers inline on the specific claim — `claim_excerpt` isn't always a literal substring of `content_md` (e.g. the Architecture section's citations pair the primary-pattern headline with a specific evidence claim), so precise inline anchoring isn't reliable yet. `RepoDetail` follows the mockup's layout: title and the two actions worth taking (open the guide, view the raw analysis) above the indexing stepper, then a study-guide panel (section chips, counts, age, "Read it", quiz generation) beside a quiz-history panel listing recent completed sittings from `GET /repos/{id}/attempts` (bounded, with a "show all" that raises the request to the API's own ceiling), with the per-subsystem mastery bars below both. Between the staleness banner and those panels sits the "What changed" architectural diff, so "this is stale" → "re-index" → "here's what changed" reads as one sequence; it renders nothing at all until a repo has a second version to compare against. It offers "Generate quiz" once a study guide exists, polling until it's ready; `QuizTaker` walks one question at a time, with per-answer feedback shown immediately or withheld until the end depending on the quiz's `feedback_mode`; `AttemptResults` shows the final score and a per-question breakdown with its source reference, loaded fresh from `GET /attempts/{id}` so the page works on a direct visit or refresh, not only right after finishing.
 
 ## Persistence model
 
@@ -174,7 +184,8 @@ The worker commits final Layer B rows with `generating` atomically, and the stud
 | `GET` | `/repos/{repo_id}/update-status` | Read the cached staleness answer (no network I/O) |
 | `POST` | `/repos/{repo_id}/check-updates` | Ask the remote for its HEAD and record the result |
 | `GET` | `/repos/{repo_id}/mastery` | Quiz performance per subsystem, across study-guide versions |
-| `GET` | `/repos/{repo_id}/attempts` | Quiz history: every completed attempt over any of this repo's quizzes, newest first |
+| `GET` | `/repos/{repo_id}/attempts` | Quiz history: a bounded page of completed attempts over any of this repo's quizzes, newest first, with the full count |
+| `GET` | `/repos/{repo_id}/study-guides` | Every generated version of this repo's guide, newest first — the diff's version picker |
 | `GET` | `/study-guides/{study_guide_id}` | Fetch a study guide with ordered sections and citations |
 | `GET` | `/study-guides/{id}/diff/{other_id}` | Architectural diff between two snapshots of one repo |
 | `GET` | `/study-guides/{study_guide_id}/export.md` | Download the guide as Markdown |

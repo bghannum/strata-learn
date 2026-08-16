@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import {
   ApiError,
   checkForUpdates,
+  DEFAULT_ATTEMPT_PAGE_SIZE,
   generateQuiz,
   getMastery,
   getRepo,
@@ -12,12 +13,13 @@ import {
   getUpdateStatus,
   isAbortError,
   listRepoAttempts,
+  MAX_ATTEMPT_PAGE_SIZE,
   pollQuiz,
   PollTimeoutError,
   reindexRepo,
   useIndexingProgress,
   type AnalysisSnapshot,
-  type AttemptSummary,
+  type AttemptHistory,
   type FeedbackMode,
   type Mastery,
   type Quiz,
@@ -26,6 +28,7 @@ import {
   type StudyGuide,
   type UpdateStatus,
 } from '../api/client'
+import ArchitecturalDiff from '../components/ArchitecturalDiff'
 import { useBreadcrumb } from '../components/breadcrumb'
 import IndexingProgress from '../components/IndexingProgress'
 import Button from '../components/ui/Button'
@@ -162,17 +165,39 @@ function sectionChips(guide: StudyGuide): string[] {
 }
 
 function QuizHistory({
-  attempts,
+  history,
   error,
   onRetry,
+  expanded,
+  onExpand,
 }: {
-  attempts: AttemptSummary[] | null
+  history: AttemptHistory | null
   error: string | null
   onRetry: () => void
+  expanded: boolean
+  onExpand: () => void
 }) {
+  const attempts = history?.items ?? null
+  // #75: retakes are unlimited, so the panel shows a recent window and says
+  // what it's a window onto. "Show all" is honest only while the total fits
+  // under the API's own ceiling — past that it's "show the most recent N",
+  // because that is genuinely all the endpoint will return.
+  const hidden = history === null ? 0 : history.total - history.items.length
+  const showAllLabel =
+    history !== null && history.total <= MAX_ATTEMPT_PAGE_SIZE
+      ? `Show all ${history.total}`
+      : `Show ${MAX_ATTEMPT_PAGE_SIZE} most recent`
+
   return (
     <section className="rounded-[32px] bg-organic-surface p-7">
-      <h2 className="text-lg font-semibold">Quiz history</h2>
+      <h2 className="text-lg font-semibold">
+        Quiz history{' '}
+        {history !== null && history.total > history.items.length && (
+          <span className="text-[12.5px] font-normal opacity-55">
+            showing {history.items.length} of {history.total}
+          </span>
+        )}
+      </h2>
       {/* An explicit failure, not a permanent "Loading…" — ui-spec.md §8 asks
       every data-bearing view for a real error state, and this one is the most
       tempting to skip because the rest of the page still works without it. */}
@@ -213,6 +238,11 @@ function QuizHistory({
           })}
         </ul>
       )}
+      {!expanded && hidden > 0 && (
+        <button type="button" onClick={onExpand} className="mt-3 text-sm font-semibold underline">
+          {showAllLabel}
+        </button>
+      )}
     </section>
   )
 }
@@ -238,11 +268,15 @@ function RepoDetail() {
   const [reindexing, setReindexing] = useState(false)
   const [reindexError, setReindexError] = useState<string | null>(null)
   const [mastery, setMastery] = useState<Mastery | null>(null)
-  const [attempts, setAttempts] = useState<AttemptSummary[] | null>(null)
+  const [attempts, setAttempts] = useState<AttemptHistory | null>(null)
   const [attemptsError, setAttemptsError] = useState<string | null>(null)
   // Bumped by the panel's "Try again", which is the only way to re-run the
   // fetch below without a full page reload.
   const [attemptsReload, setAttemptsReload] = useState(0)
+  // #75: the panel asks for a bounded page by default. "Show all" raises the
+  // ask to the API's ceiling rather than removing it — an unbounded escape
+  // hatch would just move the same problem behind a click.
+  const [attemptsExpanded, setAttemptsExpanded] = useState(false)
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const [updateError, setUpdateError] = useState<string | null>(null)
@@ -388,13 +422,13 @@ function RepoDetail() {
   useEffect(() => {
     if (status !== 'ready' || !repoId) return
     setAttemptsError(null)
-    listRepoAttempts(repoId)
+    listRepoAttempts(repoId, attemptsExpanded ? MAX_ATTEMPT_PAGE_SIZE : DEFAULT_ATTEMPT_PAGE_SIZE)
       .then(setAttempts)
       // Scoped to the panel — an unreachable history shouldn't take the page
       // down with it, but it does have to say so rather than sit on "Loading…"
       // forever (found via Codex's review of this change).
       .catch((err) => setAttemptsError(err instanceof ApiError ? err.message : 'Could not load quiz history.'))
-  }, [status, repoId, quiz, attemptsReload])
+  }, [status, repoId, quiz, attemptsReload, attemptsExpanded])
 
   function handleCheckUpdates() {
     if (!repoId) return
@@ -511,6 +545,12 @@ function RepoDetail() {
         </div>
       )}
 
+      {/* #72: directly under the staleness banner and its Re-index button, so
+      "this is stale" → "re-index" → "here's what changed" reads as one sequence.
+      Renders nothing until this repo has a second version to compare against,
+      which is exactly when re-indexing has produced something to say. */}
+      {isReady && repoId && <ArchitecturalDiff repoId={repoId} guideId={guide?.id} />}
+
       {isReady && (
         // Two panels side by side once there's room: what this repo produced,
         // and how you've done on it. They stack on narrow viewports.
@@ -607,9 +647,11 @@ function RepoDetail() {
           </section>
 
           <QuizHistory
-            attempts={attempts}
+            history={attempts}
             error={attemptsError}
             onRetry={() => setAttemptsReload((count) => count + 1)}
+            expanded={attemptsExpanded}
+            onExpand={() => setAttemptsExpanded(true)}
           />
         </div>
       )}
