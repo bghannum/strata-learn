@@ -20,7 +20,7 @@ Phase 6 (generation quality) repaired the Layer A/B facts that generation is bui
 
 Phase 7 (versioning and mastery) added staleness detection against a repository's remote, an architectural diff between two snapshots, mastery tracking per subsystem across study-guide versions, and Markdown export. A ready repository can now be re-indexed to pick up new commits, which is what produces the second snapshot a diff compares against, and the repo page's "What changed" panel reads that diff back — subsystems, trade-offs, dependencies, and the primary pattern — directly under the staleness banner that prompted the re-index.
 
-Phase 8 (voice learning) adds read-aloud for study-guide sections and quiz feedback, and spoken answers for fill-in-the-blank questions — transcribed into an editable transcript the learner confirms before it's graded through the ordinary path. Each capability sits behind its own provider protocol with a hosted OpenAI backend *and* an in-process self-hosted one (faster-whisper; Kokoro via ONNX), selected per capability by `TRANSCRIPTION_BACKEND` / `SPEECH_BACKEND` and off by default. The self-hosted runtimes are an opt-in build (`INSTALL_VOICE=true docker compose build api`); weights download on first use into a named volume. `./scripts/voice-eval` compares the transcription backends on this repository's own vocabulary and writes [a committed report](docs/history/voice-backend-evaluation.md). See [ADR-010](docs/adr/ADR-010-voice-providers-and-self-hosted-backends.md) for why both backends, and the deliberate reversal of the original hosted-only scope.
+Phase 8 (voice learning) adds read-aloud for study-guide sections and quiz feedback, and spoken answers for fill-in-the-blank questions — transcribed into an editable transcript the learner confirms before it's graded through the ordinary path. Each capability sits behind its own provider protocol with an in-process self-hosted backend (faster-whisper; Kokoro via ONNX) *and* a hosted OpenAI one, selected per capability by `TRANSCRIPTION_BACKEND` / `SPEECH_BACKEND`. **Local is the default**, so voice works out of the box with no key and no bill: the api image ships the runtimes, and the models (~500 MB) download on first start into a named volume while the API is already serving. Set `INSTALL_VOICE=false` for a slimmer image, or point either switch at `openai` with an `OPENAI_API_KEY`. `./scripts/voice-eval` compares the transcription backends on this repository's own vocabulary and writes [a committed report](docs/history/voice-backend-evaluation.md). See [ADR-010](docs/adr/ADR-010-voice-providers-and-self-hosted-backends.md) for why both backends, and the deliberate reversal of the original hosted-only scope.
 
 The remaining roadmap phase adds drawing questions (Phase 9, deferred from its original Phase 6 slot).
 
@@ -57,7 +57,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Compose starts PostgreSQL, Redis, the FastAPI service, the arq worker, and the React/Vite development server.
+Compose starts PostgreSQL, Redis, the FastAPI service, the arq worker, and the React/Vite development server. On first start the API also downloads the local voice models (~500 MB) in the background — read-aloud and spoken answers become available once `docker compose logs api` shows `voice.speech warm` and `voice.transcription warm`; everything else works immediately.
 
 Verify the API and open the frontend:
 
@@ -86,7 +86,7 @@ Then run the backend:
 cd backend
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,voice]"   # drop `voice` to skip the local audio runtimes
 alembic upgrade head
 uvicorn app.main:app --reload
 ```

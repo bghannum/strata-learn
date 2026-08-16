@@ -24,7 +24,7 @@ The optimization target for this phase is different from every phase before it. 
 
 Each protocol gets an OpenAI backend and a local one running **in the API process** (faster-whisper for transcription; Kokoro via ONNX for speech). In-process rather than an OpenAI-compatible sidecar was a deliberate choice: when both backends speak the same wire protocol, "hosted vs local" collapses to a base-URL change and the abstraction claim degrades to "I changed a URL". In-process means genuinely different client code plus the model-lifecycle work — lazy loading, thread offload, concurrency bounding — that is the actual lesson.
 
-Both local runtimes are chosen to avoid torch (CTranslate2 and onnxruntime respectively) and to avoid a system ffmpeg (faster-whisper decodes through PyAV's bundled FFmpeg). They are installed only via an opt-in `voice` extra and a Dockerfile build argument, so the default image, CI, and `docker compose up` are unchanged.
+Both local runtimes are chosen to avoid torch (CTranslate2 and onnxruntime respectively) and to avoid a system ffmpeg (faster-whisper decodes through PyAV's bundled FFmpeg). They live in a `voice` extra behind a Dockerfile build argument: the compose api image installs it by default (so `docker compose up` gives working voice with no key), the worker image never does, and CI installs `.[dev]` only — so the test image and the suite are unchanged.
 
 Speech uses the espeak-free stack — `NeuML/kokoro-base-onnx` (Apache-2.0) with `ttstokenizer` for grapheme-to-phoneme — rather than the `kokoro-onnx` package. The plan had leaned toward `kokoro-onnx` for its smoother packaging and treated its espeak-ng (GPL) dependency as academic for a private tool; in practice its bundled macOS build has a build-machine data path compiled in and exits the process on first use, which settled the question. The espeak-free path also happens to be the cleaner license story. `ttstokenizer` needs one NLTK data pack (a POS tagger for English G2P), fetched into the same models directory on first use.
 
@@ -32,7 +32,7 @@ This reverses ADR-009's deferral for audio. ADR-009's reasoning — don't add a 
 
 ### 3. One degradation seam, per capability
 
-`app/audio/dependencies.py` is the only place "is this capability on?" is decided. Each capability has one setting (`TRANSCRIPTION_BACKEND`, `SPEECH_BACKEND`), independent of the other, defaulting to off. A selected backend whose prerequisites are missing — no `OPENAI_API_KEY`, or the `voice` extra not installed — resolves to off. Endpoints turn "off" into a 503 whose detail never names a backend; `GET /voice/capabilities` reports booleans so the UI never renders a control that would 503; the *reason* a capability is off is logged once at startup and nowhere else.
+`app/audio/dependencies.py` is the only place "is this capability on?" is decided. Each capability has one setting (`TRANSCRIPTION_BACKEND`, `SPEECH_BACKEND`), independent of the other, defaulting to `local` — the free backend — so a fresh checkout works out of the box; the compose build installs the runtimes into the api image by default and the models are warmed in a background task at startup. In CI and in a bare `pip install -e ".[dev]"` the runtimes are absent and both resolve to off. A selected backend whose prerequisites are missing — no `OPENAI_API_KEY`, or the `voice` extra not installed — resolves to off. Endpoints turn "off" into a 503 whose detail never names a backend; `GET /voice/capabilities` reports booleans so the UI never renders a control that would 503; the *reason* a capability is off is logged once at startup and nowhere else.
 
 ### 4. Audio is a convenience layer; text stays canonical
 
@@ -65,6 +65,6 @@ The read-aloud endpoint is a `StreamingResponse`, and the first chunk is pulled 
 - Two new provider protocols and their fakes; the `LLMProvider` interface is untouched.
 - New optional `Settings` fields; nothing is required for any non-audio feature, and CI runs with every capability off.
 - The `openai` package, a dependency since Phase 2, gains its first real consumer. `OPENAI_API_KEY` is now meaningful.
-- An opt-in `voice` extra and `INSTALL_VOICE` build argument; the default image is unchanged.
+- A `voice` extra and `INSTALL_VOICE` build argument, on by default for the api image, off for the worker and CI.
 - ADR-009 remains accepted for text LLMs. Its "revisit as a Phase 7+ stretch" clause is exercised here for audio specifically.
 - The plan's Phase 8 non-goals list is amended: self-hosted model serving is in scope; realtime speech-to-speech, barge-in, a conversational tutor, voice control for MCQ, diarization, and durable audio storage remain out.

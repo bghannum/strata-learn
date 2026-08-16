@@ -275,3 +275,26 @@ def test_local_status_reports_on_only_when_the_runtime_imports(monkeypatch, fake
     assert transcription_status().backend == "local"
     assert speech_status().enabled is False
     assert "voice" in (speech_status().reason or "")
+
+
+async def test_warm_up_loads_only_enabled_local_models_and_never_raises(monkeypatch, fake_faster_whisper) -> None:
+    from app.audio.dependencies import warm_local_backends
+    from app.config import settings
+
+    # Transcription local + runtime present -> warmed. Speech local but its
+    # runtime absent -> resolves off, so it's skipped, not attempted.
+    monkeypatch.setattr(settings, "transcription_backend", "local")
+    monkeypatch.setattr(settings, "speech_backend", "local")
+    await warm_local_backends()
+    assert len(fake_faster_whisper.constructed) == 1
+
+    # A failing loader is logged, never raised — the app must come up.
+    class Boom:
+        def __init__(self, *a, **k):
+            raise RuntimeError("no weights for you")
+
+    monkeypatch.setattr(sys.modules["faster_whisper"], "WhisperModel", Boom)
+    from app.audio import local_backend
+
+    monkeypatch.setattr(local_backend.LocalTranscriptionProvider, "_models", {})
+    await warm_local_backends()  # does not raise

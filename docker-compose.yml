@@ -28,11 +28,12 @@ services:
   api:
     build:
       context: ./backend
-      # Phase 8 (ADR-010): the self-hosted audio backends are opt-in at build
-      # time. `INSTALL_VOICE=true docker compose build api` carries them; the
-      # default image doesn't. Set the matching *_BACKEND=local in .env.
+      # Phase 8 (ADR-010): the self-hosted audio backends ship in the api
+      # image by default so voice works out of the box with no key. Set
+      # INSTALL_VOICE=false in .env for a slimmer image (and *_BACKEND to
+      # openai or blank).
       args:
-        INSTALL_VOICE: ${INSTALL_VOICE:-false}
+        INSTALL_VOICE: ${INSTALL_VOICE:-true}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./backend/app:/app/app
@@ -60,7 +61,12 @@ services:
         condition: service_healthy
 
   worker:
-    build: ./backend
+    build:
+      context: ./backend
+      # The worker never touches audio — keep its image slim regardless of
+      # what the api's INSTALL_VOICE is set to.
+      args:
+        INSTALL_VOICE: "false"
     command: arq app.worker.tasks.WorkerSettings
     volumes:
       - ./backend/app:/app/app

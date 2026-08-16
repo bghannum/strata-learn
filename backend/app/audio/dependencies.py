@@ -140,3 +140,32 @@ def describe_backends() -> list[str]:
         else:
             lines.append(f"voice.{name} disabled reason={status.reason!r}")
     return lines
+
+
+async def warm_local_backends() -> None:
+    """Loads (and on a cold cache, downloads) whichever local models are
+    configured, in a worker thread, off the startup path. Called from
+    app/main.py's lifespan as a background task: the API is serving before
+    this finishes, and a request that arrives first simply triggers the
+    same lazy load itself. Any failure is logged, never fatal — the lazy
+    path will surface a real error to the request that needs it."""
+    import asyncio
+    import logging
+
+    logger = logging.getLogger("strata.voice")
+    for name, status, factory in (
+        ("transcription", transcription_status(), get_transcription_provider),
+        ("speech", speech_status(), get_speech_provider),
+    ):
+        if not status.enabled or status.backend != "local":
+            continue
+        provider = factory()
+        loader = getattr(provider, "_load", None)
+        if loader is None:
+            continue
+        logger.info("voice.%s warming local model=%s in the background", name, status.model)
+        try:
+            await asyncio.to_thread(loader)
+            logger.info("voice.%s warm model=%s", name, status.model)
+        except Exception as exc:  # noqa: BLE001 — a warm-up must never take the app down
+            logger.warning("voice.%s warm-up failed (%s: %s); will retry lazily on first use", name, type(exc).__name__, exc)

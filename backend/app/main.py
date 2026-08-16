@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -8,10 +9,21 @@ from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 
 from app.api import attempts, auth, quizzes, repos, study_guides, voice
-from app.audio.dependencies import describe_backends
+from app.audio.dependencies import describe_backends, warm_local_backends
 from app.config import settings
 
 logger = logging.getLogger("strata")
+
+# uvicorn configures only its own loggers; the root stays at WARNING, so the
+# app's INFO records (voice backend status at startup, per-call audio
+# metering under "strata.voice") were silently dropped in the container.
+# One handler on the "strata" parent, added only if nothing else has
+# configured it (pytest's caplog, a future logging config), and INFO on.
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s:     %(name)s: %(message)s"))
+    logger.addHandler(_handler)
+logger.setLevel(logging.INFO)
 
 
 @asynccontextmanager
@@ -23,7 +35,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # place "I set SPEECH_BACKEND=local and nothing happened" gets answered.
     for line in describe_backends():
         logger.info(line)
+    # Local models load in the background so the first read-aloud click
+    # isn't the one that waits on a cold download. Fire-and-forget; the
+    # task is cancelled with the loop on shutdown.
+    warm_task = asyncio.create_task(warm_local_backends()) if settings.voice_warm_on_startup else None
     yield
+    if warm_task is not None and not warm_task.done():
+        warm_task.cancel()
 
 
 app = FastAPI(title="Strata Learn API", lifespan=lifespan)

@@ -60,13 +60,21 @@ class Settings(BaseSettings):
 
     # --- Phase 8: voice (ADR-010) ---
     #
-    # One switch per capability, independent of each other, `None` = off. A
-    # selected backend whose prerequisites are missing (no OPENAI_API_KEY, or
-    # the `voice` extra not installed for `local`) also resolves to off — see
-    # app/audio/dependencies.py, which is the single place that decision is
-    # made. Nothing here is required for any non-audio feature.
-    transcription_backend: AudioBackend | None = None
-    speech_backend: AudioBackend | None = None
+    # One switch per capability, independent of each other, `None` = off.
+    # Both default to "local" so the app works out of the box with no key
+    # and no bill; the compose build installs the runtimes by default
+    # (INSTALL_VOICE) and weights download on first use. A selected backend
+    # whose prerequisites are missing (no OPENAI_API_KEY, or the `voice`
+    # extra not installed for `local` — which is the case in CI and in a
+    # bare `pip install -e ".[dev]"`) resolves to off with the reason in
+    # the startup log — see app/audio/dependencies.py, the single place that
+    # decision is made. Nothing here is required for any non-audio feature.
+    transcription_backend: AudioBackend | None = "local"
+    speech_backend: AudioBackend | None = "local"
+    # Load (and on a cold cache, download) the local models in the
+    # background at startup, so the first read-aloud click isn't the one that
+    # waits on a 300 MB fetch. Off in tests.
+    voice_warm_on_startup: bool = True
 
     openai_transcription_model: str = "gpt-4o-mini-transcribe"
     openai_speech_model: str = "gpt-4o-mini-tts"
