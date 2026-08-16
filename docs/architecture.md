@@ -170,7 +170,8 @@ The worker commits final Layer B rows with `generating` atomically, and the stud
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness response |
-| `POST` | `/auth/register` | Create the (single-tenant, secret-gated) account and start a session |
+| `GET` | `/auth/status` | Unauthenticated: whether the single account exists yet, and whether setup must present `REGISTRATION_SECRET` — routes a fresh install to first-run setup |
+| `POST` | `/auth/register` | Create the single-tenant account and start a session; gated by `REGISTRATION_SECRET` only when that is set |
 | `POST` | `/auth/login` | Start a session for an existing account |
 | `POST` | `/auth/logout` | End the current session |
 | `GET` | `/auth/me` | Fetch the logged-in user |

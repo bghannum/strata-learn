@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Navigate, Routes, Route } from 'react-router-dom'
 import Dashboard from './pages/Dashboard'
 import AddRepo from './pages/AddRepo'
 import RepoDetail from './pages/RepoDetail'
@@ -6,7 +6,7 @@ import StudyGuideView from './pages/StudyGuideView'
 import QuizTaker from './pages/QuizTaker'
 import AttemptResults from './pages/AttemptResults'
 import Login from './pages/Login'
-import Register from './pages/Register'
+import Setup from './pages/Setup'
 import AppLayout from './components/AppLayout'
 import { AuthProvider } from './auth/AuthContext'
 
@@ -16,7 +16,9 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
+          <Route path="/setup" element={<Setup />} />
+          {/* The old registration URL, kept so a bookmarked link still lands somewhere sensible. */}
+          <Route path="/register" element={<Navigate to="/setup" replace />} />
           <Route element={<AppLayout />}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/repos/new" element={<AddRepo />} />

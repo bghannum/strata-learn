@@ -32,13 +32,16 @@ class Settings(BaseSettings):
     # ADR-007's single-tenant lockout only closes registration *after* the
     # first account exists — on a freshly reachable deployment, whoever hits
     # POST /auth/register first (not necessarily the operator) permanently
-    # owns the app. Requiring this out-of-band secret in the request body
+    # owns the app. When this is set, the request body must carry it, which
     # closes that race (found via Codex's Phase 4b pre-push review, round
-    # 3). Reusing the slot originally reserved for session signing, which
-    # went unused once sessions ended up DB-backed rather than signed
-    # (see app/auth/session.py) — same "operator must change this before a
-    # real deployment" placeholder value either way.
-    registration_secret: str = "change-me"
+    # 3). Blank — the default — means "not required": on localhost, the
+    # first person to reach the app *is* the operator, and demanding a value
+    # copied out of .env was the one thing standing between `docker compose
+    # up` and a usable app. Set it before exposing the app beyond localhost;
+    # it belongs on the productionization checklist with CSRF and login
+    # rate limiting. GET /auth/status tells the frontend which mode is
+    # active so the setup form only asks for it when it matters.
+    registration_secret: str = ""
     cors_origins: list[str] = ["http://localhost:5173"]
 
     anthropic_api_key: str | None = None

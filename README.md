@@ -11,7 +11,7 @@ Phases 0 through 8 are complete. Phases 0 through 5 built the core:
 - Redis/arq background processing and WebSocket progress;
 - Anthropic-backed Layer B module summaries, architecture-pattern detection, and trade-off extraction;
 - citation-grounded study guide generation (Overview, Architecture, Trade-offs, Glossary, Deep-Dives) plus a Mermaid architecture diagram, served via `GET /repos/{id}/study-guide`;
-- a working frontend: register/log in, add a repo, watch it index live, and read the generated study guide with inline diagrams and clickable citations, all scoped to the logged-in user via cookie-based sessions;
+- a working frontend: first-run account setup and login, add a repo, watch it index live, and read the generated study guide with inline diagrams and clickable citations, all scoped to the logged-in user via cookie-based sessions;
 - quiz generation (MCQ + short-answer questions, grounded in the study guide's own citations — short answer replaced fill-in-the-blank after Phase 8, so a quiz asks *why* and *how* in a sentence or three, graded by an LLM judge against a rubric of key points, rather than "guess the blanked word") and taking, with per-answer grading/feedback (either immediate or deferred to the end of the quiz, chosen per quiz), Previous navigation, retakes, and a results view showing each question's submitted answer, a model answer, and which key points landed.
 
 Phase 5.5 (UI design integration) applied the checked-in Organic mockup across every screen — shared primitives, tokens, and light-only styling replacing the earlier default Tailwind look — plus a real reindex/retry action for a failed run.
@@ -22,7 +22,7 @@ Phase 7 (versioning and mastery) added staleness detection against a repository'
 
 Phase 8 (voice learning) adds read-aloud for study-guide sections and quiz feedback, and spoken answers for written questions — transcribed into an editable transcript the learner confirms before it's graded through the ordinary path. Each capability sits behind its own provider protocol with an in-process self-hosted backend (faster-whisper; Kokoro via ONNX) *and* a hosted OpenAI one, selected per capability by `TRANSCRIPTION_BACKEND` / `SPEECH_BACKEND`. **Local is the default**, so voice works out of the box with no key and no bill: the api image ships the runtimes, and the models (~500 MB) download on first start into a named volume while the API is already serving. Set `INSTALL_VOICE=false` for a slimmer image, or point either switch at `openai` with an `OPENAI_API_KEY`. `./scripts/voice-eval` compares the transcription backends on this repository's own vocabulary and writes [a committed report](docs/history/voice-backend-evaluation.md). See [ADR-010](docs/adr/ADR-010-voice-providers-and-self-hosted-backends.md) for why both backends, and the deliberate reversal of the original hosted-only scope.
 
-The remaining roadmap phase adds drawing questions (Phase 9, deferred from its original Phase 6 slot).
+With first-run auth in place — a fresh install lands on "Set up your account" with no secret to copy out of `.env`, sessions last 30 days, and `./scripts/reset-password` recovers a forgotten password without wiping the database — the MVP is complete. Drawing questions (Phase 9, deferred from its original Phase 6 slot) are deferred scope, not a remaining milestone; [ADR-005](docs/adr/ADR-005-drawing-question-graph-data.md) keeps the design if it's ever picked up.
 
 Phase-level progress lives in [GitHub Milestones](https://github.com/bghannum/strata-learn/milestones); actionable and deferred work lives in [GitHub Issues](https://github.com/bghannum/strata-learn/issues).
 
@@ -52,8 +52,7 @@ OpenAI support remains part of the provider-abstraction plan, but only the Anthr
 
 ```bash
 cp .env.example .env
-# Set ANTHROPIC_API_KEY before indexing, and replace the default
-# REGISTRATION_SECRET before creating the single account.
+# Set ANTHROPIC_API_KEY before indexing. Nothing else is required.
 docker compose up --build
 ```
 
@@ -68,9 +67,9 @@ open http://localhost:5173
 
 Add a repository from the Dashboard, watch it index, and open the generated study guide once it's ready. Interactive API documentation is available at `http://localhost:8000/docs`.
 
-On the first visit, register the app's single account using the `REGISTRATION_SECRET` from `.env`. Registration closes permanently after that account is created; later visits use the normal login flow.
+The first visit lands on **Set up your account**: pick an email and password, and that's the app's single account (ADR-007). Setup closes permanently once it exists; later visits use the normal login flow, and a session lasts 30 days unless you log out. Forgot the password? `./scripts/reset-password you@example.com` sets a new one and signs out every open session — there's deliberately no email-based reset, since shell access to the install is the only proof it's you. If you ever expose the app beyond localhost, set `REGISTRATION_SECRET` in `.env` first; the setup form then requires it, so a stranger who reaches a fresh install before you can't claim the account.
 
-The API and frontend containers hot-reload from the mounted source, but the **worker does not** — arq loads the code once at start. After changing anything under `app/quizzing/`, `app/generation/`, `app/semantics/`, or `app/worker/`, run `docker compose restart worker` or the next indexing/quiz job will run the old code.
+The API and frontend containers hot-reload from the mounted source, but the **worker does not** — arq loads the code once at start. After changing anything under `app/quizzing/`, `app/generation/`, `app/semantics/`, or `app/worker/`, run `docker compose restart worker` or the next indexing/quiz job will run the old code. Changes to `.env` need more than a restart: `restart` reuses the container's original environment, so run `docker compose up -d api worker` to recreate the containers with the new values.
 
 Stop the stack with `docker compose down`. Add `-v` only when you intentionally want to delete the local PostgreSQL volume.
 

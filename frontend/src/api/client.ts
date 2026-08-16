@@ -161,13 +161,31 @@ export interface User {
   created_at: string
 }
 
-export function register(email: string, password: string, registrationSecret: string): Promise<User> {
+export interface AuthStatus {
+  /** No account exists yet — send the visitor to /setup, not /login. */
+  setup_required: boolean
+  /** The server has REGISTRATION_SECRET set, so setup must ask for it. */
+  secret_required: boolean
+}
+
+// Unauthenticated: it's what decides where an unauthenticated visitor goes.
+export function getAuthStatus(): Promise<AuthStatus> {
+  return request('/auth/status')
+}
+
+// registrationSecret is only sent when the server asks for it (AuthStatus
+// above); the backend ignores it otherwise.
+export function register(email: string, password: string, registrationSecret?: string): Promise<User> {
   return request(
     '/auth/register',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, registration_secret: registrationSecret }),
+      body: JSON.stringify({
+        email,
+        password,
+        ...(registrationSecret !== undefined ? { registration_secret: registrationSecret } : {}),
+      }),
     },
     { notifyOn401: false },
   )
