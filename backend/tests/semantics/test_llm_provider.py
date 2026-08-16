@@ -10,8 +10,10 @@ from pydantic import BaseModel
 from app.semantics.llm_provider import (
     AnthropicProvider,
     FakeLLMProvider,
+    LLMOutputError,
     LLMResponse,
     Message,
+    require_parsed,
 )
 
 
@@ -115,6 +117,58 @@ async def test_anthropic_provider_complete_with_schema() -> None:
 def test_anthropic_provider_empty_api_key_raises() -> None:
     with pytest.raises(ValueError, match="non-empty api_key"):
         AnthropicProvider(api_key="")
+
+
+class _OtherOutput(BaseModel):
+    other: str
+
+
+def test_require_parsed_returns_the_parsed_output() -> None:
+    parsed = _ExtractedOutput(value="x")
+    response = LLMResponse(text="", parsed=parsed, model="fake", stop_reason="end_turn", usage={})
+
+    assert require_parsed(response, _ExtractedOutput) is parsed
+
+
+def test_require_parsed_raises_with_stop_reason_when_output_is_missing() -> None:
+    # The real-world case this exists for: .parse() yields parsed_output=None
+    # when generation is cut off mid-JSON by the max_tokens ceiling.
+    response = LLMResponse(
+        text="", parsed=None, model="claude-sonnet-5", stop_reason="max_tokens", usage={"output_tokens": 8192}
+    )
+
+    with pytest.raises(LLMOutputError) as exc_info:
+        require_parsed(response, _ExtractedOutput)
+
+    message = str(exc_info.value)
+    # The bare AssertionError this replaced named neither the schema nor the
+    # reason, which is what made the failure undiagnosable from the traceback.
+    assert "_ExtractedOutput" in message
+    assert "max_tokens" in message
+    assert "cut off mid-object" in message
+    assert exc_info.value.stop_reason == "max_tokens"
+    assert exc_info.value.output_tokens == 8192
+    assert exc_info.value.schema is _ExtractedOutput
+
+
+def test_require_parsed_rejects_a_different_schema_instance() -> None:
+    response = LLMResponse(
+        text="", parsed=_OtherOutput(other="x"), model="fake", stop_reason="end_turn", usage={}
+    )
+
+    with pytest.raises(LLMOutputError, match="_ExtractedOutput"):
+        require_parsed(response, _ExtractedOutput)
+
+
+def test_require_parsed_error_survives_missing_usage_keys() -> None:
+    response = LLMResponse(text="", parsed=None, model="fake", stop_reason="refusal", usage={})
+
+    with pytest.raises(LLMOutputError) as exc_info:
+        require_parsed(response, _ExtractedOutput)
+
+    assert exc_info.value.output_tokens is None
+    # Non-truncation stop reasons are reported as-is, without the max_tokens hint.
+    assert "cut off mid-object" not in str(exc_info.value)
 
 
 def _response(marker: str) -> LLMResponse:

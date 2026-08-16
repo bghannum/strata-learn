@@ -9,13 +9,16 @@ valid Mermaid syntax regardless of the LLM's output.
 """
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 
 from pydantic import BaseModel
 
-from app.semantics.llm_provider import LLMProvider, Message
+from app.semantics.llm_provider import LLMOutputError, LLMProvider, Message, require_parsed
 from app.semantics.prompts import load_prompt
+
+logger = logging.getLogger(__name__)
 
 # Component diagrams are for human eyes, not an LLM context window — capped
 # far smaller than pattern_detector.py's MAX_GRAPH_NODES/EDGES (500/1000),
@@ -134,8 +137,15 @@ async def build_component_diagram(
         messages=[Message(role="user", content=input_text)],
         response_schema=DiagramLabelOutput,
     )
-    output = response.parsed
-    assert isinstance(output, DiagramLabelOutput)
+    try:
+        output = require_parsed(response, DiagramLabelOutput)
+    except LLMOutputError as exc:
+        # Only the labels come from the model — nodes and edges are derived
+        # from the dependency graph. Every path already falls back to
+        # _fallback_label below, so an empty label set still renders a
+        # correct, complete diagram with path-derived names.
+        logger.warning("Falling back to path-derived diagram labels: %s", exc)
+        output = DiagramLabelOutput(labels=[])
 
     kept_set = set(file_paths)
     raw_labels = {item.file_path: item.label for item in output.labels if item.file_path in kept_set}

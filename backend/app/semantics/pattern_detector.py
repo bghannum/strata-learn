@@ -8,14 +8,17 @@ not the LLM" split used in module_summarizer.py.
 """
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel
 
 from app.db.models import CodeUnit, UnitType
-from app.semantics.llm_provider import LLMProvider, Message
+from app.semantics.llm_provider import LLMOutputError, LLMProvider, Message, require_parsed
 from app.semantics.prompts import load_prompt
+
+logger = logging.getLogger(__name__)
 
 # A hard cap on the dependency graph's size before it's serialized into the
 # prompt — found via Codex's Phase 2 pre-push review: ingestion has no
@@ -196,8 +199,14 @@ async def detect_pattern(
         messages=[Message(role="user", content=input_text)],
         response_schema=PatternClaimOutput,
     )
-    output = response.parsed
-    assert isinstance(output, PatternClaimOutput)
+    try:
+        output = require_parsed(response, PatternClaimOutput)
+    except LLMOutputError as exc:
+        # None is already this function's "no confident pattern" answer, so
+        # every caller handles it — reusing it here costs the pattern claim
+        # and nothing else.
+        logger.warning("No pattern claim for this snapshot: %s", exc)
+        return None
 
     evidence: list[dict] = []
     for item in output.evidence:

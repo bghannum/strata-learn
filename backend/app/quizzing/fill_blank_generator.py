@@ -7,13 +7,16 @@ ungradable/unanswerable, same "don't persist unverified" call as
 mcq_generator.py's correct_index check.
 """
 
+import logging
 from dataclasses import dataclass
 
 from pydantic import BaseModel
 
 from app.quizzing.seeds import QuestionSeed
-from app.semantics.llm_provider import LLMProvider, Message
+from app.semantics.llm_provider import LLMOutputError, LLMProvider, Message, require_parsed
 from app.semantics.prompts import load_prompt
+
+logger = logging.getLogger(__name__)
 
 BLANK_MARKER = "___"
 
@@ -57,8 +60,11 @@ async def generate_fill_blank_questions(llm: LLMProvider, seeds: list[QuestionSe
             messages=[Message(role="user", content=input_text)],
             response_schema=FillBlankOutput,
         )
-        output = response.parsed
-        assert isinstance(output, FillBlankOutput)
+        try:
+            output = require_parsed(response, FillBlankOutput)
+        except LLMOutputError as exc:
+            logger.warning("Skipping fill-blank for seed %s: %s", seed.claim_excerpt[:60], exc)
+            continue
 
         if not _valid(output):
             continue

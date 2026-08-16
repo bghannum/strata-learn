@@ -9,13 +9,16 @@ and dropping it would silently remove files from the study guide.
 """
 
 import json
+import logging
 from dataclasses import dataclass
 
 from pydantic import BaseModel
 
 from app.analysis.subsystems import ROOT_KEY, SubsystemPartition
-from app.semantics.llm_provider import LLMProvider, Message
+from app.semantics.llm_provider import LLMOutputError, LLMProvider, Message, require_parsed
 from app.semantics.prompts import load_prompt
+
+logger = logging.getLogger(__name__)
 
 # Per-subsystem cap on files named in the prompt. The partition itself is
 # already bounded (MAX_SUBSYSTEMS), but a single subsystem is not — a repo with
@@ -83,8 +86,16 @@ async def name_subsystems(
         messages=[Message(role="user", content=input_text)],
         response_schema=SubsystemNameOutput,
     )
-    output = response.parsed
-    assert isinstance(output, SubsystemNameOutput)
+    try:
+        output = require_parsed(response, SubsystemNameOutput)
+    except LLMOutputError as exc:
+        # Unlike the pattern claim, the subsystem *set* is deterministic —
+        # partitioning already produced it, and only the display names came
+        # from the model. Dropping to the path-derived fallback name for every
+        # partition keeps the structure (and everything keyed off it, like
+        # mastery tracking) intact instead of failing the run.
+        logger.warning("Falling back to path-derived subsystem names: %s", exc)
+        output = SubsystemNameOutput(subsystems=[])
 
     # Keyed by the partition's own key, and only for keys that were actually
     # sent — a model that invents a subsystem, merges two, or renames a key

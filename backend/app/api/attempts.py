@@ -33,7 +33,7 @@ from app.db.models import (
 from app.db.session import get_session
 from app.quizzing.grading.fill_blank_grader import FillBlankLLMUnavailableError, grade_fill_blank
 from app.quizzing.grading.mcq_grader import grade_mcq
-from app.semantics.llm_provider import AnthropicProvider, LLMProvider
+from app.semantics.llm_provider import AnthropicProvider, LLMOutputError, LLMProvider
 
 router = APIRouter(prefix="/attempts", tags=["attempts"])
 
@@ -367,6 +367,11 @@ async def submit_answer(
             score, feedback = await grade_fill_blank(llm, question, body.answer_text)
         except FillBlankLLMUnavailableError as exc:
             raise HTTPException(503, "concept-mode grading is unavailable until an LLM provider is configured") from exc
+        except LLMOutputError as exc:
+            # The judge returned nothing gradable (typically a truncated
+            # response). 503 rather than a fabricated score: no submission is
+            # written, so the same answer can simply be sent again.
+            raise HTTPException(503, "concept-mode grading did not return a usable result; please retry") from exc
 
     submission = existing or AnswerSubmission(attempt_id=attempt_id, question_id=question_id)
     submission.selected_index = body.selected_index

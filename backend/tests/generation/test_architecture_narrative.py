@@ -241,3 +241,20 @@ async def test_runs_with_subsystems_but_no_pattern_claim() -> None:
     assert narrative is not None
     assert narrative.overview == "Still explainable."
     assert "none detected" in llm.calls[0].messages[0].content
+
+
+async def test_returns_none_when_output_is_truncated() -> None:
+    # Unlike subsystem names or diagram labels, there's no deterministic
+    # substitute — the narrative *is* the model's prose. None is already the
+    # declared "no narrative" return, so the study guide renders without the
+    # why-sections rather than the whole run failing.
+    llm = FakeLLMProvider(
+        [LLMResponse(text="", parsed=None, model="fake-model", stop_reason="max_tokens", usage={"output_tokens": 8192})]
+    )
+
+    narrative = await build_architecture_narrative(
+        llm, _pattern_claim(), [], [_tradeoff_card("queue the work")], [], [_module_unit("app/worker.py")]
+    )
+
+    assert narrative is None
+    assert len(llm.calls) == 1

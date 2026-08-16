@@ -5,14 +5,17 @@ module unit's own line range (Ground Rule #3: every LLM claim needs a citation).
 """
 
 import json
+import logging
 from dataclasses import dataclass
 
 from pydantic import BaseModel
 
 from app.db.models import CodeUnit
 from app.semantics.chunking import ModuleChunk
-from app.semantics.llm_provider import LLMProvider, Message
+from app.semantics.llm_provider import LLMOutputError, LLMProvider, Message, require_parsed
 from app.semantics.prompts import load_prompt
+
+logger = logging.getLogger(__name__)
 
 
 class ModuleSummaryOutput(BaseModel):
@@ -82,8 +85,16 @@ async def summarize_modules(
             messages=[Message(role="user", content=input_text)],
             response_schema=ModuleSummaryOutput,
         )
-        output = response.parsed
-        assert isinstance(output, ModuleSummaryOutput)
+        try:
+            output = require_parsed(response, ModuleSummaryOutput)
+        except LLMOutputError as exc:
+            # Summaries are per-module and independent, so one unusable
+            # response costs exactly that module's summary. Downstream
+            # consumers already tolerate a missing entry: subsystem naming
+            # reads module_purposes with .get(), and the diagram labeler falls
+            # back to a path-derived label.
+            logger.warning("Skipping module summary for %s: %s", chunk.file_path, exc)
+            continue
 
         results.append(
             ModuleSummaryResult(

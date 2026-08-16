@@ -549,3 +549,41 @@ async def test_submit_answer_identical_retry_does_not_regrade(pending_repo_facto
         assert len(fake_llm.calls) == 1  # not 2 — would have raised on a second call anyway
     finally:
         app.dependency_overrides.pop(get_llm_provider, None)
+
+
+async def test_submit_fill_blank_truncated_judge_output_returns_503_and_persists_nothing(
+    pending_repo_factory,
+) -> None:
+    # A truncated judge response used to raise a bare AssertionError (500).
+    # It must not become a recorded score in either direction, so: 503, no
+    # AnswerSubmission written, and the same answer can simply be resent.
+    fake_llm = FakeLLMProvider(
+        [LLMResponse(text="", model="fake-model", stop_reason="max_tokens", usage={"output_tokens": 8192}, parsed=None)]
+    )
+    app.dependency_overrides[get_llm_provider] = lambda: fake_llm
+    try:
+        with TestClient(app) as client:
+            user = register_test_user(client)
+            quiz_id, _mcq_id, fb_id = await _make_quiz_with_questions(pending_repo_factory, uuid.UUID(user["id"]))
+            async with async_session_factory() as session:
+                question = await session.get(Question, fb_id)
+                assert question is not None
+                question.fill_blank_mode = FillBlankMode.concept
+                session.add(question)
+                await session.commit()
+            attempt = client.post("/attempts", json={"quiz_id": str(quiz_id)}).json()
+
+            response = client.patch(
+                f"/attempts/{attempt['id']}/answers/{fb_id}", json={"answer_text": "some queueing thing"}
+            )
+
+        assert response.status_code == 503
+        assert "did not return a usable result" in response.json()["detail"]
+
+        async with async_session_factory() as session:
+            result = await session.exec(
+                select(AnswerSubmission).where(AnswerSubmission.question_id == fb_id)
+            )
+            assert result.all() == []
+    finally:
+        app.dependency_overrides.pop(get_llm_provider, None)

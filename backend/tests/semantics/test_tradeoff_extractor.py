@@ -307,3 +307,53 @@ def test_read_snippet_tolerates_non_utf8_bytes(tmp_path: Path) -> None:
 
     assert "x = 1" in snippet.text  # doesn't raise UnicodeDecodeError
     assert "�" in snippet.text  # the non-UTF-8 byte decodes to a replacement char
+
+
+async def test_extract_tradeoffs_skips_a_truncated_card_and_keeps_the_rest(tmp_path: Path) -> None:
+    # Regression: a max_tokens-truncated response left parsed=None, and the
+    # bare `assert isinstance(...)` turned that into an AssertionError that
+    # aborted the entire indexing run — discarding every completed stage.
+    # Trade-off cards are the largest Layer B output, so they truncate first.
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "app.py").write_text("import arq\n\n\ndef main():\n    pass\n")
+    (source_dir / "worker.py").write_text("import redis\n\n\ndef run():\n    pass\n")
+
+    code_units = [_module_unit("app.py", 5), _module_unit("worker.py", 5)]
+    candidates = identify_decision_points(
+        {
+            "nodes": [
+                {"id": "app.py", "kind": "file", "language": "python"},
+                {"id": "worker.py", "kind": "file", "language": "python"},
+            ],
+            "edges": [
+                {"source": "app.py", "target": "external:arq", "kind": "imports_external"},
+                {"source": "worker.py", "target": "external:redis", "kind": "imports_external"},
+            ],
+        },
+        code_units,
+        entry_points=[],
+    )
+    assert len(candidates) == 2
+
+    good = TradeoffCardOutput(
+        decision="use a broker",
+        alternatives_considered=["in-process"],
+        likely_reasoning="durability",
+        tradeoff_cost="another moving part",
+        confidence="medium",
+        evidence_refs=[EvidenceRef(file_path=candidates[1].file_path, line_start=1, line_end=5)],
+    )
+    llm = FakeLLMProvider(
+        [
+            LLMResponse(text="", parsed=None, model="fake-model", stop_reason="max_tokens", usage={"output_tokens": 8192}),
+            LLMResponse(text="", parsed=good, model="fake-model", stop_reason="end_turn", usage={}),
+        ]
+    )
+
+    results = await extract_tradeoffs(llm, candidates, source_dir, {"edges": []}, code_units)
+
+    # The truncated card is dropped; the surviving candidate still produces one.
+    assert len(results) == 1
+    assert results[0].decision == "use a broker"
+    assert len(llm.calls) == 2  # the failure did not short-circuit the loop

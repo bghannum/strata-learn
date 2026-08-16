@@ -90,3 +90,30 @@ async def test_summarize_modules_builds_result_from_parsed_output() -> None:
     assert "app/db.py" in call.messages[0].content
     assert "external:fastapi" in call.messages[0].content
     assert "app/other.py" not in call.messages[0].content
+
+
+async def test_summarize_modules_skips_a_truncated_summary_and_keeps_the_rest() -> None:
+    # One unusable response costs that module's summary only. Downstream
+    # consumers already tolerate a missing entry (subsystem_namer reads
+    # module_purposes with .get(); diagram_builder falls back to a path label).
+    chunks = [
+        ModuleChunk(file_path="app/main.py", module_unit=_module_unit("app/main.py", 42), units=[]),
+        ModuleChunk(file_path="app/db.py", module_unit=_module_unit("app/db.py", 10), units=[]),
+    ]
+    llm = FakeLLMProvider(
+        [
+            LLMResponse(text="", parsed=None, model="fake-model", stop_reason="max_tokens", usage={"output_tokens": 8192}),
+            LLMResponse(
+                text="",
+                parsed=ModuleSummaryOutput(purpose="db access", role_in_system="persistence", key_concepts=[]),
+                model="fake-model",
+                stop_reason="end_turn",
+                usage={},
+            ),
+        ]
+    )
+
+    results = await summarize_modules(llm, chunks, {"edges": []})
+
+    assert [r.file_path for r in results] == ["app/db.py"]
+    assert len(llm.calls) == 2

@@ -155,3 +155,20 @@ async def test_one_call_for_the_whole_partition() -> None:
     await name_subsystems(llm, partitions, {})
 
     assert len(llm.calls) == 1
+
+
+async def test_truncated_response_falls_back_to_path_derived_names() -> None:
+    # The subsystem *set* is deterministic — partitioning produced it, and only
+    # the display names came from the model. A truncated response must not fail
+    # the run and take the structure (and everything keyed off it) with it.
+    partitions = [_partition("app/semantics", ("app/semantics/a.py",)), _partition("app/api", ("app/api/b.py",))]
+    llm = FakeLLMProvider(
+        [LLMResponse(text="", parsed=None, model="fake-model", stop_reason="max_tokens", usage={"output_tokens": 8192})]
+    )
+
+    named = await name_subsystems(llm, partitions, {})
+
+    assert [n.key for n in named] == ["app/semantics", "app/api"]
+    assert [n.name for n in named] == ["Semantics", "Api"]
+    assert all(n.role == "" for n in named)
+    assert [n.file_paths for n in named] == [("app/semantics/a.py",), ("app/api/b.py",)]

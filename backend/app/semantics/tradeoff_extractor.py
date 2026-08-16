@@ -13,6 +13,7 @@ always prepended to evidence_refs, so every card has at least one citation
 that's true by construction, independent of what the LLM did.
 """
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -20,8 +21,10 @@ from typing import Literal
 from pydantic import BaseModel
 
 from app.db.models import CodeUnit, UnitType
-from app.semantics.llm_provider import LLMProvider, Message
+from app.semantics.llm_provider import LLMOutputError, LLMProvider, Message, require_parsed
 from app.semantics.prompts import load_prompt
+
+logger = logging.getLogger(__name__)
 
 # JUDGMENT CALL — docs/design/original-project-plan.md doesn't specify how to identify "decision
 # points" to feed the trade-off extractor. This heuristic combines (a) files
@@ -220,8 +223,17 @@ async def extract_tradeoffs(
             messages=[Message(role="user", content=input_text)],
             response_schema=TradeoffCardOutput,
         )
-        output = response.parsed
-        assert isinstance(output, TradeoffCardOutput)
+        try:
+            output = require_parsed(response, TradeoffCardOutput)
+        except LLMOutputError as exc:
+            # One unparsable card is not worth discarding the whole indexing
+            # run — every earlier stage's work (clone, parse, module
+            # summaries) is already done and would be thrown away with it.
+            # Trade-off cards are the largest structured output in Layer B and
+            # so the likeliest to hit the max_tokens ceiling. Skipping matches
+            # the ungrounded-card policy below: drop rather than fake.
+            logger.warning("Skipping trade-off card for %s: %s", candidate.file_path, exc)
+            continue
 
         validated_refs = [
             ref.model_dump()

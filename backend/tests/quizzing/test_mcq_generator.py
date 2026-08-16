@@ -65,3 +65,27 @@ async def test_generate_mcq_questions_drops_single_choice_question() -> None:
     results = await generate_mcq_questions(llm, [_seed()])
 
     assert results == []
+
+
+async def test_generate_mcq_questions_skips_a_truncated_response() -> None:
+    # Same disposition as the invalid-correct_index drop: one seed that didn't
+    # yield a usable question shouldn't cost the whole quiz.
+    truncated = LLMResponse(text="", parsed=None, model="fake-model", stop_reason="max_tokens", usage={"output_tokens": 8192})
+    llm = FakeLLMProvider(
+        [
+            truncated,
+            _response(
+                MCQOutput(
+                    prompt="What does this module use for background jobs?",
+                    choices=["arq", "celery"],
+                    correct_index=0,
+                    explanation="arq is imported directly.",
+                )
+            ),
+        ]
+    )
+
+    results = await generate_mcq_questions(llm, [_seed(), _seed()])
+
+    assert len(results) == 1
+    assert len(llm.calls) == 2
