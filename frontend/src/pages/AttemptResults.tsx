@@ -4,12 +4,15 @@ import {
   ApiError,
   generateQuiz,
   getAttempt,
+  getFeedbackSpeech,
   getQuiz,
+  getVoiceCapabilities,
   isAbortError,
   pollQuiz,
   type AttemptResults,
   type Quiz,
 } from '../api/client'
+import ReadAloudButton from '../components/ReadAloudButton'
 import Button from '../components/ui/Button'
 import Tag from '../components/ui/Tag'
 
@@ -32,6 +35,17 @@ function AttemptResultsPage() {
   const [quiz, setQuiz] = useState<Quiz | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Same capability gate as StudyGuideView: no read-aloud control until the
+  // deployment says it can speak (ADR-010).
+  const [canSpeak, setCanSpeak] = useState(false)
+
+  useEffect(() => {
+    getVoiceCapabilities()
+      .then((caps) => setCanSpeak(caps.speech))
+      .catch(() => {
+        // Voice is an addition to a text-first flow; its absence is not an error.
+      })
+  }, [])
   const [retaking, setRetaking] = useState(false)
   const [retakeError, setRetakeError] = useState<string | null>(null)
   const pollControllerRef = useRef<AbortController | null>(null)
@@ -180,7 +194,19 @@ function AttemptResultsPage() {
                 </div>
               )}
 
-              {question.feedback && <p className="mb-3 text-sm leading-relaxed opacity-80">{question.feedback}</p>}
+              {question.feedback && (
+                <div className="mb-3">
+                  <p className="text-sm leading-relaxed opacity-80">{question.feedback}</p>
+                  {canSpeak && attemptId && (
+                    <div className="mt-1.5">
+                      <ReadAloudButton
+                        label={`feedback for question ${questionIndex + 1}`}
+                        fetchClip={() => getFeedbackSpeech(attemptId, question.question_id)}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
 
               <details className="rounded-2xl border border-organic-divider">
                 <summary className="cursor-pointer px-3.5 py-2.5 font-mono text-xs opacity-60">

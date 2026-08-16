@@ -1,9 +1,18 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import Markdown from 'react-markdown'
-import { ApiError, getStudyGuide, studyGuideExportUrl, type Citation, type StudyGuide } from '../api/client'
+import {
+  ApiError,
+  getSectionSpeech,
+  getStudyGuide,
+  getVoiceCapabilities,
+  studyGuideExportUrl,
+  type Citation,
+  type StudyGuide,
+} from '../api/client'
 import MermaidDiagram from '../components/MermaidDiagram'
 import CitationPanel from '../components/CitationPanel'
+import ReadAloudButton from '../components/ReadAloudButton'
 import { buttonClasses } from '../components/ui/buttonVariants'
 
 function truncate(text: string, max: number): string {
@@ -16,6 +25,18 @@ function StudyGuideView() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null)
+  // Whether this deployment can speak. Read once; no read-aloud control is
+  // rendered until it says yes, so a reader is never shown a button that
+  // 503s (ADR-010). A failed read just means no controls.
+  const [canSpeak, setCanSpeak] = useState(false)
+
+  useEffect(() => {
+    getVoiceCapabilities()
+      .then((caps) => setCanSpeak(caps.speech))
+      .catch(() => {
+        // Voice is an addition to a text-first flow; its absence is not an error.
+      })
+  }, [])
 
   useEffect(() => {
     if (!studyGuideId) return
@@ -80,6 +101,15 @@ function StudyGuideView() {
             className="border-b border-organic-divider py-5"
           >
             <summary className="cursor-pointer text-lg font-semibold">{section.title}</summary>
+
+            {canSpeak && (
+              <div className="mt-2">
+                <ReadAloudButton
+                  label={section.title}
+                  fetchClip={() => getSectionSpeech(guide.id, section.id)}
+                />
+              </div>
+            )}
 
             <div className="prose prose-sm mt-3 max-w-none">
               <Markdown>{section.content_md}</Markdown>
