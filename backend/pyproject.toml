@@ -48,6 +48,26 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.8",
 ]
+# Phase 8's self-hosted audio backends (ADR-010). Opt-in — CI installs
+# `.[dev]` only, so none of this ever enters the test image, and the api
+# image only carries it when built with INSTALL_VOICE=true. Both runtimes
+# are torch-free (CTranslate2, onnxruntime) and faster-whisper decodes
+# through PyAV's bundled FFmpeg, so no system packages are needed either.
+voice = [
+    "faster-whisper>=1.1",
+    "onnxruntime>=1.20",
+    # Espeak-free G2P for Kokoro (NeuML/kokoro-base-onnx, Apache-2.0). Not
+    # `kokoro-onnx`: that phonemizes through espeak-ng (GPL) and its macOS
+    # wheel exits the process on first use — see local_backend.py.
+    "ttstokenizer>=1.0",
+    "huggingface_hub>=0.25",
+    "numpy>=1.26",
+]
+# The word-error-rate evaluation harness (scripts/voice-eval). Kept out of
+# `dev` on purpose: it's a paid, deliberate script, not part of the suite.
+eval = [
+    "jiwer>=3.0",
+]
 
 [build-system]
 requires = ["hatchling"]

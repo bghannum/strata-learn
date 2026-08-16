@@ -26,7 +26,13 @@ services:
       retries: 10
 
   api:
-    build: ./backend
+    build:
+      context: ./backend
+      # Phase 8 (ADR-010): the self-hosted audio backends are opt-in at build
+      # time. `INSTALL_VOICE=true docker compose build api` carries them; the
+      # default image doesn't. Set the matching *_BACKEND=local in .env.
+      args:
+        INSTALL_VOICE: ${INSTALL_VOICE:-false}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./backend/app:/app/app
@@ -35,6 +41,9 @@ services:
       # Phase 2/3, whose only LLM calls run in the worker) — needs the same
       # docs/prompts/ mount the worker service already has below.
       - ./docs:/app/docs:ro
+      # Phase 8: weights for the local audio backends, downloaded on first
+      # use. A named volume so a rebuild doesn't re-fetch ~500 MB.
+      - voice_models:/app/.voice-models
     ports:
       - "8000:8000"
     env_file:
@@ -43,6 +52,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://strata:strata@postgres:5432/strata_learn
       REDIS_URL: redis://redis:6379/0
       PROMPTS_DIR: /app/docs/prompts
+      VOICE_MODELS_DIR: /app/.voice-models
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,3 +93,4 @@ services:
 
 volumes:
   postgres_data:
+  voice_models:

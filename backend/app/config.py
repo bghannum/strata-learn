@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     # on CPU for short clips; small.en roughly triples the latency, which is
     # where a request-path transcription stops being acceptable.
     local_whisper_model: str = "base.en"
+    # Where the local backends keep their weights. faster-whisper downloads
+    # into it on first use (Hugging Face cache layout); the Kokoro files are
+    # fetched into it by local_backend.py. A named volume under compose so a
+    # rebuild doesn't re-download ~500 MB.
+    voice_models_dir: Path = Path(__file__).resolve().parents[2] / ".voice-models"
+    local_speech_voice: str = "af_sarah"
 
     # Bytes are the enforcement boundary for a microphone upload; duration is
     # deliberately *not* measured server-side (MediaRecorder output is a live
