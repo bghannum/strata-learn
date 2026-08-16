@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Runs the Phase 8 voice-backend evaluation (ADR-010) and writes
+# docs/history/voice-backend-evaluation.md.
+#
+# Deliberate, not automatic — like scripts/codex-review. The local backend
+# is free and runs whenever the `voice` extra is installed. The hosted
+# backend is paid and runs only with --confirm-billing AND OPENAI_API_KEY.
+# Never part of `pytest -q`.
+#
+#   ./scripts/voice-eval
+#   ./scripts/voice-eval --confirm-billing
+#   ./scripts/voice-eval --whisper-model small.en
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root/backend"
+
+if [ -x ".venv/bin/python" ]; then
+  python=".venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  python="python3"
+else
+  echo "voice-eval: no python found" >&2
+  exit 1
+fi
+
+if ! "$python" -c "import faster_whisper" >/dev/null 2>&1; then
+  echo "voice-eval: the local backend's runtime is not installed in $python." >&2
+  echo "            pip install -e '.[voice,eval]'   (from backend/)" >&2
+  echo "            The hosted backend alone still runs with --confirm-billing." >&2
+fi
+if ! "$python" -c "import jiwer" >/dev/null 2>&1; then
+  echo "voice-eval: jiwer not installed — WER cross-check will be skipped. pip install -e '.[eval]'" >&2
+fi
+
+exec "$python" -m evaluation.voice.run "$@"
