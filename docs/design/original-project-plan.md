@@ -776,7 +776,9 @@ GET    /attempts/{id}                  # attempt detail with per-question feedba
 - [ ] **Checkpoint — read aloud:** play a real generated study-guide section and quiz explanation in the browser, verify streaming/playback controls and the AI-voice disclosure, and confirm another user cannot request its audio.
 - [ ] **Checkpoint — spoken answer:** record both a concept answer and a technical identifier, edit the returned transcript, submit it through the existing quiz flow, and confirm grading/results contain only the learner-approved text.
 
-**Explicit non-goals for Phase 8:** realtime speech-to-speech sessions, interruption/barge-in, a conversational repository tutor, voice control for MCQ/drawing interactions, speaker diarization, self-hosted Whisper/model serving, and durable audio storage. These can be evaluated only after the two bounded workflows demonstrate real value.
+**Explicit non-goals for Phase 8:** realtime speech-to-speech sessions, interruption/barge-in, a conversational repository tutor, voice control for MCQ/drawing interactions, speaker diarization, and durable audio storage. These can be evaluated only after the two bounded workflows demonstrate real value.
+
+> **Amended at Phase 8 kickoff (ADR-010):** self-hosted Whisper/model serving was originally listed here as a non-goal, and "hosted OpenAI services initially" was the scope. Both are reversed — each provider protocol gets a hosted *and* an in-process self-hosted backend, plus a word-error-rate evaluation comparing them. The reasoning is recorded in [ADR-010](../adr/ADR-010-voice-providers-and-self-hosted-backends.md); this file keeps the original text above as historical context.
 
 ---
 
